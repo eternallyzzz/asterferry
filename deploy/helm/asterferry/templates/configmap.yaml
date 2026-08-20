@@ -1,0 +1,11 @@
+{{- if .Values.config.content }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "asterferry.configMapName" . }}
+  labels:
+    {{- include "asterferry.labels" . | nindent 4 }}
+data:
+  {{ .Values.config.key | quote }}: |-
+    {{- .Values.config.content | nindent 4 }}
+{{- end }}

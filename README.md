@@ -38,6 +38,12 @@ Copyable templates are available in [examples/README.md](examples/README.md),
 replace the certificates, client CA, token, deployment-specific ALPN, and all
 sample addresses.
 
+Container deployment guides are available for
+[Docker](deploy/docker/README.md) and
+[Kubernetes](deploy/kubernetes/README.md). The Kubernetes package is a
+role-selectable [Helm Chart](deploy/helm/asterferry), and container images are
+published to `ghcr.io/eternallyzzz/asterferry` for version tags.
+
 The Gateway firewall must allow the QUIC UDP port and the configured reverse
 TCP/UDP ports. Management endpoints bind to loopback by default: Gateway uses
 `127.0.0.1:9090` and Agent uses `127.0.0.1:9091`.

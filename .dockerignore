@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.vscode
+*.exe
+*.log
+*.err
+*.key
+*.crt
+*.pem
+*.token
+secrets/
+tmp/

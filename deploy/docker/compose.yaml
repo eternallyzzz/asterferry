@@ -1,0 +1,57 @@
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${ASTERFERRY_IMAGE:-asterferry:local}
+    command: ["gateway", "-c", "/etc/asterferry/config.yaml"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "${ASTERFERRY_QUIC_PORT:-4433}:4433/udp"
+      - "${ASTERFERRY_REVERSE_WEB_PORT:-28080}:28080/tcp"
+      - "${ASTERFERRY_REVERSE_DNS_PORT:-21003}:21003/udp"
+    volumes:
+      - ${ASTERFERRY_GATEWAY_CONFIG:-./config/gateway.yaml}:/etc/asterferry/config.yaml:ro
+      - ${ASTERFERRY_GATEWAY_SECRETS:-./secrets/gateway}:/etc/asterferry/secrets:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9090/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${ASTERFERRY_IMAGE:-asterferry:local}
+    command: ["agent", "-c", "/etc/asterferry/config.yaml"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      - ${ASTERFERRY_AGENT_CONFIG:-./config/agent.yaml}:/etc/asterferry/config.yaml:ro
+      - ${ASTERFERRY_AGENT_SECRETS:-./secrets/agent}:/etc/asterferry/secrets:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9091/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s

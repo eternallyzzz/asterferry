@@ -1,0 +1,48 @@
+{{- if eq .Values.role "gateway" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "asterferry.fullname" . }}
+  labels:
+    {{- include "asterferry.labels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  {{- if ne .Values.gateway.service.type "ClusterIP" }}
+  externalTrafficPolicy: {{ .Values.gateway.service.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "asterferry.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- range .Values.gateway.service.ports }}
+    - name: {{ .name }}
+      protocol: {{ .protocol | default "TCP" }}
+      port: {{ .port }}
+      targetPort: {{ .targetPort | default .port }}
+    {{- end }}
+{{- else if .Values.agent.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "asterferry.fullname" . }}
+  labels:
+    {{- include "asterferry.labels" . | nindent 4 }}
+  {{- with .Values.agent.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.agent.service.type }}
+  selector:
+    {{- include "asterferry.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- range .Values.agent.service.ports }}
+    - name: {{ .name }}
+      protocol: {{ .protocol | default "TCP" }}
+      port: {{ .port }}
+      targetPort: {{ .targetPort | default .port }}
+    {{- end }}
+{{- end }}

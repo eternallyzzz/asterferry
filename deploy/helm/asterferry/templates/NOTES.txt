@@ -1,0 +1,13 @@
+AsterFerry {{ .Values.role }} has been rendered as release {{ .Release.Name }}.
+
+Configuration is read from /etc/asterferry/config.yaml and credentials are
+mounted from {{ .Values.secret.mountPath }}. Ensure the referenced ConfigMap
+and Secret exist before starting the workload.
+
+{{- if eq .Values.role "gateway" }}
+The Gateway Service is {{ .Values.gateway.service.type }}. Keep its configured
+TCP/UDP ports aligned with the reverse mappings registered by each Agent.
+{{- else }}
+The Agent Service is disabled by default. Enable it only for deliberately
+exposed, authenticated proxy listeners.
+{{- end }}
