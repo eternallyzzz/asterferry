@@ -1,13 +1,16 @@
 # AsterFerry
 
-星槎（AsterFerry）是面向私有网络的轻量级中继：公网 `gateway` 与内网
-`agent` 通过 TLS 1.3 + QUIC 连接，提供本地 SOCKS5/HTTP 代理和 TCP/UDP
-反向映射。
+AsterFerry is a lightweight private-network relay. A public `gateway` and an
+internal `agent` connect over TLS 1.3 and QUIC to provide local SOCKS5/HTTP
+proxying and TCP/UDP reverse mappings.
 
-当前配置协议为 v2，使用严格的角色分区：
+The current configuration and wire protocol are v2, with strict role
+separation:
 
-- `gateway`：公网入口、Agent mTLS/token 认证、反向端口映射和受策略约束的出口代理。
-- `agent`：主动连接 Gateway，提供本地代理并把内网服务注册为反向映射。
+- `gateway`: public entry point, Agent mTLS/token authentication, reverse port
+  mappings, and policy-controlled egress proxying.
+- `agent`: actively connects to the Gateway, exposes local proxy listeners, and
+  registers internal services as reverse mappings.
 
 ```text
 asterferry gateway -c gateway.yaml
@@ -15,34 +18,41 @@ asterferry agent   -c agent.yaml
 asterferry validate -c agent.yaml
 ```
 
-## 流量模型
+## Traffic model
 
 ```text
-本地应用 -> agent.proxy -> direct 或 gateway egress -> 目标地址
-公网用户 -> gateway_port -> agent.reverse[].local
+local application -> agent.proxy -> direct or gateway egress -> destination
+public user       -> gateway_port -> agent.reverse[].local
 ```
 
-代理数据在 QUIC 加密流内使用 AsterFerry relay record 传输；`balanced` profile
-使用有界随机 padding 降低固定长度指纹，但不伪装成 HTTP/3、WebSocket 或其他业务协议。
+Proxy payloads are carried inside encrypted QUIC streams using AsterFerry relay
+records. The `balanced` profile adds bounded random padding to reduce fixed-size
+fingerprints; it does not impersonate HTTP/3, WebSocket, or another application
+protocol.
 
-## 配置示例
+## Configuration examples
 
-完整的可复制模板见 [examples/README.md](examples/README.md)、
-[examples/gateway.yaml](examples/gateway.yaml) 和
-[examples/agent.yaml](examples/agent.yaml)。生产部署前必须替换证书、客户端 CA、token、
-ALPN 部署标识和所有示例地址。
+Copyable templates are available in [examples/README.md](examples/README.md),
+[examples/gateway.yaml](examples/gateway.yaml), and
+[examples/agent.yaml](examples/agent.yaml). Before production deployment,
+replace the certificates, client CA, token, deployment-specific ALPN, and all
+sample addresses.
 
-Gateway 防火墙需要放行 QUIC 使用的 UDP 端口，以及实际配置的反向 TCP/UDP 端口。管理接口
-默认只监听 loopback：Gateway 为 `127.0.0.1:9090`，Agent 为 `127.0.0.1:9091`。
+The Gateway firewall must allow the QUIC UDP port and the configured reverse
+TCP/UDP ports. Management endpoints bind to loopback by default: Gateway uses
+`127.0.0.1:9090` and Agent uses `127.0.0.1:9091`.
 
-## 安全边界
+## Security boundaries
 
-- 生产默认要求 Gateway 服务器证书、Agent 客户端证书和 per-agent token。
-- Gateway 出口代理默认按 Agent、协议、端口和目标 IP 执行 ACL，并拒绝私网、loopback、链路本地和 metadata 地址。
-- 管理接口不应通过公网暴露。
-- 日志不记录 token、私钥或代理 payload。
+- Production deployments require a Gateway server certificate, Agent client
+  certificates, and a per-Agent token.
+- Gateway egress proxying applies per-Agent, protocol, port, and destination-IP
+  ACLs. Private, loopback, link-local, and metadata addresses are denied by
+  default.
+- Management endpoints must not be exposed to the public network.
+- Logs do not record tokens, private keys, or proxy payloads.
 
-## 运行检查
+## Verification
 
 ```powershell
 asterferry validate -c examples/gateway.yaml
@@ -51,4 +61,5 @@ go test ./...
 go vet ./...
 ```
 
-历史 `myproxy` 和 `myfrp` 仅作为设计来源，不兼容 AsterFerry v2 线协议。
+The historical `myproxy` and `myfrp` projects were design references only;
+their v1 configuration and wire protocol are not compatible with AsterFerry v2.

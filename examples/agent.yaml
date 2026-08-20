@@ -1,4 +1,4 @@
-# AsterFerry v2 内网 Agent 配置。
+# AsterFerry v2 internal Agent configuration.
 version: 2
 role: agent
 

@@ -1,9 +1,10 @@
-# AsterFerry v2 公网 Gateway 配置。
+# AsterFerry v2 public Gateway configuration.
 version: 2
 role: gateway
 
 transport:
-  # 每个部署独立生成，Agent 必须使用相同值；不要复用公开示例值。
+  # Generate a unique value per deployment and use it on every Agent.
+  # Do not reuse the public example value.
   alpn: "af-demo-9b7f2c1d"
   max_bidi_remote_streams: 256
   handshake_timeout_seconds: 10
