@@ -1,0 +1,69 @@
+# AsterFerry v2 内网 Agent 配置。
+version: 2
+role: agent
+
+transport:
+  alpn: "af-demo-9b7f2c1d"
+  max_bidi_remote_streams: 256
+  handshake_timeout_seconds: 10
+  idle_timeout_seconds: 1800
+  keep_alive_seconds: 20
+
+management:
+  listen: "127.0.0.1:9091"
+
+limits:
+  max_agents: 256
+  max_connections_per_agent: 64
+  max_streams_per_agent: 256
+  max_frame_bytes: 16777216
+  max_record_bytes: 16384
+  max_udp_bytes: 65536
+  dial_timeout_seconds: 10
+  udp_idle_timeout_seconds: 30
+
+obfuscation:
+  proxy_profile: balanced
+  reverse_profile: standard
+  max_padding_bytes: 2048
+
+agent:
+  id: edge-a
+  server: "gateway.example.com:4433"
+  token_file: "/etc/asterferry/edge-a.token"
+  tls:
+    ca_file: "/etc/asterferry/gateway-ca.crt"
+    cert_file: "/etc/asterferry/edge-a.crt"
+    key_file: "/etc/asterferry/edge-a.key"
+    server_name: "gateway.example.com"
+
+  proxy:
+    inbounds:
+      - tag: socks
+        protocol: socks5
+        listen: "127.0.0.1:1080"
+        user: proxy-user
+        password: change-this-password
+      - tag: http
+        protocol: http
+        listen: "127.0.0.1:8080"
+        user: proxy-user
+        password: change-this-password
+    default_route: gateway
+    rules:
+      - inbound: socks
+        geoip: ["private", "CN"]
+        route: direct
+      - inbound: http
+        domains: ["example.com"]
+        route: direct
+
+  reverse:
+    - name: web
+      protocol: tcp
+      local: "127.0.0.1:8081"
+      gateway_port: 28080
+    - name: dns
+      protocol: udp
+      local: "127.0.0.1:53"
+      gateway_port: 21003

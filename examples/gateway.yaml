@@ -1,0 +1,48 @@
+# AsterFerry v2 公网 Gateway 配置。
+version: 2
+role: gateway
+
+transport:
+  # 每个部署独立生成，Agent 必须使用相同值；不要复用公开示例值。
+  alpn: "af-demo-9b7f2c1d"
+  max_bidi_remote_streams: 256
+  handshake_timeout_seconds: 10
+  idle_timeout_seconds: 1800
+  keep_alive_seconds: 20
+
+management:
+  listen: "127.0.0.1:9090"
+
+limits:
+  max_agents: 256
+  max_connections_per_agent: 64
+  max_streams_per_agent: 256
+  max_frame_bytes: 16777216
+  max_record_bytes: 16384
+  max_udp_bytes: 65536
+  dial_timeout_seconds: 10
+  udp_idle_timeout_seconds: 30
+
+obfuscation:
+  proxy_profile: balanced
+  reverse_profile: standard
+  max_padding_bytes: 2048
+
+gateway:
+  listen: "0.0.0.0:4433"
+  tls:
+    cert_file: "/etc/asterferry/server.crt"
+    key_file: "/etc/asterferry/server.key"
+    client_ca_file: "/etc/asterferry/agents-ca.crt"
+  agents:
+    - id: edge-a
+      token_file: "/etc/asterferry/edge-a.token"
+      reverse:
+        tcp_ports: ["28080-28089"]
+        udp_ports: ["21003"]
+      egress:
+        enabled: true
+        tcp_ports: ["80", "443"]
+        udp_ports: ["53"]
+        deny_private_networks: true
+        max_connections: 64
