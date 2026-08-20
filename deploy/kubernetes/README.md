@@ -75,6 +75,40 @@ The Agent Service is disabled by default. If a proxy listener must be exposed,
 bind that inbound to `0.0.0.0`, keep credentials enabled, and set
 `agent.service.enabled=true` with only the intended ports.
 
+## Minikube smoke test
+
+Minikube can exercise the chart with the local image and an in-cluster
+`NodePort` Gateway. Load the image into the Minikube node and override the
+image settings for the test:
+
+```sh
+minikube image load asterferry:local
+
+helm upgrade --install asterferry-gateway ./deploy/helm/asterferry \
+  --namespace asterferry --create-namespace \
+  --set role=gateway \
+  --set gateway.service.type=NodePort \
+  --set image.repository=asterferry \
+  --set image.tag=local \
+  --set image.pullPolicy=Never \
+  --set secret.existingSecret=asterferry-gateway-secrets \
+  --set-file config.content=./config/gateway.yaml
+```
+
+Install the Agent release with the same image overrides and its own ConfigMap
+or `config.content`. Point `agent.server` at the Gateway Service DNS name, for
+example `asterferry-gateway:4433`, then verify both workloads:
+
+```sh
+kubectl -n asterferry rollout status deployment/asterferry-gateway
+kubectl -n asterferry rollout status deployment/asterferry-agent
+kubectl -n asterferry get pods,svc
+```
+
+Minikube does not allocate a cloud LoadBalancer address by itself. Use the
+`NodePort` override above for an in-cluster smoke test, or run `minikube
+tunnel` in another terminal when testing the default `LoadBalancer` Service.
+
 ## Inline configuration
 
 For controlled environments, `config.content` can generate the ConfigMap from

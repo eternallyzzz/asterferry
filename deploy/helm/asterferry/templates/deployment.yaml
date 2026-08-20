@@ -77,7 +77,7 @@ spec:
                 - wget
                 - -q
                 - -O
-                - -
+                - "-"
                 - http://127.0.0.1:{{ include "asterferry.managementPort" . | trim }}/readyz
             initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.periodSeconds }}
@@ -89,7 +89,7 @@ spec:
                 - wget
                 - -q
                 - -O
-                - -
+                - "-"
                 - http://127.0.0.1:{{ include "asterferry.managementPort" . | trim }}/healthz
             initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.periodSeconds }}
