@@ -17,6 +17,12 @@ gateway:
     cert_file: /etc/asterferry/secrets/server.crt
     key_file: /etc/asterferry/secrets/server.key
     client_ca_file: /etc/asterferry/secrets/agents-ca.crt
+obfuscation:
+  transport:
+    mode: camouflage
+    key_file: /etc/asterferry/secrets/obfs.key
+    # Uncomment during rotation after mounting obfs.key.previous.
+    # previous_key_file: /etc/asterferry/secrets/obfs.key.previous
 ```
 
 Create resources in the target namespace:
@@ -31,11 +37,13 @@ kubectl -n asterferry create secret generic asterferry-gateway-secrets \
   --from-file=server.crt=./secrets/gateway/server.crt \
   --from-file=server.key=./secrets/gateway/server.key \
   --from-file=agents-ca.crt=./secrets/gateway/agents-ca.crt \
-  --from-file=edge-a.token=./secrets/gateway/edge-a.token
+  --from-file=edge-a.token=./secrets/gateway/edge-a.token \
+  --from-file=obfs.key=./secrets/gateway/obfs.key
 ```
 
 Create corresponding Agent ConfigMap and Secret resources with the Agent CA,
-client certificate, client key, and token. Never commit these files or put
+client certificate, client key, token, and the same `obfs.key` (plus the
+optional `obfs.key.previous` during rotation). Never commit these files or put
 their contents into `values.yaml`.
 
 ## Install Gateway
@@ -74,6 +82,19 @@ helm upgrade --install asterferry-agent ./deploy/helm/asterferry \
 The Agent Service is disabled by default. If a proxy listener must be exposed,
 bind that inbound to `0.0.0.0`, keep credentials enabled, and set
 `agent.service.enabled=true` with only the intended ports.
+
+Use the chart's `env` value to provide runtime log overrides without changing
+the ConfigMap, for example:
+
+```yaml
+env:
+  - name: ASTERFERRY_LOG_LEVEL
+    value: info
+  - name: ASTERFERRY_LOG_FORMAT
+    value: json
+```
+
+The same `ASTERFERRY_*` variables can control sampling and Agent sniffing.
 
 ## Minikube smoke test
 

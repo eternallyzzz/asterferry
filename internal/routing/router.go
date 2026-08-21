@@ -21,6 +21,15 @@ type Router struct {
 
 func New(c config.ProxyConfig) (*Router, error) {
 	r := &Router{Rules: c.Rules, Default: c.DefaultRoute}
+	return newRouter(r)
+}
+
+func NewOptions(c config.ProxyOptions) (*Router, error) {
+	r := &Router{Rules: c.Rules, Default: c.DefaultRoute}
+	return newRouter(r)
+}
+
+func newRouter(r *Router) (*Router, error) {
 	if r.Default == "" {
 		r.Default = config.RouteGateway
 	}

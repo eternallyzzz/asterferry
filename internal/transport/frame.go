@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	Version         byte = 2
+	Version         byte = 3
 	HeaderSize           = 16 // version, type, reserved, request ID
 	DefaultMaxFrame      = 16 << 20
 
@@ -233,7 +233,7 @@ func NewNonce() ([]byte, error) {
 
 func SignChallenge(token, nonce []byte, agentID string) []byte {
 	h := hmac.New(sha256.New, token)
-	h.Write([]byte("asterferry/v2/auth/"))
+	h.Write([]byte("asterferry/v3/auth/"))
 	h.Write([]byte(agentID))
 	h.Write(nonce)
 	return h.Sum(nil)

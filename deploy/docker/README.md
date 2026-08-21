@@ -2,7 +2,7 @@
 
 The image contains the same `asterferry gateway`, `asterferry agent`, and
 `asterferry validate` commands as a native installation. The image is built
-from a static Go binary and runs as the non-root `asterferry` user.
+from a static Go 1.26.5 binary and runs as the non-root `asterferry` user.
 
 ## Build the image
 
@@ -34,16 +34,22 @@ deploy/docker/
       server.key
       agents-ca.crt
       edge-a.token
+      obfs.key
+      obfs.key.previous   # optional during key rotation
     agent/
       gateway-ca.crt
       edge-a.crt
       edge-a.key
       edge-a.token
+      obfs.key
+      obfs.key.previous   # optional during key rotation
 ```
 
 Create the directories and copy the example configurations before starting.
-Change certificate, token, and ALPN paths in the copied configuration to use
-`/etc/asterferry/secrets/...`. The Agent server address should be
+Change certificate, token, ALPN, and `obfuscation.transport.key_file` paths in
+the copied configuration to use `/etc/asterferry/secrets/...`. The Gateway and
+Agent must share the same current `obfs.key`; keep the previous key in
+`obfs.key.previous` on both sides only while rotating. The Agent server address should be
 `gateway:4433` inside the Compose network.
 
 ```sh
@@ -62,6 +68,12 @@ The Gateway publishes QUIC UDP `4433`, reverse TCP `28080`, and reverse UDP
 The Agent proxy listeners are not published by default. If a proxy must be
 reachable outside the container, bind its inbound to `0.0.0.0`, keep
 credentials enabled, and explicitly add a Compose port mapping.
+
+Structured logging is configured in YAML under `logging`. Deployment-specific
+overrides can be passed as container environment variables such as
+`ASTERFERRY_LOG_LEVEL`, `ASTERFERRY_LOG_FORMAT`, and
+`ASTERFERRY_LOG_SAMPLING_ENABLED`; environment values take precedence over
+YAML and invalid values stop startup.
 
 ## Security properties
 

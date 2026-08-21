@@ -1,4 +1,4 @@
-# AsterFerry v2 configuration examples
+# AsterFerry v3 configuration examples
 
 The configuration uses two fixed roles: `gateway` (public entry point) and
 `agent` (internal node). The old `tunnels` section is now named `reverse`, and
@@ -36,6 +36,17 @@ Use the same token file contents on the Gateway and the corresponding Agent.
 Use a separate token for every Agent. Never commit tokens, private keys, or real
 certificates to the repository.
 
+Create the same independent transport-obfuscation key on the Gateway and
+Agent. It is not a replacement for mTLS or the Agent token:
+
+```powershell
+openssl rand -hex 32 | Set-Content -NoNewline obfs.key
+```
+
+Mount it as `/etc/asterferry/obfs.key` with read-only permissions. During key
+rotation, place the old key at `obfs.key.previous`; outbound packets use the
+current key while inbound packets accept both keys for the overlap window.
+
 ## 4. Edit the configuration
 
 - Gateway: `gateway.listen`, TLS files, and `gateway.agents[].token_file`
@@ -43,7 +54,17 @@ certificates to the repository.
 - Agent: `agent.server`, `agent.tls.*`, and `agent.token_file`
 - Agent: point `agent.reverse[].local` at internal services
 - Agent: configure local proxy listeners under `agent.proxy.inbounds`; the
-  default route is Gateway
+  default route is Gateway. HTTP Host and TCP TLS SNI observation is enabled by
+  default under `agent.proxy.sniff`; it never changes route selection.
+- Configure structured logs under `logging`. JSON, bounded INFO/DEBUG sampling,
+  and privacy-preserving domain hashes are the production defaults. Use the
+  documented `ASTERFERRY_*` environment variables for deployment-specific
+  overrides.
+- `obfuscation.transport.mode` defaults to `camouflage`. It masks QUIC UDP
+  datagrams and shapes only handshake packets. `max_wire_packet_bytes` bounds
+  each shaped fragment; normal QUIC data keeps native packet coalescing.
+  `standard` is an explicit raw QUIC mode for migration and trusted networks;
+  the two modes do not fall back automatically.
 
 Proxy listeners bind to loopback by default. If a listener binds to another
 address, credentials are required.

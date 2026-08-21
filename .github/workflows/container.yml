@@ -29,12 +29,19 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.26.5"
           cache: true
       - name: Run tests
         run: go test ./...
+      - name: Run race tests
+        run: go test -race ./...
       - name: Run vet
         run: go vet ./...
+      - name: Verify QUIC implementation migration
+        shell: bash
+        run: |
+          ! rg -n "golang.org/x/net/quic" --glob "*.go" .
+          ! rg -n "github.com/quic-go/quic-go" --glob "*.go" internal/agent internal/gateway internal/relay
       - name: Build binary
         run: go build ./cmd/asterferry
       - name: Set up Helm

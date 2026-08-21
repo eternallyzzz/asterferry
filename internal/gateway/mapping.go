@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
-
-	"golang.org/x/net/quic"
 
 	"asterferry/internal/relay"
 	"asterferry/internal/transport"
@@ -59,7 +56,7 @@ func (m *Mapping) Run() {
 func (m *Mapping) Close() error {
 	var err error
 	m.once.Do(func() {
-		log.Printf("gateway mapping %s closing", m.spec.Name)
+		m.server.logger.Info("mapping closing", "event", "gateway.mapping.closing", "mapping", m.spec.Name)
 		m.cancel()
 		if m.tcp != nil {
 			err = m.tcp.Close()
@@ -92,18 +89,18 @@ func (m *Mapping) handleTCP(local net.Conn) {
 	defer release()
 	stream, err := m.session.openStream(m.ctx)
 	if err != nil {
-		log.Printf("gateway reverse %s open stream: %v", m.spec.Name, err)
+		m.server.logger.Info("reverse stream open failed", "event", "gateway.reverse.open_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
 		m.server.metrics.MappingFailures.Add(1)
 		return
 	}
 	defer stream.Close()
 	open, _ := transport.JSONFrame(transport.TypeOpenReverse, 0, transport.OpenReverse{Name: m.spec.Name, Protocol: "tcp", Profile: m.spec.Profile})
 	if err := writeFrame(stream, open, m.server.cfg.Limits.MaxFrameBytes); err != nil {
-		log.Printf("gateway reverse %s write open: %v", m.spec.Name, err)
+		m.server.logger.Info("reverse open write failed", "event", "gateway.reverse.open_write_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
 		return
 	}
 	if !m.waitOpenOK(stream) {
-		log.Printf("gateway reverse %s agent rejected open", m.spec.Name)
+		m.server.logger.Info("reverse open rejected", "event", "gateway.reverse.rejected", "mapping", m.spec.Name)
 		return
 	}
 	m.server.metrics.ActiveStreams.Add(1)
@@ -116,14 +113,15 @@ func (m *Mapping) handleTCP(local net.Conn) {
 	relay.Bidirectional(local, remote, relay.Counters{In: func(n uint64) { m.server.metrics.BytesIn.Add(n) }, Out: func(n uint64) { m.server.metrics.BytesOut.Add(n) }})
 }
 
-func (m *Mapping) waitOpenOK(stream *quic.Stream) bool {
+func (m *Mapping) waitOpenOK(stream transport.Stream) bool {
 	handshakeCtx, cancelHandshake := context.WithTimeout(m.ctx, time.Duration(m.server.cfg.Transport.HandshakeTimeoutSec)*time.Second)
-	stream.SetReadContext(handshakeCtx)
+	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	f, err := transport.ReadFrame(stream, m.server.cfg.Limits.MaxFrameBytes)
 	cancelHandshake()
-	stream.SetReadContext(m.ctx)
+	stopStreamContext()
+	stopStreamContext = transport.SetStreamContext(stream, m.ctx)
 	if err != nil {
-		log.Printf("gateway reverse status read: %v", err)
+		m.server.logger.Info("reverse status read failed", "event", "gateway.reverse.status_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
 		return false
 	}
 	if f.Type != transport.TypeOpenOK {
@@ -137,7 +135,7 @@ func (m *Mapping) waitOpenOK(stream *quic.Stream) bool {
 }
 
 type udpAssociation struct {
-	stream  *quic.Stream
+	stream  transport.Stream
 	addr    *net.UDPAddr
 	last    time.Time
 	mu      sync.Mutex
@@ -290,11 +288,11 @@ func (m *Mapping) readUDPAssociation(ctx context.Context, a *udpAssociation, key
 	}
 }
 
-func (s *Session) openStream(ctx context.Context) (*quic.Stream, error) {
+func (s *Session) openStream(ctx context.Context) (transport.Stream, error) {
 	if s == nil || s.conn == nil {
 		return nil, errors.New("session is closed")
 	}
-	return s.conn.NewStream(ctx)
+	return s.conn.OpenStream(ctx)
 }
 
 func (m *Mapping) acquireConnection() (func(), bool) {

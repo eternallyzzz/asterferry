@@ -1,0 +1,172 @@
+package agent
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"asterferry/internal/lifecycle"
+	"asterferry/internal/transport"
+)
+
+type sessionConnector func(context.Context) (transport.Session, *Session, error)
+
+type sessionManager struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	connect sessionConnector
+	logger  *slog.Logger
+
+	mu        sync.RWMutex
+	session   *Session
+	ready     chan struct{}
+	connects  atomic.Int64
+	closeOnce sync.Once
+}
+
+func newSessionManager(parent context.Context, connect sessionConnector, logger *slog.Logger) *sessionManager {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &sessionManager{ctx: ctx, cancel: cancel, connect: connect, logger: logger, ready: make(chan struct{})}
+}
+
+func (m *sessionManager) Start() {
+	if m == nil || m.connect == nil {
+		return
+	}
+	go m.connectLoop()
+}
+
+func (m *sessionManager) connectLoop() {
+	backoff := time.Second
+	for {
+		if m.ctx.Err() != nil {
+			return
+		}
+		m.connects.Add(1)
+		conn, sess, err := m.connect(m.ctx)
+		if err == nil {
+			if m.ctx.Err() != nil {
+				sess.Close()
+				_ = transport.CloseSession(conn)
+				return
+			}
+			backoff = time.Second
+			if !m.set(sess) {
+				_ = transport.CloseSession(conn)
+				return
+			}
+			if waitErr := sess.Wait(); waitErr != nil && m.ctx.Err() == nil {
+				m.logger.Info("QUIC session ended", "event", "agent.session.ended", "error_kind", lifecycle.ErrorKind(waitErr))
+			}
+			m.clear(sess)
+			_ = transport.CloseSession(conn)
+			continue
+		}
+		if m.ctx.Err() != nil {
+			return
+		}
+		m.logger.Info("gateway connection failed", "event", "agent.gateway.connect_failed", "error_kind", lifecycle.ErrorKind(err))
+		timer := time.NewTimer(backoff + time.Duration(m.connects.Load()%5)*100*time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-m.ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func (m *sessionManager) set(sess *Session) bool {
+	if sess == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ctx.Err() != nil {
+		sess.Close()
+		return false
+	}
+	if m.session != nil {
+		m.session.Close()
+	}
+	m.session = sess
+	close(m.ready)
+	return true
+}
+
+func (m *sessionManager) clear(sess *Session) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.session == sess {
+		m.session = nil
+		m.ready = make(chan struct{})
+	}
+}
+
+func (m *sessionManager) wait(ctx context.Context) (*Session, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		m.mu.RLock()
+		sess, ready := m.session, m.ready
+		m.mu.RUnlock()
+		if sess != nil {
+			return sess, nil
+		}
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-m.ctx.Done():
+			return nil, m.ctx.Err()
+		}
+	}
+}
+
+func (m *sessionManager) IsReady() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.session != nil
+}
+
+func (m *sessionManager) Reconnects() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.connects.Load()
+}
+
+func (m *sessionManager) Close() error {
+	if m == nil {
+		return nil
+	}
+	m.closeOnce.Do(func() {
+		m.cancel()
+		m.mu.Lock()
+		sess := m.session
+		m.session = nil
+		m.ready = make(chan struct{})
+		m.mu.Unlock()
+		if sess != nil {
+			sess.Close()
+		}
+	})
+	return nil
+}

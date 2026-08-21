@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -9,17 +10,217 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"asterferry/internal/agent"
 	"asterferry/internal/config"
 	"asterferry/internal/gateway"
+	"asterferry/internal/relay"
 )
+
+func BenchmarkAsterFerryProxy(b *testing.B) {
+	payload := bytes.Repeat([]byte("p"), 64<<10)
+	for _, mode := range []string{config.TransportObfuscationStandard, config.TransportObfuscationCamouflage} {
+		for _, profile := range []string{config.ProfileStandard, config.ProfileBalanced} {
+			for _, streams := range []int{1, 8, 32, 64} {
+				b.Run(fmt.Sprintf("mode=%s/profile=%s/streams=%d", mode, profile, streams), func(b *testing.B) {
+					_, a, echoPort := startBenchmarkPair(b, profile, mode)
+					profileConfig, err := relay.NewProfile(profile, 16<<10, 2048)
+					if err != nil {
+						b.Fatal(err)
+					}
+					connections := make([]*relay.Conn, 0, streams)
+					for i := 0; i < streams; i++ {
+						stream, err := a.OpenProxy(context.Background(), "tcp", "127.0.0.1", uint16(echoPort))
+						if err != nil {
+							b.Fatal(err)
+						}
+						connections = append(connections, relay.NewConn(stream, profileConfig))
+					}
+					defer func() {
+						for _, conn := range connections {
+							_ = conn.Close()
+						}
+					}()
+
+					b.SetBytes(int64(len(payload) * streams))
+					b.ReportAllocs()
+					b.ResetTimer()
+					errs := make(chan error, streams)
+					var wg sync.WaitGroup
+					for _, conn := range connections {
+						conn := conn
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							result := make([]byte, len(payload))
+							for i := 0; i < b.N; i++ {
+								if _, err := conn.Write(payload); err != nil {
+									errs <- err
+									return
+								}
+								if _, err := io.ReadFull(conn, result); err != nil {
+									errs <- err
+									return
+								}
+							}
+						}()
+					}
+					wg.Wait()
+					b.StopTimer()
+					select {
+					case err := <-errs:
+						b.Fatal(err)
+					default:
+					}
+				})
+			}
+		}
+	}
+}
+
+func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *agent.Agent, int) {
+	t.Helper()
+	dir := t.TempDir()
+	certs := makeCertificates(t, dir)
+	tokenPath := filepath.Join(dir, "bench.token")
+	if err := os.WriteFile(tokenPath, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transportObfuscation := config.TransportObfuscationConfig{Mode: mode}
+	if mode == config.TransportObfuscationCamouflage {
+		obfsKeyPath := filepath.Join(dir, "bench.obfs.key")
+		if err := os.WriteFile(obfsKeyPath, []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		transportObfuscation.KeyFile = obfsKeyPath
+	}
+	quicPort := freeUDPPort(t)
+	managementGateway := freeTCPPort(t)
+	managementAgent := freeTCPPort(t)
+	echoListener, echoPort := startEcho(t)
+	proxyPort := freeTCPPort(t)
+	publicPort := freeTCPPort(t)
+	alpn := "af-benchmark-1234"
+
+	gatewayCfg := &config.Config{
+		Version: config.ConfigVersion,
+		Role:    config.RoleGateway,
+		Transport: config.TransportConfig{
+			ALPN: alpn, MaxBidiRemoteStreams: 128,
+			InitialStreamReceiveWindow: 1 << 20, InitialConnectionReceiveWindow: 8 << 20,
+			MaxStreamReadBuffer: 16 << 20, MaxConnReadBuffer: 64 << 20,
+		},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway)},
+		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 128, MaxStreamsPerAgent: 64, MaxFrameBytes: 2 << 20, MaxRecordBytes: 16 << 10, UDPIdleTimeoutSec: 5},
+		Obfuscation: config.ObfuscationConfig{ProxyProfile: profile, ReverseProfile: profile, MaxPaddingBytes: 2048, Transport: transportObfuscation},
+		Gateway: &config.GatewayConfig{
+			Listen: fmt.Sprintf("127.0.0.1:%d", quicPort),
+			TLS:    config.GatewayTLS{CertFile: certs.serverCert, KeyFile: certs.serverKey, ClientCAFile: certs.caCert},
+			Agents: []config.GatewayAgent{{ID: "bench", TokenFile: tokenPath, Reverse: config.ReverseACL{TCPPorts: []string{fmt.Sprint(publicPort)}}, Egress: config.EgressPolicy{Enabled: true, TCPPorts: []string{fmt.Sprint(echoPort)}, AllowCIDRs: []string{"127.0.0.0/8"}, MaxConnections: 128}}},
+		},
+	}
+	if err := gatewayCfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	gatewayOpts, err := gatewayCfg.ResolveGateway()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The benchmark target is deliberately local. Production validation keeps
+	// private destinations denied; this isolated fixture opts into loopback.
+	gatewayOpts.Agents[0].Egress.DenyPrivateNetworks = false
+	benchmarkLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g, err := gateway.New(gatewayOpts, benchmarkLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	agentCfg := &config.Config{
+		Version: config.ConfigVersion,
+		Role:    config.RoleAgent,
+		Transport: config.TransportConfig{
+			ALPN: alpn, MaxBidiRemoteStreams: 128,
+			InitialStreamReceiveWindow: 1 << 20, InitialConnectionReceiveWindow: 8 << 20,
+			MaxStreamReadBuffer: 16 << 20, MaxConnReadBuffer: 64 << 20,
+		},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent)},
+		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 128, MaxStreamsPerAgent: 64, MaxFrameBytes: 2 << 20, MaxRecordBytes: 16 << 10, UDPIdleTimeoutSec: 5},
+		Obfuscation: config.ObfuscationConfig{ProxyProfile: profile, ReverseProfile: profile, MaxPaddingBytes: 2048, Transport: transportObfuscation},
+		Agent: &config.AgentConfig{
+			ID: "bench", Server: fmt.Sprintf("127.0.0.1:%d", quicPort), TokenFile: tokenPath,
+			TLS:     config.AgentTLS{CAFile: certs.caCert, CertFile: certs.clientCert, KeyFile: certs.clientKey, ServerName: "localhost"},
+			Proxy:   config.ProxyConfig{Inbounds: []config.Inbound{{Tag: "bench", Protocol: "http", Listen: fmt.Sprintf("127.0.0.1:%d", proxyPort)}}, DefaultRoute: config.RouteGateway},
+			Reverse: []config.Tunnel{{Name: "bench", Protocol: "tcp", Local: fmt.Sprintf("127.0.0.1:%d", echoPort), GatewayPort: uint16(publicPort)}},
+		},
+	}
+	if err := agentCfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	agentOpts, err := agentCfg.ResolveAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := agent.New(agentOpts, benchmarkLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Start(); err != nil {
+		_ = g.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = a.Close()
+		_ = g.Close()
+		_ = echoListener.Close()
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for !a.IsReady() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !a.IsReady() {
+		t.Fatal("benchmark agent did not become ready")
+	}
+	return g, a, echoPort
+}
+
+func TestGatewayAgentCamouflageProxy(t *testing.T) {
+	_, a, echoPort := startBenchmarkPair(t, config.ProfileBalanced, config.TransportObfuscationCamouflage)
+	stream, err := a.OpenProxy(context.Background(), "tcp", "127.0.0.1", uint16(echoPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	profile, err := relay.NewProfile(config.ProfileBalanced, 16<<10, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := relay.NewConn(stream, profile)
+	defer conn.Close()
+	if _, err := conn.Write([]byte("camouflage")); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len("camouflage"))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "camouflage" {
+		t.Fatalf("camouflage echo mismatch: %q", got)
+	}
+}
 
 func TestGatewayAgentReverseTCP(t *testing.T) {
 	dir := t.TempDir()
@@ -46,7 +247,7 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		Transport:   config.TransportConfig{ALPN: alpn, MaxBidiRemoteStreams: 64},
 		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway)},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 8, MaxStreamsPerAgent: 16, MaxFrameBytes: 1 << 20, MaxRecordBytes: 4096, UDPIdleTimeoutSec: 5},
-		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256},
+		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256, Transport: config.TransportObfuscationConfig{Mode: config.TransportObfuscationStandard}},
 		Gateway: &config.GatewayConfig{
 			Listen: fmt.Sprintf("127.0.0.1:%d", quicPort),
 			TLS:    config.GatewayTLS{CertFile: certs.serverCert, KeyFile: certs.serverKey, ClientCAFile: certs.caCert},
@@ -65,7 +266,7 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		Transport:   config.TransportConfig{ALPN: alpn, MaxBidiRemoteStreams: 64},
 		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent)},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 8, MaxStreamsPerAgent: 16, MaxFrameBytes: 1 << 20, MaxRecordBytes: 4096, UDPIdleTimeoutSec: 5},
-		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256},
+		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256, Transport: config.TransportObfuscationConfig{Mode: config.TransportObfuscationStandard}},
 		Agent: &config.AgentConfig{
 			ID: "edge-a", Server: fmt.Sprintf("127.0.0.1:%d", quicPort), TokenFile: tokenPath,
 			TLS:     config.AgentTLS{CAFile: certs.caCert, CertFile: certs.clientCert, KeyFile: certs.clientKey, ServerName: "localhost"},
@@ -77,7 +278,11 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g, err := gateway.New(gatewayCfg)
+	gatewayOpts, err := gatewayCfg.ResolveGateway()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := gateway.New(gatewayOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +290,11 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer g.Close()
-	a, err := agent.New(agentCfg)
+	agentOpts, err := agentCfg.ResolveAgent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := agent.New(agentOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +380,7 @@ type certificateFiles struct {
 	clientCert, clientKey         string
 }
 
-func makeCertificates(t *testing.T, dir string) certificateFiles {
+func makeCertificates(t testing.TB, dir string) certificateFiles {
 	t.Helper()
 	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -215,14 +424,14 @@ func makeCertificates(t *testing.T, dir string) certificateFiles {
 	return certificateFiles{caCert: caCert, serverCert: serverCert, serverKey: serverKey, clientCert: clientCert, clientKey: clientKey}
 }
 
-func writePEM(t *testing.T, path, kind string, data []byte) {
+func writePEM(t testing.TB, path, kind string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: kind, Bytes: data}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func freeUDPPort(t *testing.T) int {
+func freeUDPPort(t testing.TB) int {
 	t.Helper()
 	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -232,7 +441,7 @@ func freeUDPPort(t *testing.T) int {
 	return c.LocalAddr().(*net.UDPAddr).Port
 }
 
-func freeTCPPort(t *testing.T) int {
+func freeTCPPort(t testing.TB) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -242,7 +451,7 @@ func freeTCPPort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func startEcho(t *testing.T) (net.Listener, int) {
+func startEcho(t testing.TB) (net.Listener, int) {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -263,7 +472,7 @@ func startEcho(t *testing.T) (net.Listener, int) {
 	return l, l.Addr().(*net.TCPAddr).Port
 }
 
-func startUDPEcho(t *testing.T) (*net.UDPConn, int) {
+func startUDPEcho(t testing.TB) (*net.UDPConn, int) {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {

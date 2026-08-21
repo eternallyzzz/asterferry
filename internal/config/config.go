@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	ConfigVersion = 2
+	ConfigVersion = 3
 
 	RoleGateway = "gateway"
 	RoleAgent   = "agent"
@@ -38,19 +38,47 @@ type Config struct {
 	Management  ManagementConfig  `yaml:"management"`
 	Limits      Limits            `yaml:"limits"`
 	Obfuscation ObfuscationConfig `yaml:"obfuscation"`
+	Logging     LoggingConfig     `yaml:"logging"`
 	Gateway     *GatewayConfig    `yaml:"gateway"`
 	Agent       *AgentConfig      `yaml:"agent"`
+}
+
+type LoggingConfig struct {
+	Level               string         `yaml:"level"`
+	Format              string         `yaml:"format"`
+	Sampling            SamplingConfig `yaml:"sampling"`
+	ExposeDomainAtDebug bool           `yaml:"expose_domain_at_debug"`
+}
+
+type SamplingConfig struct {
+	Enabled            *bool `yaml:"enabled"`
+	RatePerSecond      int64 `yaml:"rate_per_second"`
+	Burst              int64 `yaml:"burst"`
+	SummaryIntervalSec int64 `yaml:"summary_interval_seconds"`
+	MaxKeys            int64 `yaml:"max_keys"`
 }
 
 type TransportConfig struct {
 	ALPN                 string `yaml:"alpn"`
 	MaxBidiRemoteStreams int64  `yaml:"max_bidi_remote_streams"`
-	MaxStreamReadBuffer  int64  `yaml:"max_stream_read_buffer"`
-	MaxStreamWriteBuffer int64  `yaml:"max_stream_write_buffer"`
-	MaxConnReadBuffer    int64  `yaml:"max_conn_read_buffer"`
-	HandshakeTimeoutSec  int64  `yaml:"handshake_timeout_seconds"`
-	IdleTimeoutSec       int64  `yaml:"idle_timeout_seconds"`
-	KeepAliveSec         int64  `yaml:"keep_alive_seconds"`
+	// Initial receive windows control how much data can be in flight before
+	// quic-go's autotuner grows the window. Zero keeps quic-go's default.
+	InitialStreamReceiveWindow     int64 `yaml:"initial_stream_receive_window_bytes"`
+	InitialConnectionReceiveWindow int64 `yaml:"initial_connection_receive_window_bytes"`
+	// These names are retained for configuration continuity. They are QUIC
+	// receive-window caps, rather than operating-system socket buffers.
+	MaxStreamReadBuffer int64 `yaml:"max_stream_read_buffer"`
+	// Deprecated: quic-go controls send-side flow control internally. A
+	// non-zero value is rejected during validation instead of ignored.
+	MaxStreamWriteBuffer int64 `yaml:"max_stream_write_buffer"`
+	MaxConnReadBuffer    int64 `yaml:"max_conn_read_buffer"`
+	// Optional overrides for the UDP socket buffers. quic-go already applies
+	// a platform-specific default; these are useful for high-BDP links.
+	UDPReadBufferBytes  int64 `yaml:"udp_read_buffer_bytes"`
+	UDPWriteBufferBytes int64 `yaml:"udp_write_buffer_bytes"`
+	HandshakeTimeoutSec int64 `yaml:"handshake_timeout_seconds"`
+	IdleTimeoutSec      int64 `yaml:"idle_timeout_seconds"`
+	KeepAliveSec        int64 `yaml:"keep_alive_seconds"`
 }
 
 type ManagementConfig struct {
@@ -69,10 +97,32 @@ type Limits struct {
 }
 
 type ObfuscationConfig struct {
-	ProxyProfile    string `yaml:"proxy_profile"`
-	ReverseProfile  string `yaml:"reverse_profile"`
-	MaxPaddingBytes int64  `yaml:"max_padding_bytes"`
+	ProxyProfile    string                     `yaml:"proxy_profile"`
+	ReverseProfile  string                     `yaml:"reverse_profile"`
+	MaxPaddingBytes int64                      `yaml:"max_padding_bytes"`
+	Transport       TransportObfuscationConfig `yaml:"transport"`
 }
+
+// TransportObfuscationConfig controls the optional datagram layer that runs
+// outside QUIC. It is deliberately separate from relay padding: relay
+// padding hides application record boundaries, while this layer hides QUIC
+// packet bytes and (optionally) handshake shape.
+type TransportObfuscationConfig struct {
+	Mode             string `yaml:"mode"`
+	KeyFile          string `yaml:"key_file"`
+	PreviousKeyFile  string `yaml:"previous_key_file"`
+	HandshakeShaping *bool  `yaml:"handshake_shaping"`
+	MinFragmentBytes int64  `yaml:"min_fragment_bytes"`
+	MaxFragmentBytes int64  `yaml:"max_fragment_bytes"`
+	// MaxWirePacketBytes bounds each shaped handshake fragment. QUIC data
+	// datagrams preserve native coalescing and may be larger than one fragment.
+	MaxWirePacketBytes int64 `yaml:"max_wire_packet_bytes"`
+}
+
+const (
+	TransportObfuscationStandard   = "standard"
+	TransportObfuscationCamouflage = "camouflage"
+)
 
 type GatewayConfig struct {
 	Listen string         `yaml:"listen"`
@@ -127,6 +177,13 @@ type ProxyConfig struct {
 	Inbounds     []Inbound   `yaml:"inbounds"`
 	DefaultRoute string      `yaml:"default_route"`
 	Rules        []RouteRule `yaml:"rules"`
+	Sniff        SniffConfig `yaml:"sniff"`
+}
+
+type SniffConfig struct {
+	Enabled       *bool `yaml:"enabled"`
+	MaxBytes      int64 `yaml:"max_bytes"`
+	TimeoutMillis int64 `yaml:"timeout_milliseconds"`
 }
 
 type Inbound struct {
@@ -171,6 +228,103 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// ApplyEnv applies supported ASTERFERRY_* overrides after YAML loading. It is
+// intentionally explicit and strict: a malformed override is a startup error
+// instead of silently falling back to a potentially unsafe configuration.
+func ApplyEnv(c *Config) error {
+	return ApplyEnvLookup(c, os.LookupEnv)
+}
+
+func ApplyEnvLookup(c *Config, lookup func(string) (string, bool)) error {
+	if c == nil {
+		return errors.New("config is required")
+	}
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	setString := func(name string, dst *string) error {
+		if value, ok := lookup(name); ok {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%s must not be empty", name)
+			}
+			*dst = value
+		}
+		return nil
+	}
+	setBool := func(name string, dst *bool) error {
+		value, ok := lookup(name)
+		if !ok {
+			return nil
+		}
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("%s must be true or false", name)
+		}
+		*dst = parsed
+		return nil
+	}
+	setBoolPtr := func(name string, dst **bool) error {
+		value, ok := lookup(name)
+		if !ok {
+			return nil
+		}
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("%s must be true or false", name)
+		}
+		*dst = &parsed
+		return nil
+	}
+	setInt := func(name string, dst *int64) error {
+		value, ok := lookup(name)
+		if !ok {
+			return nil
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return fmt.Errorf("%s must be an integer", name)
+		}
+		*dst = parsed
+		return nil
+	}
+	if err := setString("ASTERFERRY_LOG_LEVEL", &c.Logging.Level); err != nil {
+		return err
+	}
+	if err := setString("ASTERFERRY_LOG_FORMAT", &c.Logging.Format); err != nil {
+		return err
+	}
+	if err := setBoolPtr("ASTERFERRY_LOG_SAMPLING_ENABLED", &c.Logging.Sampling.Enabled); err != nil {
+		return err
+	}
+	if err := setInt("ASTERFERRY_LOG_SAMPLE_RATE", &c.Logging.Sampling.RatePerSecond); err != nil {
+		return err
+	}
+	if err := setInt("ASTERFERRY_LOG_SAMPLE_BURST", &c.Logging.Sampling.Burst); err != nil {
+		return err
+	}
+	if err := setInt("ASTERFERRY_LOG_SAMPLE_SUMMARY_INTERVAL", &c.Logging.Sampling.SummaryIntervalSec); err != nil {
+		return err
+	}
+	if err := setInt("ASTERFERRY_LOG_SAMPLE_MAX_KEYS", &c.Logging.Sampling.MaxKeys); err != nil {
+		return err
+	}
+	if err := setBool("ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG", &c.Logging.ExposeDomainAtDebug); err != nil {
+		return err
+	}
+	if c.Role == RoleAgent && c.Agent != nil {
+		if err := setBoolPtr("ASTERFERRY_SNIFF_ENABLED", &c.Agent.Proxy.Sniff.Enabled); err != nil {
+			return err
+		}
+		if err := setInt("ASTERFERRY_SNIFF_MAX_BYTES", &c.Agent.Proxy.Sniff.MaxBytes); err != nil {
+			return err
+		}
+		if err := setInt("ASTERFERRY_SNIFF_TIMEOUT_MS", &c.Agent.Proxy.Sniff.TimeoutMillis); err != nil {
+			return err
+		}
+	}
+	return c.Validate()
+}
+
 func (c *Config) Validate() error {
 	if c.Version != ConfigVersion {
 		return fmt.Errorf("version must be %d", ConfigVersion)
@@ -201,6 +355,38 @@ func (c *Config) Validate() error {
 			return errors.New("transport.alpn must contain printable ASCII only")
 		}
 	}
+	if c.Logging.Level == "" {
+		c.Logging.Level = "info"
+	}
+	c.Logging.Level = strings.ToLower(strings.TrimSpace(c.Logging.Level))
+	if c.Logging.Level != "debug" && c.Logging.Level != "info" && c.Logging.Level != "warn" && c.Logging.Level != "error" {
+		return errors.New("logging.level must be debug, info, warn or error")
+	}
+	if c.Logging.Format == "" {
+		c.Logging.Format = "json"
+	}
+	c.Logging.Format = strings.ToLower(strings.TrimSpace(c.Logging.Format))
+	if c.Logging.Format != "json" && c.Logging.Format != "text" {
+		return errors.New("logging.format must be json or text")
+	}
+	if c.Logging.Sampling.Enabled == nil {
+		c.Logging.Sampling.Enabled = boolPtr(true)
+	}
+	if c.Logging.Sampling.RatePerSecond == 0 {
+		c.Logging.Sampling.RatePerSecond = 5
+	}
+	if c.Logging.Sampling.Burst == 0 {
+		c.Logging.Sampling.Burst = 20
+	}
+	if c.Logging.Sampling.SummaryIntervalSec == 0 {
+		c.Logging.Sampling.SummaryIntervalSec = 60
+	}
+	if c.Logging.Sampling.MaxKeys == 0 {
+		c.Logging.Sampling.MaxKeys = 4096
+	}
+	if c.Logging.Sampling.RatePerSecond < 1 || c.Logging.Sampling.RatePerSecond > 10000 || c.Logging.Sampling.Burst < 1 || c.Logging.Sampling.Burst > 100000 || c.Logging.Sampling.SummaryIntervalSec < 1 || c.Logging.Sampling.SummaryIntervalSec > 86400 || c.Logging.Sampling.MaxKeys < 64 || c.Logging.Sampling.MaxKeys > 1<<20 {
+		return errors.New("logging.sampling values are out of range")
+	}
 	if c.Management.Listen == "" {
 		if c.Role == RoleGateway {
 			c.Management.Listen = "127.0.0.1:9090"
@@ -212,9 +398,11 @@ func (c *Config) Validate() error {
 		return errors.New("management.listen must bind to loopback")
 	}
 	if c.Transport.MaxBidiRemoteStreams == 0 {
-		c.Transport.MaxBidiRemoteStreams = 256
+		// Reserve one bidirectional stream for the control channel while
+		// retaining a default budget of 256 data streams.
+		c.Transport.MaxBidiRemoteStreams = 257
 	}
-	if c.Transport.MaxBidiRemoteStreams < 1 || c.Transport.MaxBidiRemoteStreams > 65536 {
+	if c.Transport.MaxBidiRemoteStreams < 2 || c.Transport.MaxBidiRemoteStreams > 65536 {
 		return errors.New("transport.max_bidi_remote_streams is out of range")
 	}
 	if c.Transport.HandshakeTimeoutSec == 0 {
@@ -229,8 +417,47 @@ func (c *Config) Validate() error {
 	if c.Transport.HandshakeTimeoutSec < 1 || c.Transport.IdleTimeoutSec < 1 || c.Transport.KeepAliveSec < 1 {
 		return errors.New("transport timeouts must be positive")
 	}
-	if c.Transport.MaxStreamReadBuffer < 0 || c.Transport.MaxStreamWriteBuffer < 0 || c.Transport.MaxConnReadBuffer < 0 {
+	if c.Transport.InitialStreamReceiveWindow < 0 || c.Transport.InitialConnectionReceiveWindow < 0 || c.Transport.MaxStreamReadBuffer < 0 || c.Transport.MaxStreamWriteBuffer < 0 || c.Transport.MaxConnReadBuffer < 0 || c.Transport.UDPReadBufferBytes < 0 || c.Transport.UDPWriteBufferBytes < 0 {
 		return errors.New("transport buffer limits cannot be negative")
+	}
+	if c.Transport.InitialStreamReceiveWindow > 0 && c.Transport.InitialStreamReceiveWindow < 1024 {
+		return errors.New("transport.initial_stream_receive_window_bytes is too small")
+	}
+	if c.Transport.InitialConnectionReceiveWindow > 0 && c.Transport.InitialConnectionReceiveWindow < 1024 {
+		return errors.New("transport.initial_connection_receive_window_bytes is too small")
+	}
+	if c.Transport.MaxStreamReadBuffer > 0 && c.Transport.MaxStreamReadBuffer < 1024 {
+		return errors.New("transport.max_stream_read_buffer is too small")
+	}
+	if c.Transport.MaxConnReadBuffer > 0 && c.Transport.MaxConnReadBuffer < 1024 {
+		return errors.New("transport.max_conn_read_buffer is too small")
+	}
+	if c.Transport.InitialStreamReceiveWindow > 1<<30 || c.Transport.InitialConnectionReceiveWindow > 1<<30 || c.Transport.MaxStreamReadBuffer > 1<<30 || c.Transport.MaxConnReadBuffer > 1<<30 {
+		return errors.New("transport receive window is out of range")
+	}
+	if c.Transport.InitialStreamReceiveWindow > 0 && c.Transport.MaxStreamReadBuffer > 0 && c.Transport.InitialStreamReceiveWindow > c.Transport.MaxStreamReadBuffer {
+		return errors.New("transport.initial_stream_receive_window_bytes exceeds max_stream_read_buffer")
+	}
+	if c.Transport.InitialConnectionReceiveWindow > 0 && c.Transport.MaxConnReadBuffer > 0 && c.Transport.InitialConnectionReceiveWindow > c.Transport.MaxConnReadBuffer {
+		return errors.New("transport.initial_connection_receive_window_bytes exceeds max_conn_read_buffer")
+	}
+	if c.Transport.InitialStreamReceiveWindow > 0 && c.Transport.InitialConnectionReceiveWindow > 0 && c.Transport.InitialConnectionReceiveWindow < c.Transport.InitialStreamReceiveWindow {
+		return errors.New("transport.initial_connection_receive_window_bytes is smaller than the stream window")
+	}
+	if c.Transport.MaxStreamReadBuffer > 0 && c.Transport.MaxConnReadBuffer > 0 && c.Transport.MaxConnReadBuffer < c.Transport.MaxStreamReadBuffer {
+		return errors.New("transport.max_conn_read_buffer is smaller than max_stream_read_buffer")
+	}
+	if c.Transport.UDPReadBufferBytes > 256<<20 || c.Transport.UDPWriteBufferBytes > 256<<20 {
+		return errors.New("transport UDP buffer size is out of range")
+	}
+	if c.Transport.UDPReadBufferBytes > 0 && c.Transport.UDPReadBufferBytes < 64<<10 {
+		return errors.New("transport.udp_read_buffer_bytes must be at least 64KiB")
+	}
+	if c.Transport.UDPWriteBufferBytes > 0 && c.Transport.UDPWriteBufferBytes < 64<<10 {
+		return errors.New("transport.udp_write_buffer_bytes must be at least 64KiB")
+	}
+	if c.Transport.MaxStreamWriteBuffer > 0 {
+		return errors.New("transport.max_stream_write_buffer is not supported by quic-go; remove it")
 	}
 	if c.Limits.MaxAgents == 0 {
 		c.Limits.MaxAgents = 256
@@ -292,10 +519,61 @@ func (c *Config) Validate() error {
 	if c.Obfuscation.MaxPaddingBytes > c.Limits.MaxRecordBytes-relayRecordHeaderBytes {
 		return errors.New("obfuscation.max_padding_bytes exceeds max record size")
 	}
+	if c.Obfuscation.Transport.Mode == "" {
+		c.Obfuscation.Transport.Mode = TransportObfuscationCamouflage
+	}
+	if c.Obfuscation.Transport.Mode != TransportObfuscationStandard && c.Obfuscation.Transport.Mode != TransportObfuscationCamouflage {
+		return errors.New("obfuscation.transport.mode must be standard or camouflage")
+	}
+	if c.Obfuscation.Transport.MinFragmentBytes == 0 {
+		c.Obfuscation.Transport.MinFragmentBytes = 512
+	}
+	if c.Obfuscation.Transport.MaxFragmentBytes == 0 {
+		c.Obfuscation.Transport.MaxFragmentBytes = 1200
+	}
+	if c.Obfuscation.Transport.MaxWirePacketBytes == 0 {
+		c.Obfuscation.Transport.MaxWirePacketBytes = 1280
+	}
+	if c.Obfuscation.Transport.Mode == TransportObfuscationCamouflage {
+		if strings.TrimSpace(c.Obfuscation.Transport.KeyFile) == "" {
+			return errors.New("obfuscation.transport.key_file is required in camouflage mode")
+		}
+		if c.Obfuscation.Transport.HandshakeShaping == nil {
+			c.Obfuscation.Transport.HandshakeShaping = boolPtr(true)
+		}
+	} else {
+		if c.Obfuscation.Transport.HandshakeShaping == nil {
+			c.Obfuscation.Transport.HandshakeShaping = boolPtr(false)
+		}
+		if *c.Obfuscation.Transport.HandshakeShaping {
+			return errors.New("obfuscation.transport.handshake_shaping requires camouflage mode")
+		}
+	}
+	if c.Obfuscation.Transport.MinFragmentBytes < 256 || c.Obfuscation.Transport.MinFragmentBytes > 1200 || c.Obfuscation.Transport.MaxFragmentBytes < c.Obfuscation.Transport.MinFragmentBytes || c.Obfuscation.Transport.MaxFragmentBytes > 1200 {
+		return errors.New("obfuscation.transport fragment sizes are out of range")
+	}
+	if c.Obfuscation.Transport.MaxWirePacketBytes < c.Obfuscation.Transport.MaxFragmentBytes+32 || c.Obfuscation.Transport.MaxWirePacketBytes > 1472 {
+		return errors.New("obfuscation.transport.max_wire_packet_bytes is out of range")
+	}
 	if c.Role == RoleGateway {
 		return c.validateGateway()
 	}
 	return c.validateAgent()
+}
+
+// UsableStreamLimit reserves one incoming bidirectional stream for the
+// control stream. The result is shared by both roles so the application-level
+// admission limit cannot exceed the peer's QUIC stream budget.
+func UsableStreamLimit(transport TransportConfig, limits Limits) int64 {
+	limit := limits.MaxStreamsPerAgent
+	if limit <= 0 {
+		return 0
+	}
+	quicLimit := transport.MaxBidiRemoteStreams - 1
+	if quicLimit > 0 && quicLimit < limit {
+		return quicLimit
+	}
+	return limit
 }
 
 func (c *Config) validateGateway() error {
@@ -365,6 +643,21 @@ func (c *Config) validateAgent() error {
 	}
 	if a.Proxy.DefaultRoute != RouteDirect && a.Proxy.DefaultRoute != RouteGateway {
 		return errors.New("proxy.default_route must be direct or gateway")
+	}
+	if a.Proxy.Sniff.Enabled == nil {
+		a.Proxy.Sniff.Enabled = boolPtr(true)
+	}
+	if a.Proxy.Sniff.MaxBytes == 0 {
+		a.Proxy.Sniff.MaxBytes = 16 << 10
+	}
+	if a.Proxy.Sniff.TimeoutMillis == 0 {
+		a.Proxy.Sniff.TimeoutMillis = 250
+	}
+	if a.Proxy.Sniff.MaxBytes < 1024 || a.Proxy.Sniff.MaxBytes > 1<<20 {
+		return errors.New("agent.proxy.sniff.max_bytes must be between 1KiB and 1MiB")
+	}
+	if a.Proxy.Sniff.TimeoutMillis < 10 || a.Proxy.Sniff.TimeoutMillis > 10000 {
+		return errors.New("agent.proxy.sniff.timeout_milliseconds must be between 10 and 10000")
 	}
 	seenTags := map[string]bool{}
 	for _, in := range a.Proxy.Inbounds {
@@ -548,4 +841,24 @@ func ReadToken(path string) ([]byte, error) {
 	return b, nil
 }
 
+// ReadSecret reads a deployment secret from a text file. A single trailing
+// newline is accepted so secrets generated by command-line tools remain easy
+// to provision, while the bounded size prevents accidental key-file misuse.
+func ReadSecret(path string) ([]byte, error) {
+	b, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("read secret: %w", err)
+	}
+	b = []byte(strings.TrimSpace(string(b)))
+	if len(b) < 32 {
+		return nil, errors.New("secret must contain at least 32 bytes")
+	}
+	if len(b) > 128 {
+		return nil, errors.New("secret must not contain more than 128 bytes")
+	}
+	return b, nil
+}
+
 func TokenFingerprint(token []byte) string { return fmt.Sprintf("%x", sha256.Sum256(token))[:16] }
+
+func boolPtr(value bool) *bool { return &value }

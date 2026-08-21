@@ -1,12 +1,18 @@
-# AsterFerry v2 public Gateway configuration.
-version: 2
+# AsterFerry v3 public Gateway configuration.
+version: 3
 role: gateway
 
 transport:
   # Generate a unique value per deployment and use it on every Agent.
   # Do not reuse the public example value.
   alpn: "af-demo-9b7f2c1d"
-  max_bidi_remote_streams: 256
+  # One stream is reserved for control; 257 permits 256 data streams.
+  max_bidi_remote_streams: 257
+  # Optional high-BDP tuning. Zero/unset keeps quic-go defaults.
+  # initial_stream_receive_window_bytes: 1048576
+  # initial_connection_receive_window_bytes: 8388608
+  # max_stream_read_buffer: 16777216
+  # max_conn_read_buffer: 67108864
   handshake_timeout_seconds: 10
   idle_timeout_seconds: 1800
   keep_alive_seconds: 20
@@ -28,6 +34,28 @@ obfuscation:
   proxy_profile: balanced
   reverse_profile: standard
   max_padding_bytes: 2048
+  transport:
+    # camouflage is the v3 default. Set standard only during an explicit
+    # migration or on a trusted network where raw QUIC is required.
+    mode: camouflage
+    key_file: "/etc/asterferry/obfs.key"
+    # Uncomment while rotating and mount the old key at this path.
+    # previous_key_file: "/etc/asterferry/obfs.key.previous"
+    handshake_shaping: true
+    min_fragment_bytes: 512
+    max_fragment_bytes: 1200
+    max_wire_packet_bytes: 1280
+
+logging:
+  level: info
+  format: json
+  sampling:
+    enabled: true
+    rate_per_second: 5
+    burst: 20
+    summary_interval_seconds: 60
+    max_keys: 4096
+  expose_domain_at_debug: false
 
 gateway:
   listen: "0.0.0.0:4433"

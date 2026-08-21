@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -15,36 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/quic"
+	"asterferry/internal/logging"
 
 	"asterferry/internal/config"
+	"asterferry/internal/proxy"
 	"asterferry/internal/relay"
 	"asterferry/internal/transport"
 )
-
-func (a *Agent) startInbound(in config.Inbound) (net.Listener, error) {
-	l, err := net.Listen("tcp", in.Listen)
-	if err != nil {
-		return nil, err
-	}
-	if in.Protocol == "socks5" {
-		go a.runSOCKS(l, in)
-	} else {
-		go a.runHTTP(l, in)
-	}
-	return l, nil
-}
-
-func (a *Agent) runSOCKS(l net.Listener, in config.Inbound) {
-	defer l.Close()
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return
-		}
-		go a.handleSOCKS(conn, in)
-	}
-}
 
 func (a *Agent) handleSOCKS(conn net.Conn, in config.Inbound) {
 	defer conn.Close()
@@ -205,28 +182,26 @@ func socksReply(conn net.Conn, code byte, addr net.IP, port uint16) {
 }
 
 func (a *Agent) handleSOCKSConnect(conn net.Conn, br *bufio.Reader, tag, host string, port uint16) {
-	_ = br // br has no buffered bytes after the request in normal SOCKS clients.
-	if a.route(tag, host) == config.RouteDirect {
-		dialer := &net.Dialer{Timeout: time.Duration(a.cfg.Limits.DialTimeoutSec) * time.Second}
-		remote, err := dialer.DialContext(a.ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
-		if err != nil {
-			socksReply(conn, 5, nil, 0)
-			return
-		}
-		defer remote.Close()
-		socksReply(conn, 0, remote.LocalAddr().(*net.TCPAddr).IP, uint16(remote.LocalAddr().(*net.TCPAddr).Port))
-		relay.Bidirectional(conn, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
-		return
-	}
-	raw, err := a.OpenProxy(a.ctx, "tcp", host, port)
+	route := a.route(tag, host)
+	remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: port}, proxy.Path(route))
 	if err != nil {
+		a.logProxyEvent(tag, "socks5", host, port, route, "open_failed", route, agentErrorKind(err))
 		socksReply(conn, 5, nil, 0)
 		return
 	}
-	stream := relay.NewConn(raw, a.relayProfile(a.cfg.Obfuscation.ProxyProfile))
-	defer stream.Close()
-	socksReply(conn, 0, net.IPv4zero, 0)
-	relay.Bidirectional(conn, stream, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
+	defer remote.Close()
+	replyIP := net.IPv4zero
+	var replyPort uint16
+	if local, ok := remote.(net.Conn); ok {
+		if address, ok := local.LocalAddr().(*net.TCPAddr); ok {
+			replyIP = address.IP
+			replyPort = uint16(address.Port)
+		}
+	}
+	socksReply(conn, 0, replyIP, replyPort)
+	client := a.sniffClient(conn, br, tag, "socks5", port)
+	a.logProxyEvent(tag, "socks5", host, port, route, "connected", route, "")
+	relay.Bidirectional(client, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
 }
 
 func (a *Agent) handleSOCKSUDP(control net.Conn, tag string) {
@@ -282,7 +257,11 @@ func (a *Agent) handleSOCKSUDP(control net.Conn, tag string) {
 			p = nil
 		}
 		if p == nil {
-			if len(paths) >= int(a.cfg.Limits.MaxStreamsPerAgent) {
+			streamLimit := a.cfg.StreamLimit
+			if streamLimit <= 0 {
+				streamLimit = a.cfg.Limits.MaxStreamsPerAgent
+			}
+			if len(paths) >= int(streamLimit) {
 				mu.Unlock()
 				continue
 			}
@@ -365,8 +344,8 @@ func parseSocksDatagram(b []byte) (host string, port uint16, payload []byte, ok 
 
 type udpPath struct {
 	agent      *Agent
-	stream     *quic.Stream
-	conn       *net.UDPConn
+	stream     io.ReadWriteCloser
+	conn       net.Conn
 	addr       *net.UDPAddr
 	client     *net.UDPConn
 	clientAddr *net.UDPAddr
@@ -388,23 +367,21 @@ func (p *udpPath) touch() {
 func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, client *net.UDPConn, source *net.UDPAddr) *udpPath {
 	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: ctx}
 	p.touch()
-	if a.route(tag, host) == config.RouteDirect {
-		remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(int(port))))
-		if err != nil {
-			return nil
-		}
-		remote, err := net.DialUDP("udp", nil, remoteAddr)
-		if err != nil {
-			return nil
-		}
-		p.conn = remote
-		return p
-	}
-	stream, err := a.OpenProxy(ctx, "udp", host, port)
+	route := proxy.Path(a.route(tag, host))
+	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port}, route)
 	if err != nil {
 		return nil
 	}
-	p.stream = stream
+	if route == proxy.PathDirect {
+		udpConn, ok := remote.(net.Conn)
+		if !ok {
+			_ = remote.Close()
+			return nil
+		}
+		p.conn = udpConn
+		return p
+	}
+	p.stream = remote
 	p.remote = true
 	return p
 }
@@ -508,23 +485,12 @@ func socksDatagram(target string, payload []byte) []byte {
 	return b
 }
 
-func (a *Agent) runHTTP(l net.Listener, in config.Inbound) {
-	defer l.Close()
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return
-		}
-		go a.handleHTTP(conn, in)
-	}
-}
-
 func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		log.Printf("http request parse: %v", err)
+		a.logger.Info("HTTP request parse failed", "event", "proxy.http.parse_failed", "inbound", in.Tag, "error_kind", agentErrorKind(err))
 		return
 	}
 	if in.User != "" {
@@ -537,7 +503,6 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	// Proxy credentials are only for this local hop and must never cross the
 	// encrypted tunnel or reach the destination server.
 	req.Header.Del("Proxy-Authorization")
-	log.Printf("http proxy %s %s %s", in.Tag, req.Method, req.Host)
 	host, portText, err := net.SplitHostPort(req.Host)
 	if err != nil {
 		host = req.Host
@@ -545,28 +510,21 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	}
 	portNum, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || portNum == 0 {
+		a.logProxyEvent(in.Tag, "http", host, 0, "", "invalid_destination", "", "invalid_port")
 		return
 	}
 	if req.Method == http.MethodConnect {
-		if a.route(in.Tag, host) == config.RouteDirect {
-			dialer := &net.Dialer{Timeout: time.Duration(a.cfg.Limits.DialTimeoutSec) * time.Second}
-			remote, err := dialer.DialContext(a.ctx, "tcp", net.JoinHostPort(host, portText))
-			if err != nil {
-				return
-			}
-			defer remote.Close()
-			_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-			relay.Bidirectional(conn, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
-			return
-		}
-		raw, err := a.OpenProxy(a.ctx, "tcp", host, uint16(portNum))
+		route := a.route(in.Tag, host)
+		remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum)}, proxy.Path(route))
 		if err != nil {
+			a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
 			return
 		}
-		stream := relay.NewConn(raw, a.relayProfile(a.cfg.Obfuscation.ProxyProfile))
-		defer stream.Close()
+		defer remote.Close()
 		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-		relay.Bidirectional(conn, stream, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
+		client := a.sniffClient(conn, br, in.Tag, "http_connect", uint16(portNum))
+		a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "connected", route, "")
+		relay.Bidirectional(client, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
 		return
 	}
 	var request bytes.Buffer
@@ -574,32 +532,22 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 		return
 	}
 	var remote io.ReadWriteCloser
-	if a.route(in.Tag, host) == config.RouteDirect {
-		dialer := &net.Dialer{Timeout: time.Duration(a.cfg.Limits.DialTimeoutSec) * time.Second}
-		c, err := dialer.DialContext(a.ctx, "tcp", net.JoinHostPort(host, portText))
-		if err != nil {
-			return
-		}
-		remote = c
-	} else {
-		log.Printf("http proxy tunnel %s:%d", host, portNum)
-		raw, err := a.OpenProxy(a.ctx, "tcp", host, uint16(portNum))
-		if err != nil {
-			log.Printf("http proxy open: %v", err)
-			return
-		}
-		remote = relay.NewConn(raw, a.relayProfile(a.cfg.Obfuscation.ProxyProfile))
+	route := a.route(in.Tag, host)
+	remote, err = a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum)}, proxy.Path(route))
+	if err != nil {
+		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
+		return
 	}
 	defer remote.Close()
 	if _, err := remote.Write(request.Bytes()); err != nil {
-		log.Printf("http proxy write request: %v", err)
+		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "write_failed", route, agentErrorKind(err))
 		return
 	}
 	if flusher, ok := remote.(interface{ Flush() }); ok {
 		flusher.Flush()
 	}
 	relay.Bidirectional(&bufferedConn{Conn: conn, Reader: br}, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
-	log.Printf("http proxy finished %s", req.Host)
+	a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "finished", route, "")
 }
 
 type bufferedConn struct {
@@ -619,4 +567,50 @@ func (c *bufferedConn) CloseWrite() error {
 		return h.CloseWrite()
 	}
 	return c.Conn.Close()
+}
+
+func (a *Agent) sniffClient(conn net.Conn, reader io.Reader, inbound, protocol string, port uint16) *bufferedConn {
+	if a.cfg.Agent.Proxy.Sniff.Enabled {
+		result, replay := sniffTLS(conn, reader, a.cfg.Agent.Proxy.Sniff.MaxBytes, time.Duration(a.cfg.Agent.Proxy.Sniff.TimeoutMillis)*time.Millisecond)
+		if result.Domain != "" {
+			attrs := []any{
+				"event", "proxy.sniff.tls_sni",
+				"inbound", inbound,
+				"protocol", protocol,
+				"target_port", port,
+				"domain_hash", logging.DomainHash(result.Domain),
+				"sniff_result", "observed",
+			}
+			if a.cfg.Logging.ExposeDomainAtDebug && a.logger.Enabled(context.Background(), slog.LevelDebug) {
+				attrs = append(attrs, "domain", result.Domain)
+				a.logger.Debug("TLS SNI observed", attrs...)
+			} else {
+				a.logger.Info("TLS SNI observed", attrs...)
+			}
+		}
+		return &bufferedConn{Conn: conn, Reader: replay}
+	}
+	return &bufferedConn{Conn: conn, Reader: reader}
+}
+
+func (a *Agent) logProxyEvent(inbound, protocol, host string, port uint16, route, result, path, errKind string) {
+	attrs := []any{
+		"event", "proxy.request",
+		"inbound", inbound,
+		"protocol", protocol,
+		"target_port", port,
+		"route", route,
+		"result", result,
+		"path", path,
+	}
+	if protocol == "http" {
+		attrs = append(attrs, "sniff_protocol", "http_host")
+	}
+	if host != "" {
+		attrs = append(attrs, "target_hash", logging.DomainHash(host))
+	}
+	if errKind != "" {
+		attrs = append(attrs, "error_kind", errKind)
+	}
+	a.logger.Info("proxy request", attrs...)
 }

@@ -56,6 +56,10 @@ spec:
             - {{ .Values.role | quote }}
             - "-c"
             - "/etc/asterferry/config.yaml"
+          {{- with .Values.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: management
               containerPort: {{ include "asterferry.managementPort" . | trim }}

@@ -9,12 +9,38 @@ import (
 )
 
 type Metrics struct {
-	Connections     atomic.Int64
-	ActiveStreams   atomic.Int64
-	BytesIn         atomic.Uint64
-	BytesOut        atomic.Uint64
-	AuthFailures    atomic.Uint64
-	MappingFailures atomic.Uint64
+	Connections                 atomic.Int64
+	ActiveStreams               atomic.Int64
+	BytesIn                     atomic.Uint64
+	BytesOut                    atomic.Uint64
+	AuthFailures                atomic.Uint64
+	MappingFailures             atomic.Uint64
+	ObfuscationAccepted         atomic.Uint64
+	ObfuscationRejected         atomic.Uint64
+	ObfuscationPreviousKey      atomic.Uint64
+	ObfuscationFragmentsDropped atomic.Uint64
+}
+
+func (m *Metrics) ObfuscationPacketAccepted(previousKey bool) {
+	if m == nil {
+		return
+	}
+	m.ObfuscationAccepted.Add(1)
+	if previousKey {
+		m.ObfuscationPreviousKey.Add(1)
+	}
+}
+
+func (m *Metrics) ObfuscationPacketRejected() {
+	if m != nil {
+		m.ObfuscationRejected.Add(1)
+	}
+}
+
+func (m *Metrics) ObfuscationFragmentDropped() {
+	if m != nil {
+		m.ObfuscationFragmentsDropped.Add(1)
+	}
 }
 
 type Server struct {
@@ -23,7 +49,12 @@ type Server struct {
 	Metrics    *Metrics
 }
 
-func Start(listen string, metrics *Metrics, status func() any, ready func() bool) (*Server, error) {
+type StatusProvider interface {
+	Status() any
+	IsReady() bool
+}
+
+func Start(listen string, metrics *Metrics, provider StatusProvider) (*Server, error) {
 	if metrics == nil {
 		metrics = &Metrics{}
 	}
@@ -33,7 +64,7 @@ func Start(listen string, metrics *Metrics, status func() any, ready func() bool
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if ready != nil && !ready() {
+		if provider != nil && !provider.IsReady() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte("not ready\n"))
 			return
@@ -44,11 +75,11 @@ func Start(listen string, metrics *Metrics, status func() any, ready func() bool
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) })
 	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if status == nil {
+		if provider == nil {
 			_, _ = w.Write([]byte("{}\n"))
 			return
 		}
-		b, err := json.Marshal(status())
+		b, err := json.Marshal(provider.Status())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -85,4 +116,8 @@ func writeMetrics(w http.ResponseWriter, m *Metrics) {
 	f("asterferry_bytes_out_total", m.BytesOut.Load())
 	f("asterferry_auth_failures_total", m.AuthFailures.Load())
 	f("asterferry_mapping_failures_total", m.MappingFailures.Load())
+	f("asterferry_obfuscation_packets_accepted_total", m.ObfuscationAccepted.Load())
+	f("asterferry_obfuscation_packets_rejected_total", m.ObfuscationRejected.Load())
+	f("asterferry_obfuscation_previous_key_total", m.ObfuscationPreviousKey.Load())
+	f("asterferry_obfuscation_fragments_dropped_total", m.ObfuscationFragmentsDropped.Load())
 }

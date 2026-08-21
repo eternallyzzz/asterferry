@@ -12,6 +12,7 @@ import (
 	"asterferry/internal/agent"
 	"asterferry/internal/config"
 	"asterferry/internal/gateway"
+	"asterferry/internal/logging"
 )
 
 func main() {
@@ -34,6 +35,9 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := config.ApplyEnv(c); err != nil {
+		return err
+	}
 	switch args[0] {
 	case "validate":
 		fmt.Printf("valid %s configuration\n", c.Role)
@@ -42,7 +46,16 @@ func run(args []string) error {
 		if c.Role != config.RoleGateway {
 			return errors.New("configuration mode is not gateway")
 		}
-		s, err := gateway.New(c)
+		opts, err := c.ResolveGateway()
+		if err != nil {
+			return err
+		}
+		logger, closeLog, err := logging.New(opts.Logging, c.Role, os.Stderr)
+		if err != nil {
+			return err
+		}
+		defer closeLog()
+		s, err := gateway.New(opts, logger)
 		if err != nil {
 			return err
 		}
@@ -54,7 +67,16 @@ func run(args []string) error {
 		if c.Role != config.RoleAgent {
 			return errors.New("configuration mode is not agent")
 		}
-		a, err := agent.New(c)
+		opts, err := c.ResolveAgent()
+		if err != nil {
+			return err
+		}
+		logger, closeLog, err := logging.New(opts.Logging, c.Role, os.Stderr)
+		if err != nil {
+			return err
+		}
+		defer closeLog()
+		a, err := agent.New(opts, logger)
 		if err != nil {
 			return err
 		}

@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"sync"
 	"time"
 
-	"golang.org/x/net/quic"
-
 	"asterferry/internal/config"
+	"asterferry/internal/lifecycle"
 	"asterferry/internal/observability"
 	"asterferry/internal/relay"
 	"asterferry/internal/security"
@@ -20,17 +20,20 @@ import (
 )
 
 type Gateway struct {
-	cfg     *config.Config
+	cfg     *config.GatewayOptions
 	ctx     context.Context
 	cancel  context.CancelFunc
-	ep      *quic.Endpoint
+	ep      transport.Listener
+	logger  *slog.Logger
 	metrics *observability.Metrics
 	mgmt    *observability.Server
 
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	mappings map[string]*Mapping
-	acl      map[string]*credential
+	sessions  *sessionRegistry
+	mappings  *mappingManager
+	egress    *egressProxy
+	acl       map[string]*credential
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type credential struct {
@@ -43,7 +46,7 @@ type credential struct {
 type Session struct {
 	gateway   *Gateway
 	agentID   string
-	conn      *quic.Conn
+	conn      transport.Session
 	ctx       context.Context
 	cancel    context.CancelFunc
 	writeMu   sync.Mutex
@@ -53,25 +56,28 @@ type Session struct {
 }
 
 type status struct {
-	Mode      string `json:"mode"`
-	Ready     bool   `json:"ready"`
-	Agents    int    `json:"agents"`
-	Mappings  int    `json:"mappings"`
-	Listening string `json:"listening"`
+	Mode                        string `json:"mode"`
+	Ready                       bool   `json:"ready"`
+	Agents                      int    `json:"agents"`
+	Mappings                    int    `json:"mappings"`
+	Listening                   string `json:"listening"`
+	TransportObfuscationMode    string `json:"transport_obfuscation_mode"`
+	TransportObfuscationKeyHash string `json:"transport_obfuscation_key_fingerprint"`
 }
 
-func New(cfg *config.Config) (*Gateway, error) {
-	if cfg == nil || cfg.Role != config.RoleGateway || cfg.Gateway == nil {
+func New(cfg *config.GatewayOptions, loggerOpt ...*slog.Logger) (*Gateway, error) {
+	if cfg == nil {
 		return nil, errors.New("gateway requires gateway configuration")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Gateway{cfg: cfg, ctx: ctx, cancel: cancel, metrics: &observability.Metrics{}, sessions: map[string]*Session{}, mappings: map[string]*Mapping{}, acl: map[string]*credential{}}
-	for _, agent := range cfg.Gateway.Agents {
-		token, err := config.ReadToken(agent.TokenFile)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("agent %q: %w", agent.ID, err)
-		}
+	logger := slog.Default()
+	if len(loggerOpt) > 0 && loggerOpt[0] != nil {
+		logger = loggerOpt[0]
+	}
+	s := &Gateway{cfg: cfg, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, sessions: newSessionRegistry(), acl: map[string]*credential{}}
+	s.mappings = newMappingManager(s)
+	s.egress = newEgressProxy(s)
+	for _, agent := range cfg.Agents {
 		tcp, _ := config.ParsePortRanges(agent.Reverse.TCPPorts)
 		udp, _ := config.ParsePortRanges(agent.Reverse.UDPPorts)
 		egress, err := security.NewEgressPolicy(agent.Egress)
@@ -79,20 +85,20 @@ func New(cfg *config.Config) (*Gateway, error) {
 			cancel()
 			return nil, fmt.Errorf("agent %q egress: %w", agent.ID, err)
 		}
-		s.acl[agent.ID] = &credential{token: token, tcp: tcp, udp: udp, egress: egress}
+		s.acl[agent.ID] = &credential{token: append([]byte(nil), agent.Token...), tcp: tcp, udp: udp, egress: egress}
 	}
 	return s, nil
 }
 
 func (s *Gateway) Start() error {
-	ep, err := transport.Listen(s.cfg)
+	ep, err := transport.Listen(s.cfg, s.metrics)
 	if err != nil {
 		return err
 	}
 	s.ep = ep
-	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s.Status, s.IsReady)
+	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s)
 	if err != nil {
-		_ = ep.Close(context.Background())
+		_ = ep.Close()
 		return err
 	}
 	s.mgmt = mgmt
@@ -108,29 +114,38 @@ func (s *Gateway) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.cancel()
-	if s.mgmt != nil {
-		_ = s.mgmt.Close()
-	}
-	s.mu.Lock()
-	sessions := make([]*Session, 0, len(s.sessions))
-	for _, sess := range s.sessions {
-		sessions = append(sessions, sess)
-	}
-	s.mu.Unlock()
-	for _, sess := range sessions {
-		sess.Close()
-	}
-	if s.ep != nil {
-		return s.ep.Close(context.Background())
-	}
-	return nil
+	s.closeOnce.Do(func() {
+		s.cancel()
+		if s.mgmt != nil {
+			_ = s.mgmt.Close()
+		}
+		if s.mappings != nil {
+			s.mappings.CloseAll()
+		}
+		if s.sessions != nil {
+			s.sessions.CloseAll()
+		}
+		if s.ep != nil {
+			s.closeErr = s.ep.Close()
+		}
+	})
+	return s.closeErr
 }
 
 func (s *Gateway) Status() any {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return status{Mode: config.RoleGateway, Ready: s.IsReady(), Agents: len(s.sessions), Mappings: len(s.mappings), Listening: s.cfg.Gateway.Listen}
+	keyHash := ""
+	if len(s.cfg.TransportObfuscation.CurrentKey) > 0 {
+		keyHash = config.TokenFingerprint(s.cfg.TransportObfuscation.CurrentKey)
+	}
+	return status{
+		Mode:                        config.RoleGateway,
+		Ready:                       s.IsReady(),
+		Agents:                      s.sessions.Count(),
+		Mappings:                    s.mappings.Count(),
+		Listening:                   s.cfg.Gateway.Listen,
+		TransportObfuscationMode:    s.cfg.TransportObfuscation.Mode,
+		TransportObfuscationKeyHash: keyHash,
+	}
 }
 
 func (s *Gateway) acceptLoop() {
@@ -143,38 +158,35 @@ func (s *Gateway) acceptLoop() {
 	}
 }
 
-func (s *Gateway) handleConn(conn *quic.Conn) {
+func (s *Gateway) handleConn(conn transport.Session) {
 	s.metrics.Connections.Add(1)
 	defer s.metrics.Connections.Add(-1)
 	stream, err := conn.AcceptStream(s.ctx)
 	if err != nil {
-		log.Printf("gateway accept control stream failed: %v", err)
-		_ = conn.Close()
+		s.logger.Error("accept control stream failed", "event", "gateway.control_stream.accept_failed", "error_kind", errorKind(err))
+		_ = transport.CloseSession(conn)
 		return
 	}
 	handshakeCtx, cancelHandshake := context.WithTimeout(s.ctx, time.Duration(s.cfg.Transport.HandshakeTimeoutSec)*time.Second)
-	stream.SetReadContext(handshakeCtx)
-	stream.SetWriteContext(handshakeCtx)
+	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	sess, err := s.authenticate(conn, stream)
 	cancelHandshake()
+	stopStreamContext()
 	if err != nil {
-		log.Printf("gateway connection rejected: %v", err)
+		s.logger.Warn("connection rejected", "event", "gateway.auth.rejected", "error_kind", errorKind(err), "security_audit", true)
 		s.metrics.AuthFailures.Add(1)
-		_ = conn.Close()
+		_ = transport.CloseSession(conn)
 		return
 	}
-	stream.SetReadContext(sess.ctx)
-	stream.SetWriteContext(sess.ctx)
-	s.mu.Lock()
-	old := s.sessions[sess.agentID]
-	if old == nil && int64(len(s.sessions)) >= s.cfg.Limits.MaxAgents {
-		s.mu.Unlock()
+	stopStreamContext = transport.SetStreamContext(stream, sess.ctx)
+	defer stopStreamContext()
+	old, accepted := s.sessions.Add(sess, s.cfg.Limits.MaxAgents)
+	if !accepted {
 		s.metrics.AuthFailures.Add(1)
-		_ = conn.Close()
+		s.logger.Warn("agent limit reached", "event", "gateway.auth.limit_rejected", "agent_id", sess.agentID, "security_audit", true)
+		_ = transport.CloseSession(conn)
 		return
 	}
-	s.sessions[sess.agentID] = sess
-	s.mu.Unlock()
 	if old != nil {
 		old.Close()
 	}
@@ -185,17 +197,18 @@ func (s *Gateway) handleConn(conn *quic.Conn) {
 		incoming, err := conn.AcceptStream(sess.ctx)
 		if err != nil {
 			if s.ctx.Err() == nil {
-				log.Printf("gateway session %s closed: %v", sess.agentID, err)
+				s.logger.Info("session closed", "event", "gateway.session.closed", "agent_id", sess.agentID, "error_kind", errorKind(err))
 			}
 			<-controlDone
-			s.removeSession(sess)
+			s.sessions.Remove(sess)
+			s.mappings.RemoveSession(sess)
 			return
 		}
 		go s.handleAgentStream(sess, incoming)
 	}
 }
 
-func (s *Gateway) authenticate(conn *quic.Conn, stream *quic.Stream) (*Session, error) {
+func (s *Gateway) authenticate(conn transport.Session, stream transport.Stream) (*Session, error) {
 	max := s.cfg.Limits.MaxFrameBytes
 	f, err := transport.ReadFrame(stream, max)
 	if err != nil || f.Type != transport.TypeHello {
@@ -239,18 +252,18 @@ func (s *Gateway) authenticate(conn *quic.Conn, stream *quic.Stream) (*Session, 
 		conn:      conn,
 		ctx:       ctx,
 		cancel:    cancel,
-		streamSem: make(chan struct{}, s.cfg.Limits.MaxStreamsPerAgent),
+		streamSem: make(chan struct{}, s.cfg.StreamLimit),
 		connSem:   make(chan struct{}, s.cfg.Limits.MaxConnectionsPerAgent),
 	}, nil
 }
 
-func (s *Gateway) controlLoop(sess *Session, stream *quic.Stream) {
+func (s *Gateway) controlLoop(sess *Session, stream transport.Stream) {
 	defer stream.Close()
 	for {
 		f, err := transport.ReadFrame(stream, s.cfg.Limits.MaxFrameBytes)
 		if err != nil {
 			if s.ctx.Err() == nil {
-				log.Printf("gateway control loop %s ended: %v", sess.agentID, err)
+				s.logger.Info("control loop ended", "event", "gateway.control.ended", "agent_id", sess.agentID, "error_kind", errorKind(err))
 			}
 			return
 		}
@@ -260,7 +273,7 @@ func (s *Gateway) controlLoop(sess *Session, stream *quic.Stream) {
 			if err := transport.DecodeJSON(f, &reg); err != nil {
 				return
 			}
-			result := s.register(sess, reg.Mappings)
+			result := s.mappings.Register(sess, reg.Mappings)
 			out, _ := transport.JSONFrame(transport.TypeRegisterResult, f.RequestID, result)
 			if writeErr := sess.writeControl(stream, out); writeErr != nil {
 				return
@@ -276,93 +289,7 @@ func (s *Gateway) controlLoop(sess *Session, stream *quic.Stream) {
 	}
 }
 
-func (s *Gateway) register(sess *Session, specs []transport.TunnelRegistration) transport.RegisterResult {
-	cred := s.acl[sess.agentID]
-	if cred == nil {
-		return transport.RegisterResult{Error: "agent credentials disappeared"}
-	}
-	if len(specs) > int(s.cfg.Limits.MaxStreamsPerAgent) {
-		return transport.RegisterResult{Error: "mapping count exceeds agent limit"}
-	}
-	seen := map[string]bool{}
-	seenPorts := map[string]bool{}
-	for _, spec := range specs {
-		if spec.Name == "" || seen[spec.Name] {
-			return transport.RegisterResult{Error: "duplicate or empty mapping name"}
-		}
-		seen[spec.Name] = true
-		if spec.Protocol != "tcp" && spec.Protocol != "udp" {
-			return transport.RegisterResult{Error: "unsupported mapping protocol"}
-		}
-		if _, err := relay.NewProfile(s.profile(spec.Profile), s.cfg.Limits.MaxRecordBytes, s.cfg.Obfuscation.MaxPaddingBytes); err != nil {
-			return transport.RegisterResult{Error: "unsupported mapping profile"}
-		}
-		if !allowedPort(spec.Protocol, spec.GatewayPort, cred) {
-			return transport.RegisterResult{Error: fmt.Sprintf("port %d is not allowed", spec.GatewayPort)}
-		}
-		key := mappingKey(spec.Protocol, spec.GatewayPort)
-		if seenPorts[key] {
-			return transport.RegisterResult{Error: fmt.Sprintf("port %d is registered more than once", spec.GatewayPort)}
-		}
-		seenPorts[key] = true
-		s.mu.RLock()
-		existing := s.mappings[key]
-		s.mu.RUnlock()
-		if existing != nil && existing.session != sess {
-			return transport.RegisterResult{Error: fmt.Sprintf("port %d is already in use", spec.GatewayPort)}
-		}
-	}
-
-	s.mu.Lock()
-	oldMappings := make([]*Mapping, 0)
-	for key, m := range s.mappings {
-		if m.session == sess {
-			delete(s.mappings, key)
-			oldMappings = append(oldMappings, m)
-		}
-	}
-	s.mu.Unlock()
-	for _, m := range oldMappings {
-		_ = m.Close()
-	}
-	created := make([]*Mapping, 0, len(specs))
-	for _, spec := range specs {
-		m, err := newMapping(s, sess, spec)
-		if err != nil {
-			for _, old := range created {
-				_ = old.Close()
-			}
-			s.metrics.MappingFailures.Add(1)
-			return transport.RegisterResult{Error: fmt.Sprintf("bind %s/%d: %v", spec.Protocol, spec.GatewayPort, err)}
-		}
-		created = append(created, m)
-	}
-	s.mu.Lock()
-	for _, m := range created {
-		s.mappings[m.key] = m
-	}
-	s.mu.Unlock()
-	for _, m := range created {
-		go m.Run()
-	}
-	return transport.RegisterResult{Mappings: specs}
-}
-
-func (s *Gateway) removeSession(sess *Session) {
-	s.mu.Lock()
-	if s.sessions[sess.agentID] == sess {
-		delete(s.sessions, sess.agentID)
-	}
-	for key, m := range s.mappings {
-		if m.session == sess {
-			delete(s.mappings, key)
-			go m.Close()
-		}
-	}
-	s.mu.Unlock()
-}
-
-func (s *Gateway) handleAgentStream(sess *Session, stream *quic.Stream) {
+func (s *Gateway) handleAgentStream(sess *Session, stream transport.Stream) {
 	if !sess.acquireStream() {
 		sendOpenError(stream, 0, "agent stream limit exceeded", s.cfg.Limits.MaxFrameBytes)
 		_ = stream.Close()
@@ -371,10 +298,12 @@ func (s *Gateway) handleAgentStream(sess *Session, stream *quic.Stream) {
 	defer sess.releaseStream()
 	defer stream.Close()
 	handshakeCtx, cancelHandshake := context.WithTimeout(sess.ctx, time.Duration(s.cfg.Transport.HandshakeTimeoutSec)*time.Second)
-	stream.SetReadContext(handshakeCtx)
+	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	f, err := transport.ReadFrame(stream, s.cfg.Limits.MaxFrameBytes)
 	cancelHandshake()
-	stream.SetReadContext(sess.ctx)
+	stopStreamContext()
+	stopStreamContext = transport.SetStreamContext(stream, sess.ctx)
+	defer stopStreamContext()
 	if err != nil || f.Type != transport.TypeOpenProxy {
 		return
 	}
@@ -410,13 +339,13 @@ func (s *Gateway) handleAgentStream(sess *Session, stream *quic.Stream) {
 		return
 	}
 	if open.Network == "tcp" {
-		s.proxyTCP(sess, stream, address, f.RequestID, profile)
+		s.egress.TCP(sess, stream, address, f.RequestID, profile)
 		return
 	}
-	s.proxyUDP(sess, stream, address, f.RequestID, s.profile(open.Profile))
+	s.egress.UDP(sess, stream, address, f.RequestID, s.profile(open.Profile))
 }
 
-func (s *Gateway) proxyTCP(sess *Session, stream *quic.Stream, address string, requestID uint64, profile relay.Profile) {
+func (s *Gateway) proxyTCP(sess *Session, stream transport.Stream, address string, requestID uint64, profile relay.Profile) {
 	dialer := &net.Dialer{Timeout: time.Duration(s.cfg.Limits.DialTimeoutSec) * time.Second}
 	conn, err := dialer.DialContext(sess.ctx, "tcp", address)
 	if err != nil {
@@ -434,7 +363,7 @@ func (s *Gateway) proxyTCP(sess *Session, stream *quic.Stream, address string, r
 	relay.Bidirectional(remote, conn, relay.Counters{In: func(n uint64) { s.metrics.BytesIn.Add(n) }, Out: func(n uint64) { s.metrics.BytesOut.Add(n) }})
 }
 
-func (s *Gateway) proxyUDP(sess *Session, stream *quic.Stream, address string, requestID uint64, profile string) {
+func (s *Gateway) proxyUDP(sess *Session, stream transport.Stream, address string, requestID uint64, profile string) {
 	remote, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
 		sendOpenError(stream, requestID, "destination unavailable", s.cfg.Limits.MaxFrameBytes)
@@ -552,7 +481,7 @@ func (s *Session) acquireConnection() (func(), bool) {
 	}
 }
 
-func (s *Session) writeControl(stream *quic.Stream, f transport.Frame) error {
+func (s *Session) writeControl(stream transport.Stream, f transport.Frame) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return writeFrame(stream, f, s.gateway.cfg.Limits.MaxFrameBytes)
@@ -560,10 +489,11 @@ func (s *Session) writeControl(stream *quic.Stream, f transport.Frame) error {
 
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
-		log.Printf("gateway session %s closing", s.agentID)
+		s.gateway.logger.Info("session closing", "event", "gateway.session.closing", "agent_id", s.agentID)
 		s.cancel()
-		_ = s.conn.Close()
-		s.gateway.removeSession(s)
+		_ = transport.CloseSession(s.conn)
+		s.gateway.sessions.Remove(s)
+		s.gateway.mappings.RemoveSession(s)
 	})
 }
 
@@ -571,15 +501,18 @@ func (s *Gateway) profile(name string) string {
 	return name
 }
 
-func writeFrame(stream *quic.Stream, f transport.Frame, max int64) error {
+func writeFrame(stream io.Writer, f transport.Frame, max int64) error {
 	if err := transport.WriteFrame(stream, f, max); err != nil {
 		return err
 	}
-	stream.Flush()
 	return nil
 }
 
-func sendOpenError(stream *quic.Stream, id uint64, message string, max int64) {
+func sendOpenError(stream io.Writer, id uint64, message string, max int64) {
 	f, _ := transport.JSONFrame(transport.TypeOpenError, id, transport.OpenResult{Error: message})
 	_ = writeFrame(stream, f, max)
+}
+
+func errorKind(err error) string {
+	return lifecycle.ErrorKind(err)
 }

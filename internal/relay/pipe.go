@@ -7,11 +7,20 @@ import (
 
 type Counters struct{ In, Out func(uint64) }
 
+const copyBufferSize = 32 * 1024
+
+var copyBuffers = sync.Pool{New: func() any {
+	buf := make([]byte, copyBufferSize)
+	return &buf
+}}
+
 func Bidirectional(a, b io.ReadWriteCloser, counters Counters) {
 	var wg sync.WaitGroup
 	copyOne := func(dst io.WriteCloser, src io.Reader, count func(uint64)) {
 		defer wg.Done()
-		buf := make([]byte, 32*1024)
+		bufPtr := copyBuffers.Get().(*[]byte)
+		buf := *bufPtr
+		defer copyBuffers.Put(bufPtr)
 		for {
 			n, err := src.Read(buf)
 			if n > 0 {

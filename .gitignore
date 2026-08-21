@@ -1,5 +1,6 @@
 *.exe
 *.log
 *.err
+tmp/
 .idea/
 .vscode/
