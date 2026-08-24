@@ -32,7 +32,7 @@ const (
 	ProfileStandard = "standard"
 	ProfileBalanced = "balanced"
 
-	relayRecordHeaderBytes = 8
+	relayRecordHeaderBytes = 12
 )
 
 // Config is a strict role-specific document. The selected role must be the
@@ -117,6 +117,7 @@ type Limits struct {
 	MaxInboundConnections  int64 `yaml:"max_inbound_connections"`
 	MaxFrameBytes          int64 `yaml:"max_frame_bytes"`
 	MaxRecordBytes         int64 `yaml:"max_record_bytes"`
+	MaxWriteBatchBytes     int64 `yaml:"max_write_batch_bytes"`
 	MaxUDPBytes            int64 `yaml:"max_udp_bytes"`
 	DialTimeoutSec         int64 `yaml:"dial_timeout_seconds"`
 	UDPIdleTimeoutSec      int64 `yaml:"udp_idle_timeout_seconds"`
@@ -582,7 +583,10 @@ func (c *Config) Validate() error {
 		c.Limits.MaxFrameBytes = 16 << 20
 	}
 	if c.Limits.MaxRecordBytes == 0 {
-		c.Limits.MaxRecordBytes = 16 << 10
+		c.Limits.MaxRecordBytes = 64 << 10
+	}
+	if c.Limits.MaxWriteBatchBytes == 0 {
+		c.Limits.MaxWriteBatchBytes = 256 << 10
 	}
 	if c.Limits.MaxUDPBytes == 0 {
 		c.Limits.MaxUDPBytes = 64 << 10
@@ -604,6 +608,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxRecordBytes < 1024 || c.Limits.MaxRecordBytes > c.Limits.MaxFrameBytes {
 		return errors.New("limits.max_record_bytes is out of range")
+	}
+	if c.Limits.MaxWriteBatchBytes < c.Limits.MaxRecordBytes || c.Limits.MaxWriteBatchBytes > 4<<20 {
+		return errors.New("limits.max_write_batch_bytes must be at least max_record_bytes and no more than 4MiB")
 	}
 	if c.Limits.MaxUDPBytes < 512 || c.Limits.MaxUDPBytes > 64<<10 {
 		return errors.New("limits.max_udp_bytes must be between 512B and 64KiB")

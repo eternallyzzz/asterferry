@@ -9,10 +9,16 @@ root="${ASTERFERRY_WSL_ROOT:-$(git rev-parse --show-toplevel)}"
 cd "$root"
 bench_time="${ASTERFERRY_BENCHTIME:-30s}"
 count="${ASTERFERRY_BENCHCOUNT:-5}"
+suite="${ASTERFERRY_BENCH_SUITE:-smoke}"
 if [ -n "${ASTERFERRY_BENCHREGEX_B64:-}" ]; then
   bench_regex="$(printf '%s' "$ASTERFERRY_BENCHREGEX_B64" | base64 -d)"
 else
-  bench_regex="${ASTERFERRY_BENCHREGEX:-Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)}"
+  if [ "$suite" = "full" ]; then
+    default_regex='Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)'
+  else
+    default_regex='Benchmark(ConnRoundTrip|AsterFerryProxyLatency)|AsterFerryProxy/mode=(standard|camouflage)/profile=balanced/payload=65536/streams=8'
+  fi
+  bench_regex="${ASTERFERRY_BENCHREGEX:-$default_regex}"
 fi
 output_dir="$root/tmp/perf/wsl"
 mkdir -p "$output_dir"
@@ -41,8 +47,8 @@ else
   gomaxprocs="$(nproc 2>/dev/null || true)"
 fi
 
-printf 'go=%s\ngoos=%s\ngoarch=%s\ngomaxprocs=%s\ncommit=%s\n' \
-  "$go_version" "$goos" "$goarch" "$gomaxprocs" "$(git rev-parse HEAD)" \
+printf 'go=%s\ngoos=%s\ngoarch=%s\ngomaxprocs=%s\ncommit=%s\nsuite=%s\nregex=%s\n' \
+  "$go_version" "$goos" "$goarch" "$gomaxprocs" "$(git rev-parse HEAD)" "$suite" "$bench_regex" \
   > "$output_dir/metadata.txt"
 sysctl net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default 2>/dev/null \
   | tee -a "$output_dir/metadata.txt" || true

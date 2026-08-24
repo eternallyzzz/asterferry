@@ -8,7 +8,7 @@ import (
 
 func TestNegotiationRejectsMalformedOffers(t *testing.T) {
 	baseCaps := []Capability{CapabilityErrorsV1, CapabilityLimitsV1}
-	baseLimits := Limits{MaxFrameBytes: 4096, MaxRecordBytes: 2048, MaxUDPBytes: 1024, MaxStreams: 4}
+	baseLimits := Limits{MaxFrameBytes: 4096, MaxRecordBytes: 2048, MaxWriteBatchBytes: 4096, MaxUDPBytes: 1024, MaxStreams: 4}
 	for _, caps := range [][]Capability{
 		{CapabilityUnspecified},
 		{CapabilityErrorsV1, CapabilityErrorsV1},
@@ -67,8 +67,8 @@ func TestCapabilitiesFromRuntimeOptions(t *testing.T) {
 			t.Fatalf("gateway capabilities missing %v: %#v", wanted, gatewayCaps)
 		}
 	}
-	limits := LimitsFromConfig(config.Limits{MaxFrameBytes: 2048, MaxRecordBytes: 1024, MaxUDPBytes: 512, MaxStreamsPerAgent: 8}, 0)
-	if limits.MaxStreams != 8 {
-		t.Fatalf("fallback stream limit = %d", limits.MaxStreams)
+	limits := LimitsFromConfig(config.Limits{MaxFrameBytes: 2048, MaxRecordBytes: 1024, MaxWriteBatchBytes: 4096, MaxUDPBytes: 512, MaxStreamsPerAgent: 8}, 0)
+	if limits.MaxStreams != 8 || limits.MaxWriteBatchBytes != 4096 {
+		t.Fatalf("config limit mapping = %#v", limits)
 	}
 }

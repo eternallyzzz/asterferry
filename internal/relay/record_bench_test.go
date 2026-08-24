@@ -14,7 +14,7 @@ func BenchmarkConnRoundTrip(b *testing.B) {
 	payload := bytes.Repeat([]byte("a"), 64<<10)
 	for _, profileName := range []string{"standard", "balanced"} {
 		b.Run(profileName, func(b *testing.B) {
-			profile, err := NewProfile(profileName, 16<<10, 2048)
+			profile, err := NewProfileWithBatch(profileName, 16<<10, 2048, 256<<10)
 			if err != nil {
 				b.Fatal(err)
 			}

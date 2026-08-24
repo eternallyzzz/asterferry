@@ -66,7 +66,7 @@ func ValidateNodeID(nodeID string) error {
 }
 
 // NewSessionID creates an opaque identifier for one local transport session.
-// It is used for ownership and logs only; it is not sent over the v4 wire.
+// It is used for ownership and logs only; it is not sent over the v5 wire.
 func NewSessionID() (string, error) {
 	var raw [sessionIDByteCount]byte
 	if _, err := rand.Read(raw[:]); err != nil {

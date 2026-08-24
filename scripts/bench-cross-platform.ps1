@@ -45,7 +45,7 @@ function Start-WslProcess([string]$binary, [string[]]$arguments, [string]$name) 
 }
 
 if (-not (Test-Path -LiteralPath $GatewayConfig) -or -not (Test-Path -LiteralPath $AgentConfig)) {
-    throw "Both -GatewayConfig and -AgentConfig must point to existing v4 configurations."
+    throw "Both -GatewayConfig and -AgentConfig must point to existing v5 configurations."
 }
 if ($Streams -lt 1 -or $Streams -gt 4096) { throw "Streams must be between 1 and 4096." }
 if ($PayloadBytes -lt 1 -or $PayloadBytes -gt (16MB)) { throw "PayloadBytes must be between 1 and 16MiB." }

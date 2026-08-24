@@ -118,6 +118,24 @@ func TestTransportPerformanceLimitsValidate(t *testing.T) {
 	}
 }
 
+func TestRelayBatchLimitValidation(t *testing.T) {
+	c := gatewayConfig()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Limits.MaxRecordBytes != 64<<10 || c.Limits.MaxWriteBatchBytes != 256<<10 {
+		t.Fatalf("v5 relay defaults = record %d, batch %d", c.Limits.MaxRecordBytes, c.Limits.MaxWriteBatchBytes)
+	}
+	for _, batch := range []int64{1024, 4<<20 + 1} {
+		bad := gatewayConfig()
+		bad.Limits.MaxRecordBytes = 64 << 10
+		bad.Limits.MaxWriteBatchBytes = batch
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("invalid write batch %d was accepted", batch)
+		}
+	}
+}
+
 func TestClusterNodeIDValidationAndRuntimeResolution(t *testing.T) {
 	c := gatewayConfig()
 	c.Cluster.NodeID = "gateway-a"

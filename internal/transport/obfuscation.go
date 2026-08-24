@@ -86,7 +86,6 @@ type obfuscationPacketConn struct {
 	// serializes the wrapper, allowing these scratch buffers to be reused for
 	// every datagram without per-packet heap churn.
 	writeBody []byte
-	writeMask []byte
 	writeWire []byte
 
 	randomMu  sync.Mutex
@@ -345,13 +344,12 @@ func (c *obfuscationPacketConn) seal(body []byte) ([]byte, error) {
 	if err := c.randomBytes(salt[:]); err != nil {
 		return nil, err
 	}
-	masked := c.writeBuffer(&c.writeMask, len(body))
+	wire := c.writeBuffer(&c.writeWire, len(salt)+len(body)+obfuscationTagBytes)
+	copy(wire, salt[:])
+	masked := wire[len(salt) : len(salt)+len(body)]
 	copy(masked, body)
 	c.mask(masked, salt[:], c.keys[0].key)
 	tag := c.tag(salt[:], masked, c.keys[0].key)
-	wire := c.writeBuffer(&c.writeWire, len(salt)+len(masked)+len(tag))
-	copy(wire, salt[:])
-	copy(wire[len(salt):], masked)
 	copy(wire[len(salt)+len(masked):], tag[:])
 	return wire, nil
 }

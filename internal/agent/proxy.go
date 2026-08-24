@@ -420,7 +420,7 @@ func (p *udpPath) maxPadding() int64 {
 		return 0
 	}
 	padding := p.agent.cfg.Obfuscation.MaxPaddingBytes
-	if max := p.limits.MaxRecordBytes - 8; max >= 0 && padding > max {
+	if max := p.limits.MaxRecordBytes - 12; max >= 0 && padding > max {
 		padding = max
 	}
 	return padding

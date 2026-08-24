@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [switch]$FullMatrix
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -29,13 +34,16 @@ $wslBinaryDir = (& wsl.exe -d $distro -- wslpath -a ($binaryDir -replace '\\', '
 $wslScript = "$wslRoot/scripts/bench-wsl.sh"
 $benchTime = if ($env:ASTERFERRY_BENCHTIME) { $env:ASTERFERRY_BENCHTIME } else { "30s" }
 $benchCount = if ($env:ASTERFERRY_BENCHCOUNT) { $env:ASTERFERRY_BENCHCOUNT } else { "5" }
-$benchRegex = if ($env:ASTERFERRY_BENCHREGEX) { $env:ASTERFERRY_BENCHREGEX } else { "Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)" }
+$fullRegex = "Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)"
+$smokeRegex = "Benchmark(ConnRoundTrip|AsterFerryProxyLatency)|AsterFerryProxy/mode=(standard|camouflage)/profile=balanced/payload=65536/streams=8"
+$benchRegex = if ($env:ASTERFERRY_BENCHREGEX) { $env:ASTERFERRY_BENCHREGEX } elseif ($FullMatrix) { $fullRegex } else { $smokeRegex }
 $benchRegexB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($benchRegex))
 & wsl.exe -d $distro -- env `
     "ASTERFERRY_WSL_ROOT=$wslRoot" `
     "ASTERFERRY_BENCH_BINARY_DIR=$wslBinaryDir" `
     "ASTERFERRY_BENCHTIME=$benchTime" `
     "ASTERFERRY_BENCHCOUNT=$benchCount" `
+    "ASTERFERRY_BENCH_SUITE=$(if ($FullMatrix) { 'full' } else { 'smoke' })" `
     "ASTERFERRY_BENCHREGEX_B64=$benchRegexB64" `
     bash $wslScript
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -9,7 +9,7 @@ import (
 
 type Counters struct{ In, Out func(uint64) }
 
-const copyBufferSize = 32 * 1024
+const copyBufferSize = 64 * 1024
 
 var copyBuffers = sync.Pool{New: func() any {
 	buf := make([]byte, copyBufferSize)

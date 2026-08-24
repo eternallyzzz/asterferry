@@ -710,7 +710,7 @@ func (s *Session) maxPadding() int64 {
 		return 0
 	}
 	padding := s.gateway.cfg.Obfuscation.MaxPaddingBytes
-	if max := s.maxRecord() - 8; max >= 0 && padding > max {
+	if max := s.maxRecord() - 12; max >= 0 && padding > max {
 		padding = max
 	}
 	return padding
@@ -720,7 +720,13 @@ func (s *Session) relayProfile(name string) (relay.Profile, error) {
 	if s == nil || s.gateway == nil {
 		return relay.Profile{}, errors.New("session is closed")
 	}
-	return relay.NewProfile(s.gateway.profile(name), s.maxRecord(), s.maxPadding())
+	batch := int64(0)
+	if s.limits.MaxWriteBatchBytes > 0 {
+		batch = s.limits.MaxWriteBatchBytes
+	} else {
+		batch = s.gateway.cfg.Limits.MaxWriteBatchBytes
+	}
+	return relay.NewProfileWithBatch(s.gateway.profile(name), s.maxRecord(), s.maxPadding(), batch)
 }
 
 func (s *Session) hasCapability(capability transport.Capability) bool {

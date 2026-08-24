@@ -1,10 +1,17 @@
+[CmdletBinding()]
+param(
+  [switch]$FullMatrix
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 $benchTime = if ($env:ASTERFERRY_BENCHTIME) { $env:ASTERFERRY_BENCHTIME } else { "30s" }
 $count = if ($env:ASTERFERRY_BENCHCOUNT) { $env:ASTERFERRY_BENCHCOUNT } else { "5" }
-$benchRegex = if ($env:ASTERFERRY_BENCHREGEX) { $env:ASTERFERRY_BENCHREGEX } else { "Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)" }
+$fullRegex = "Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)"
+$smokeRegex = "Benchmark(ConnRoundTrip|AsterFerryProxyLatency)|AsterFerryProxy/mode=(standard|camouflage)/profile=balanced/payload=65536/streams=8"
+$benchRegex = if ($env:ASTERFERRY_BENCHREGEX) { $env:ASTERFERRY_BENCHREGEX } elseif ($FullMatrix) { $fullRegex } else { $smokeRegex }
 $outputDir = Join-Path $root "tmp/perf/windows"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
@@ -26,6 +33,7 @@ $metadata = [ordered]@{
   logical_processors = $logicalProcessors
   bench_time = $benchTime
   count = $count
+  suite = if ($FullMatrix) { "full" } else { "smoke" }
   regex = $benchRegex
 }
 $metadata | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $outputDir "metadata.json")

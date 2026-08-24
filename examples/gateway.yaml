@@ -1,5 +1,5 @@
-# AsterFerry v4 public Gateway configuration.
-version: 4
+# AsterFerry v5 public Gateway configuration.
+version: 5
 role: gateway
 
 transport:
@@ -39,7 +39,8 @@ limits:
   max_connections_per_agent: 64
   max_streams_per_agent: 256
   max_frame_bytes: 16777216
-  max_record_bytes: 16384
+  max_record_bytes: 65536
+  max_write_batch_bytes: 262144
   max_udp_bytes: 65536
   dial_timeout_seconds: 10
   udp_idle_timeout_seconds: 30
@@ -49,7 +50,7 @@ obfuscation:
   reverse_profile: standard
   max_padding_bytes: 2048
   transport:
-    # camouflage is the v4 default. Set standard only during an explicit
+    # camouflage is the v5 default. Set standard only during an explicit
     # migration or on a trusted network where raw QUIC is required.
     mode: camouflage
     key_file: "/etc/asterferry/obfs.key"

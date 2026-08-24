@@ -1,6 +1,6 @@
 apiVersion: v2
 name: asterferry
-description: AsterFerry v4 private-network relay
+description: AsterFerry v5 private-network relay
 type: application
 version: 0.1.0
-appVersion: "v4"
+appVersion: "v5"

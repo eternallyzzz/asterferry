@@ -1,17 +1,18 @@
-# AsterFerry protocol schema
+# AsterFerry protocol notes
 
-The v4 wire schema is defined in `asterferry/v4/asterferry.proto`. The Go
-runtime uses the generated file under `internal/transport/wirev4` and keeps
-the generated source in the repository so normal builds do not require a
-protobuf compiler.
+AsterFerry v5 uses a small deterministic binary codec instead of a generated
+protobuf runtime. The v5 envelope is a fixed 16-byte header followed by a
+typed payload:
 
-Regenerate it from the repository root with:
-
-```sh
-protoc --proto_path=proto --go_out=. --go_opt=module=asterferry \
-  proto/asterferry/v4/asterferry.proto
+```text
+version:uint8 type:uint8 flags:uint16 length:uint32 request_id:uint64 payload
 ```
 
-Use `google.golang.org/protobuf` and the matching `protoc-gen-go` release
-(`v1.36.12`). AsterFerry v4 is intentionally not wire-compatible with v3;
-there is no protocol downgrade path.
+All integer fields are big-endian in the envelope. Typed payloads use
+uvarint lengths and values, fixed field order, and reject trailing bytes. The
+relay data stream uses the separate 12-byte record format implemented in
+`internal/relay`.
+
+The checked-in Go codec is the protocol source of truth. The former v4
+protobuf wire files are intentionally removed: v5 has no v4 fallback or
+downgrade path.

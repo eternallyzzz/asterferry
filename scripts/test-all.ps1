@@ -244,8 +244,8 @@ try {
         $oldDistro = $env:ASTERFERRY_WSL_DISTRO
         try {
             $env:ASTERFERRY_WSL_DISTRO = $WslDistro
-            Invoke-Logged "Windows full benchmark matrix" "powershell.exe" @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $root "scripts/bench-windows.ps1"))
-            Invoke-Logged "WSL full benchmark matrix" "powershell.exe" @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $root "scripts/bench-wsl.ps1"))
+            Invoke-Logged "Windows full benchmark matrix" "powershell.exe" @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $root "scripts/bench-windows.ps1"), "-FullMatrix")
+            Invoke-Logged "WSL full benchmark matrix" "powershell.exe" @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $root "scripts/bench-wsl.ps1"), "-FullMatrix")
         } finally {
             if ($null -eq $oldDistro) { Remove-Item Env:ASTERFERRY_WSL_DISTRO -ErrorAction SilentlyContinue } else { $env:ASTERFERRY_WSL_DISTRO = $oldDistro }
         }

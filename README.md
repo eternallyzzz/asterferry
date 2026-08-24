@@ -4,7 +4,7 @@ AsterFerry is a lightweight private-network relay. A public `gateway` and an
 internal `agent` connect over TLS 1.3 and QUIC to provide local SOCKS5/HTTP
 proxying and TCP/UDP reverse mappings.
 
-The current configuration and wire protocol are v4, with strict role
+The current configuration and wire protocol are v5, with strict role
 separation:
 
 - `gateway`: public entry point, Agent mTLS/token authentication, reverse port
@@ -92,7 +92,7 @@ records. The `balanced` profile adds bounded random padding to reduce fixed-size
 fingerprints; it does not impersonate HTTP/3, WebSocket, or another application
 protocol.
 
-The v4 default also applies a versioned outer UDP camouflage layer around QUIC.
+The v5 default also applies a versioned outer UDP camouflage layer around QUIC.
 It uses an independent key file, random salts, keyed packet tags, and bounded
 handshake shaping. This hides QUIC packet bytes from passive DPI and silently
 drops unauthenticated probes. Normal QUIC data keeps native packet coalescing;
@@ -119,14 +119,20 @@ process-scoped keyed hash; plaintext domains require both DEBUG logging and the
 explicit `ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG=true` override. Payloads, cookies,
 credentials, and headers are never logged.
 
-## v4 protocol negotiation
+## v5 protocol negotiation
 
-Control and data messages use the checked-in protobuf schema under `proto/`.
-The outer frame carries a v4 version, stable type, request ID, and an inner
-typed protobuf payload. During the authenticated handshake, the Agent and
-Gateway negotiate supported features and the minimum of their frame, record,
-UDP, and stream limits. The required `errors.v1` and `limits.v1` capabilities
-must be present on both sides; there is no v3 fallback.
+Control messages use a deterministic binary codec maintained under
+`internal/transport`; the outer envelope has a fixed 16-byte header, stable
+type, request ID, and a length-delimited payload. Proxy payloads use compact
+binary relay records with bounded padding and batched writes. TCP and proxy
+traffic stay on reliable QUIC streams; the protocol does not use QUIC
+datagrams.
+
+During the authenticated handshake, the Agent and Gateway negotiate supported
+features and the minimum of their frame, record, write-batch, UDP, and stream
+limits. The required `errors.v1` and `limits.v1` capabilities must be present
+on both sides. v5 is a breaking protocol generation: v4 protobuf frames and
+connections are rejected, with no downgrade or compatibility path.
 
 Protocol failures use stable error codes and a retryable flag. Remote error
 details are deliberately short and sanitized, while full diagnostics remain
@@ -161,7 +167,7 @@ The optional `cluster.node_id` field is identity metadata for future Gateway
 coordination. It does not enable clustering, connect to Redis/etcd, or make
 multiple Gateway replicas safe. Keep the Gateway at one replica until a
 coordinated owner store, L4 connection affinity, and reverse-port routing are
-deployed together. The v4 data plane remains local to the Gateway that owns an
+deployed together. The v5 data plane remains local to the Gateway that owns an
 Agent session; existing QUIC streams cannot be migrated between nodes.
 
 ## Security boundaries
@@ -249,14 +255,13 @@ The command runs the complete Go test suite with `-coverpkg`, so the existing
 integration tests contribute coverage to the Agent, Gateway, and Transport
 runtime packages. It writes separate `coverage.out`, `functions.txt`,
 `coverage.html`, logs, and metadata under `tmp/coverage/windows/` and
-`tmp/coverage/wsl/`. The generated protobuf package
-`internal/transport/wirev4` and the benchmark-only command
-`cmd/asterferry-bench` are excluded from the runtime denominator. The WSL
+`tmp/coverage/wsl/`. The benchmark-only command `cmd/asterferry-bench` is
+excluded from the runtime denominator. The WSL
 distribution must have the expected Go toolchain installed; coverage does not
 fall back to cross-compiled test binaries.
 
 The historical `myproxy` and `myfrp` projects were design references only;
-their v1 configuration and wire protocol are not compatible with AsterFerry v4.
+their v1 configuration and wire protocol are not compatible with AsterFerry v5.
 
 ## Performance validation
 
@@ -272,8 +277,13 @@ on native Windows and in WSL with Go 1.26.7:
 bash scripts/bench-wsl.sh
 ```
 
-Results are written under the ignored `tmp/perf/` directory. The benchmark
-matrix covers standard/camouflage transport modes, one/eight/32/64 streams,
+The default command is a short representative smoke suite: standard and
+camouflage end-to-end goodput at 64 KiB/8 streams, relay round trips, and the
+1 KiB/1-stream latency benchmark. Use `-FullMatrix` on Windows (and
+`powershell.exe -File scripts/bench-wsl.ps1 -FullMatrix` for WSL) to run every
+transport/proxy combination. Results are written under the ignored
+`tmp/perf/` directory. The full benchmark matrix covers
+standard/camouflage transport modes, one/eight/32/64 streams,
 and both `standard` and `balanced` relay profiles. Raw QUIC benchmarks include
 upload, download, and round-trip directions at 16 KiB and 64 KiB payloads;
 full proxy benchmarks report round-trip goodput at both payload sizes. The
@@ -285,7 +295,7 @@ acceptable for a quick smoke test but can distort build and startup timings.
 Record the WSL `net.core.rmem_max` and `net.core.wmem_max` values as well:
 restricted UDP socket limits can dominate Linux/WSL results before application
 tuning. For a two-process Windows↔WSL reverse-tunnel measurement, use
-`scripts/bench-cross-platform.ps1` with separately prepared v4 configs; it
+`scripts/bench-cross-platform.ps1` with separately prepared v5 configs; it
 uses `cmd/asterferry-bench` and emits a JSON goodput result. The configs must
 map a TCP reverse tunnel to the benchmark echo endpoint; the script does not
 generate or copy certificates and private keys.

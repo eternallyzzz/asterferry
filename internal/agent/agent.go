@@ -411,7 +411,7 @@ func (s *Session) maxPadding() int64 {
 		return 0
 	}
 	padding := s.agent.cfg.Obfuscation.MaxPaddingBytes
-	if max := s.maxRecord() - 8; max >= 0 && padding > max {
+	if max := s.maxRecord() - 12; max >= 0 && padding > max {
 		padding = max
 	}
 	return padding
@@ -728,12 +728,16 @@ func (a *Agent) relayProfileWithLimits(name string, limits transport.Limits) rel
 		maxRecord = a.cfg.Limits.MaxRecordBytes
 	}
 	maxPadding := a.cfg.Obfuscation.MaxPaddingBytes
-	if max := maxRecord - 8; max >= 0 && maxPadding > max {
+	if max := maxRecord - 12; max >= 0 && maxPadding > max {
 		maxPadding = max
 	}
-	p, err := relay.NewProfile(a.profile(name), maxRecord, maxPadding)
+	maxBatch := limits.MaxWriteBatchBytes
+	if maxBatch <= 0 {
+		maxBatch = a.cfg.Limits.MaxWriteBatchBytes
+	}
+	p, err := relay.NewProfileWithBatch(a.profile(name), maxRecord, maxPadding, maxBatch)
 	if err != nil {
-		p, _ = relay.NewProfile(config.ProfileStandard, maxRecord, 0)
+		p, _ = relay.NewProfileWithBatch(config.ProfileStandard, maxRecord, 0, maxBatch)
 	}
 	return p
 }

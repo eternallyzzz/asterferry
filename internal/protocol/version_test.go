@@ -4,7 +4,7 @@ import "testing"
 
 func TestVersionConstants(t *testing.T) {
 
-	if Version != 4 || RelayRecordVersion != 2 || ObfuscationVersion != 2 {
+	if Version != 5 || RelayRecordVersion != 3 || ObfuscationVersion != 3 {
 		t.Fatalf("unexpected protocol versions: version=%d relay=%d obfuscation=%d", Version, RelayRecordVersion, ObfuscationVersion)
 	}
 	if AuthDomain == "" || DatagramMaskDomain == "" || DatagramTagDomain == "" {

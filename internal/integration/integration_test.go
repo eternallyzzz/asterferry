@@ -35,7 +35,7 @@ func BenchmarkAsterFerryProxy(b *testing.B) {
 					b.Run(fmt.Sprintf("mode=%s/profile=%s/payload=%d/streams=%d", mode, profile, payloadSize, streams), func(b *testing.B) {
 						payload := bytes.Repeat([]byte("p"), payloadSize)
 						_, a, echoPort := startBenchmarkPair(b, profile, mode)
-						profileConfig, err := relay.NewProfile(profile, 16<<10, 2048)
+						profileConfig, err := relay.NewProfileWithBatch(profile, 16<<10, 2048, 256<<10)
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -87,6 +87,42 @@ func BenchmarkAsterFerryProxy(b *testing.B) {
 				}
 			}
 		}
+	}
+}
+
+// BenchmarkAsterFerryProxyLatency is the small, repeatable RTT scenario used
+// for regression checks. It intentionally keeps one stream and a 1 KiB
+// payload so transport and framing latency are visible in ns/op.
+func BenchmarkAsterFerryProxyLatency(b *testing.B) {
+	for _, mode := range []string{config.TransportObfuscationStandard, config.TransportObfuscationCamouflage} {
+		mode := mode
+		b.Run("mode="+mode, func(b *testing.B) {
+			payload := bytes.Repeat([]byte("l"), 1<<10)
+			_, a, echoPort := startBenchmarkPair(b, config.ProfileStandard, mode)
+			stream, err := a.OpenProxy(context.Background(), "tcp", "127.0.0.1", uint16(echoPort))
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer stream.Close()
+			profile, err := relay.NewProfileWithBatch(config.ProfileStandard, 16<<10, 0, 64<<10)
+			if err != nil {
+				b.Fatal(err)
+			}
+			conn := relay.NewConn(stream, profile)
+			defer conn.Close()
+			result := make([]byte, len(payload))
+			b.SetBytes(int64(len(payload)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := conn.Write(payload); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := io.ReadFull(conn, result); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

@@ -287,6 +287,12 @@ func gatewayConfig(opts Options, alpn string) config.Config {
 		},
 		Management: config.ManagementConfig{Listen: "127.0.0.1:9090", AuthTokenFile: "../secrets/gateway/management.token"},
 		Shutdown:   config.ShutdownConfig{GracePeriodSec: 30},
+		Limits: config.Limits{
+			MaxFrameBytes:      16 << 20,
+			MaxRecordBytes:     64 << 10,
+			MaxWriteBatchBytes: 256 << 10,
+			MaxUDPBytes:        64 << 10,
+		},
 		Obfuscation: config.ObfuscationConfig{
 			ProxyProfile:    config.ProfileBalanced,
 			ReverseProfile:  config.ProfileStandard,
@@ -331,6 +337,12 @@ func agentConfig(opts Options, alpn string) config.Config {
 		},
 		Management: config.ManagementConfig{Listen: "127.0.0.1:9091", AuthTokenFile: "../secrets/agent/management.token"},
 		Shutdown:   config.ShutdownConfig{GracePeriodSec: 30},
+		Limits: config.Limits{
+			MaxFrameBytes:      16 << 20,
+			MaxRecordBytes:     64 << 10,
+			MaxWriteBatchBytes: 256 << 10,
+			MaxUDPBytes:        64 << 10,
+		},
 		Obfuscation: config.ObfuscationConfig{
 			ProxyProfile:    config.ProfileBalanced,
 			ReverseProfile:  config.ProfileStandard,

@@ -1,5 +1,5 @@
-# AsterFerry v4 internal Agent configuration.
-version: 4
+# AsterFerry v5 internal Agent configuration.
+version: 5
 role: agent
 
 transport:
@@ -37,7 +37,8 @@ limits:
   max_connections_per_agent: 64
   max_streams_per_agent: 256
   max_frame_bytes: 16777216
-  max_record_bytes: 16384
+  max_record_bytes: 65536
+  max_write_batch_bytes: 262144
   max_udp_bytes: 65536
   dial_timeout_seconds: 10
   udp_idle_timeout_seconds: 30

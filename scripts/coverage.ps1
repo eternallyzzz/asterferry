@@ -52,8 +52,7 @@ function Get-RuntimePackages {
         ForEach-Object { $_.Trim() } |
         Where-Object {
             $_ -and
-            $_ -notmatch "/cmd/asterferry-bench$" -and
-            $_ -notmatch "/internal/transport/wirev4$"
+            $_ -notmatch "/cmd/asterferry-bench$"
         })
     if ($packages.Count -eq 0) {
         throw "No runtime packages were found"
@@ -118,7 +117,7 @@ try {
         goos = (& go env GOOS).Trim()
         goarch = (& go env GOARCH).Trim()
         included_packages = $packages
-        excluded_packages = @("cmd/asterferry-bench", "internal/transport/wirev4")
+        excluded_packages = @("cmd/asterferry-bench")
     }
     $metadata | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $outputDir "metadata.json")
 

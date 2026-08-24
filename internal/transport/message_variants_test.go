@@ -4,10 +4,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"google.golang.org/protobuf/proto"
-
-	"asterferry/internal/transport/wirev4"
 )
 
 func TestMessageVariantsRoundTrip(t *testing.T) {
@@ -46,6 +42,17 @@ func TestMessageVariantsRoundTrip(t *testing.T) {
 				}
 			}
 		})
+	}
+	canonical, err := MessageFrame(TypeHello, 0, Hello{Capabilities: []Capability{CapabilityReverseTCP, CapabilityErrorsV1, CapabilityLimitsV1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedHello Hello
+	if err := DecodeMessage(canonical, &decodedHello); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodedHello.Capabilities, []Capability{CapabilityErrorsV1, CapabilityLimitsV1, CapabilityReverseTCP}) {
+		t.Fatalf("capabilities were not canonicalized: %#v", decodedHello.Capabilities)
 	}
 
 	if _, err := MessageFrame(TypePing, 0, &struct{}{}); err != nil {
@@ -214,11 +221,12 @@ func TestMessagePointerAndTypeMismatchVariants(t *testing.T) {
 		}
 	}
 
-	payload, err := proto.Marshal(&wirev4.OpenProxy{Port: 65536})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := DecodeMessage(Frame{Version: Version, Type: TypeOpenProxy, Payload: payload}, &OpenProxy{}); err == nil {
+	var malformed frameEncoder
+	malformed.string("tcp")
+	malformed.string("example.com")
+	malformed.uvarint(65536)
+	malformed.string("standard")
+	if err := DecodeMessage(Frame{Version: Version, Type: TypeOpenProxy, Payload: malformed.buf}, &OpenProxy{}); err == nil {
 		t.Fatal("out-of-range open proxy port was accepted")
 	}
 }

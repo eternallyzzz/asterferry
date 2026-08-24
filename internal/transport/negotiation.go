@@ -7,10 +7,11 @@ func LimitsFromConfig(limits config.Limits, streamLimit int64) Limits {
 		streamLimit = limits.MaxStreamsPerAgent
 	}
 	return Limits{
-		MaxFrameBytes:  limits.MaxFrameBytes,
-		MaxRecordBytes: limits.MaxRecordBytes,
-		MaxUDPBytes:    limits.MaxUDPBytes,
-		MaxStreams:     streamLimit,
+		MaxFrameBytes:      limits.MaxFrameBytes,
+		MaxRecordBytes:     limits.MaxRecordBytes,
+		MaxWriteBatchBytes: limits.MaxWriteBatchBytes,
+		MaxUDPBytes:        limits.MaxUDPBytes,
+		MaxStreams:         streamLimit,
 	}
 }
 

@@ -11,10 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"google.golang.org/protobuf/proto"
-
 	"asterferry/internal/protocol"
-	"asterferry/internal/transport/wirev4"
 )
 
 const (
@@ -26,6 +23,8 @@ const (
 	MaxMappingNameBytes      = 128
 	MaxEndpointBytes         = 2048
 	MaxMappings              = 256
+
+	frameHeaderBytes = 16
 
 	TypeHello byte = iota + 1
 	TypeChallenge
@@ -43,7 +42,7 @@ const (
 	TypeError
 )
 
-// ErrorCode is a stable, machine-readable v4 protocol failure category.
+// ErrorCode is a stable, machine-readable v5 protocol failure category.
 type ErrorCode uint32
 
 const (
@@ -60,8 +59,8 @@ const (
 	ErrorInternal
 )
 
-// Capability identifies an optional v4 application feature. The first two
-// capabilities are mandatory for every v4 connection.
+// Capability identifies an optional v5 application feature. The first two
+// capabilities are mandatory for every v5 connection.
 type Capability uint32
 
 const (
@@ -74,12 +73,13 @@ const (
 	CapabilityRelayBalanced Capability = 13
 )
 
-// Limits are the bounded values negotiated during the v4 handshake.
+// Limits are the bounded values negotiated during the v5 handshake.
 type Limits struct {
-	MaxFrameBytes  int64
-	MaxRecordBytes int64
-	MaxUDPBytes    int64
-	MaxStreams     int64
+	MaxFrameBytes      int64
+	MaxRecordBytes     int64
+	MaxWriteBatchBytes int64
+	MaxUDPBytes        int64
+	MaxStreams         int64
 }
 
 // ProtocolError is safe to send over the wire. Detailed internal errors stay
@@ -107,15 +107,17 @@ func (e *ProtocolError) Error() string {
 	return errorCodeName(e.Code)
 }
 
+// Frame is the v5 control envelope. Payload is the deterministic binary
+// encoding of the typed message selected by Type.
 type Frame struct {
 	Version   byte
 	Type      byte
 	RequestID uint64
-	// Payload is the serialized protobuf message for Type. The outer Frame
-	// itself is protobuf encoded by WriteFrame and ReadFrame.
-	Payload []byte
+	Payload   []byte
 }
 
+// WriteFrame writes a fixed 16-byte v5 header followed by its payload. max is
+// the total frame limit, including the header.
 func WriteFrame(w io.Writer, f Frame, max int64) error {
 	if f.Version == 0 {
 		f.Version = Version
@@ -129,65 +131,59 @@ func WriteFrame(w io.Writer, f Frame, max int64) error {
 	if max <= 0 {
 		max = DefaultMaxFrame
 	}
-	wireFrame := &wirev4.Frame{
-		Version:   uint32(f.Version),
-		Type:      wirev4.FrameType(f.Type),
-		RequestId: f.RequestID,
-		Payload:   append([]byte(nil), f.Payload...),
-	}
-	b, err := proto.Marshal(wireFrame)
-	if err != nil {
-		return fmt.Errorf("marshal frame: %w", err)
-	}
-	if int64(len(b)) > max {
+	if max < frameHeaderBytes || int64(len(f.Payload)) > max-frameHeaderBytes {
 		return errors.New("frame exceeds configured limit")
 	}
-	if uint64(len(b)) > uint64(^uint32(0)) {
+	if uint64(len(f.Payload)) > uint64(^uint32(0)) {
 		return errors.New("frame exceeds wire length limit")
 	}
-	var length [4]byte
-	binary.BigEndian.PutUint32(length[:], uint32(len(b)))
-	if err := writeAll(w, length[:]); err != nil {
+	var header [frameHeaderBytes]byte
+	header[0] = f.Version
+	header[1] = f.Type
+	// Bytes 2..3 are reserved flags and must remain zero.
+	binary.BigEndian.PutUint32(header[4:8], uint32(len(f.Payload)))
+	binary.BigEndian.PutUint64(header[8:16], f.RequestID)
+	if err := writeAll(w, header[:]); err != nil {
 		return err
 	}
-	return writeAll(w, b)
+	return writeAll(w, f.Payload)
 }
 
+// ReadFrame reads and validates a v5 control envelope before allocating its
+// payload. max is the total frame limit, including the header.
 func ReadFrame(r io.Reader, max int64) (Frame, error) {
 	if max <= 0 {
 		max = DefaultMaxFrame
 	}
-	var lengthBytes [4]byte
-	if _, err := io.ReadFull(r, lengthBytes[:]); err != nil {
+	if max < frameHeaderBytes {
+		return Frame{}, errors.New("frame limit is smaller than the header")
+	}
+	var header [frameHeaderBytes]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
 		return Frame{}, err
 	}
-	length := int64(binary.BigEndian.Uint32(lengthBytes[:]))
-	if length < 1 || length > max {
-		return Frame{}, fmt.Errorf("invalid frame length %d", length)
+	if header[0] != Version {
+		return Frame{}, fmt.Errorf("unsupported protocol version %d", header[0])
 	}
-	b := make([]byte, length)
-	if _, err := io.ReadFull(r, b); err != nil {
+	if binary.BigEndian.Uint16(header[2:4]) != 0 {
+		return Frame{}, errors.New("unsupported frame flags")
+	}
+	typ := header[1]
+	if !validType(typ) {
+		return Frame{}, fmt.Errorf("unsupported frame type %d", typ)
+	}
+	length := int64(binary.BigEndian.Uint32(header[4:8]))
+	if length > max-frameHeaderBytes {
+		return Frame{}, fmt.Errorf("frame payload exceeds configured limit: %d", length)
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
 		return Frame{}, err
 	}
-	var wireFrame wirev4.Frame
-	if err := proto.Unmarshal(b, &wireFrame); err != nil {
-		return Frame{}, fmt.Errorf("decode frame: %w", err)
-	}
-	if wireFrame.Version != uint32(Version) {
-		return Frame{}, fmt.Errorf("unsupported protocol version %d", wireFrame.Version)
-	}
-	if !validType(byte(wireFrame.Type)) {
-		return Frame{}, fmt.Errorf("unsupported frame type %d", wireFrame.Type)
-	}
-	return Frame{
-		Version:   Version,
-		Type:      byte(wireFrame.Type),
-		RequestID: wireFrame.RequestId,
-		Payload:   append([]byte(nil), wireFrame.Payload...),
-	}, nil
+	return Frame{Version: Version, Type: typ, RequestID: binary.BigEndian.Uint64(header[8:16]), Payload: payload}, nil
 }
 
-// MessageFrame serializes one typed v4 payload into an outer frame.
+// MessageFrame serializes one typed v5 payload into a control frame.
 func MessageFrame(typ byte, requestID uint64, v any) (Frame, error) {
 	if !validType(typ) {
 		return Frame{}, fmt.Errorf("unsupported frame type %d", typ)
@@ -199,9 +195,9 @@ func MessageFrame(typ byte, requestID uint64, v any) (Frame, error) {
 	return Frame{Version: Version, Type: typ, RequestID: requestID, Payload: payload}, nil
 }
 
-// DecodeMessage decodes a frame's inner protobuf payload into the matching
-// domain type. It rejects a type/payload mismatch before the caller acts on
-// any fields.
+// DecodeMessage decodes a frame's deterministic binary payload into the
+// matching domain type. It rejects a type/payload mismatch before the caller
+// acts on any fields.
 func DecodeMessage(f Frame, v any) error {
 	if f.Version != 0 && f.Version != Version {
 		return fmt.Errorf("unsupported protocol version %d", f.Version)
@@ -258,6 +254,8 @@ type OpenReverse struct {
 
 type OpenResult struct{ Error *ProtocolError }
 
+// Data is retained for reliable UDP records carried on a control-opened
+// stream. TCP/proxy streams use relay.Conn's compact record format directly.
 type Data struct {
 	Payload []byte
 	Padding []byte
@@ -279,8 +277,8 @@ func NewData(payload []byte, profile string, maxPadding int64) Data {
 	if profile != "balanced" || maxPadding <= 0 {
 		return data
 	}
-	base := int64(len(payload) + 64)
-	for _, bucket := range []int64{512, 1024, 2048, 4096, 8192, 16384} {
+	base := int64(len(payload) + 16)
+	for _, bucket := range []int64{512, 1024, 2048, 4096, 8192, 16384, 32768, 65536} {
 		if bucket < base || bucket-base > maxPadding {
 			continue
 		}
@@ -305,9 +303,8 @@ func NewNonce() ([]byte, error) {
 	return n, err
 }
 
-// SignChallenge binds authentication to the exact v4 capability and limit
-// negotiation. The transcript encoding is explicit rather than protobuf
-// serialization because protobuf serialization order is not canonical.
+// SignChallenge binds authentication to the exact v5 capability and limit
+// negotiation. The transcript encoding is explicit and canonical.
 func SignChallenge(token, nonce []byte, agentID string, capabilities []Capability, limits Limits) []byte {
 	h := hmac.New(sha256.New, token)
 	_, _ = h.Write([]byte(protocol.AuthDomain))
@@ -318,7 +315,7 @@ func SignChallenge(token, nonce []byte, agentID string, capabilities []Capabilit
 		binary.BigEndian.PutUint32(b[:], uint32(capability))
 		_, _ = h.Write(b[:])
 	}
-	for _, value := range []int64{limits.MaxFrameBytes, limits.MaxRecordBytes, limits.MaxUDPBytes, limits.MaxStreams} {
+	for _, value := range []int64{limits.MaxFrameBytes, limits.MaxRecordBytes, limits.MaxWriteBatchBytes, limits.MaxUDPBytes, limits.MaxStreams} {
 		var b [8]byte
 		binary.BigEndian.PutUint64(b[:], uint64(value))
 		_, _ = h.Write(b[:])
@@ -410,10 +407,7 @@ func ValidateOpenReverse(value OpenReverse) error {
 
 func validEndpointText(value string) bool {
 	value = strings.TrimSpace(value)
-	if value == "" || len(value) > MaxEndpointBytes || strings.ContainsAny(value, "\x00\r\n") {
-		return false
-	}
-	return true
+	return value != "" && len(value) <= MaxEndpointBytes && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 func validIdentifier(value string, max int) bool {
@@ -453,6 +447,9 @@ func ValidateLimits(limits Limits) error {
 	if limits.MaxFrameBytes < 1024 || limits.MaxRecordBytes < 1024 || limits.MaxUDPBytes < 512 || limits.MaxStreams < 1 {
 		return errors.New("negotiated limits are too small")
 	}
+	if limits.MaxWriteBatchBytes < 0 || limits.MaxWriteBatchBytes > 4<<20 || limits.MaxWriteBatchBytes > 0 && limits.MaxWriteBatchBytes < limits.MaxRecordBytes {
+		return errors.New("negotiated write batch limit is out of range")
+	}
 	if limits.MaxFrameBytes > DefaultMaxFrame || limits.MaxRecordBytes > 64<<20 || limits.MaxUDPBytes > 64<<10 || limits.MaxStreams > 65536 {
 		return errors.New("negotiated limits exceed protocol bounds")
 	}
@@ -467,7 +464,7 @@ func NegotiateCapabilities(offered, supported []Capability) ([]Capability, error
 		return nil, err
 	}
 	if !SupportsCapability(offered, CapabilityErrorsV1) || !SupportsCapability(offered, CapabilityLimitsV1) {
-		return nil, errors.New("required v4 capabilities are missing")
+		return nil, errors.New("required v5 capabilities are missing")
 	}
 	result := make([]Capability, 0, len(offered))
 	for _, capability := range normalizedCapabilities(offered) {
@@ -476,7 +473,7 @@ func NegotiateCapabilities(offered, supported []Capability) ([]Capability, error
 		}
 	}
 	if !SupportsCapability(result, CapabilityErrorsV1) || !SupportsCapability(result, CapabilityLimitsV1) {
-		return nil, errors.New("required v4 capabilities are unsupported")
+		return nil, errors.New("required v5 capabilities are unsupported")
 	}
 	return result, nil
 }
@@ -489,10 +486,11 @@ func NegotiateLimits(offered, supported Limits) (Limits, error) {
 		return Limits{}, err
 	}
 	result := Limits{
-		MaxFrameBytes:  minPositive(offered.MaxFrameBytes, supported.MaxFrameBytes),
-		MaxRecordBytes: minPositive(offered.MaxRecordBytes, supported.MaxRecordBytes),
-		MaxUDPBytes:    minPositive(offered.MaxUDPBytes, supported.MaxUDPBytes),
-		MaxStreams:     minPositive(offered.MaxStreams, supported.MaxStreams),
+		MaxFrameBytes:      minPositive(offered.MaxFrameBytes, supported.MaxFrameBytes),
+		MaxRecordBytes:     minPositive(offered.MaxRecordBytes, supported.MaxRecordBytes),
+		MaxWriteBatchBytes: minPositiveNonZero(offered.MaxWriteBatchBytes, supported.MaxWriteBatchBytes),
+		MaxUDPBytes:        minPositive(offered.MaxUDPBytes, supported.MaxUDPBytes),
+		MaxStreams:         minPositive(offered.MaxStreams, supported.MaxStreams),
 	}
 	if err := ValidateLimits(result); err != nil {
 		return Limits{}, err
@@ -518,17 +516,27 @@ func ValidateNegotiation(offeredCaps, selectedCaps []Capability, offeredLimits, 
 	if err := ValidateLimits(selectedLimits); err != nil {
 		return err
 	}
-	if selectedLimits.MaxFrameBytes > offeredLimits.MaxFrameBytes || selectedLimits.MaxRecordBytes > offeredLimits.MaxRecordBytes || selectedLimits.MaxUDPBytes > offeredLimits.MaxUDPBytes || selectedLimits.MaxStreams > offeredLimits.MaxStreams {
+	if selectedLimits.MaxFrameBytes > offeredLimits.MaxFrameBytes || selectedLimits.MaxRecordBytes > offeredLimits.MaxRecordBytes || (selectedLimits.MaxWriteBatchBytes > 0 && offeredLimits.MaxWriteBatchBytes > 0 && selectedLimits.MaxWriteBatchBytes > offeredLimits.MaxWriteBatchBytes) || selectedLimits.MaxUDPBytes > offeredLimits.MaxUDPBytes || selectedLimits.MaxStreams > offeredLimits.MaxStreams {
 		return errors.New("peer selected limits above the offer")
 	}
 	if !SupportsCapability(selectedCaps, CapabilityErrorsV1) || !SupportsCapability(selectedCaps, CapabilityLimitsV1) {
-		return errors.New("required v4 capabilities were not selected")
+		return errors.New("required v5 capabilities were not selected")
 	}
 	return nil
 }
 
 func minPositive(a, b int64) int64 {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func minPositiveNonZero(a, b int64) int64 {
+	if a == 0 {
+		return b
+	}
+	if b == 0 || a < b {
 		return a
 	}
 	return b
@@ -581,98 +589,325 @@ func knownErrorCode(code ErrorCode) bool {
 	return code >= ErrorInvalidFrame && code <= ErrorInternal
 }
 
+type frameEncoder struct{ buf []byte }
+
+func (e *frameEncoder) uvarint(value uint64) {
+	var scratch [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(scratch[:], value)
+	e.buf = append(e.buf, scratch[:n]...)
+}
+
+func (e *frameEncoder) bytes(value []byte) {
+	e.uvarint(uint64(len(value)))
+	e.buf = append(e.buf, value...)
+}
+
+func (e *frameEncoder) string(value string) { e.bytes([]byte(value)) }
+
+func (e *frameEncoder) boolean(value bool) {
+	if value {
+		e.buf = append(e.buf, 1)
+		return
+	}
+	e.buf = append(e.buf, 0)
+}
+
+func (e *frameEncoder) capabilities(values []Capability) {
+	values = normalizedCapabilities(values)
+	e.uvarint(uint64(len(values)))
+	for _, value := range values {
+		e.uvarint(uint64(value))
+	}
+}
+
+func (e *frameEncoder) limits(value Limits) {
+	e.uvarint(uint64(value.MaxFrameBytes))
+	e.uvarint(uint64(value.MaxRecordBytes))
+	e.uvarint(uint64(value.MaxWriteBatchBytes))
+	e.uvarint(uint64(value.MaxUDPBytes))
+	e.uvarint(uint64(value.MaxStreams))
+}
+
+func (e *frameEncoder) optionalError(value *ProtocolError) {
+	if value == nil {
+		e.uvarint(0)
+		return
+	}
+	e.uvarint(1)
+	code := value.Code
+	if !knownErrorCode(code) {
+		code = ErrorInternal
+	}
+	e.uvarint(uint64(code))
+	detail := value.Detail
+	if len(detail) > 128 {
+		detail = detail[:128]
+	}
+	e.string(detail)
+	e.boolean(value.Retryable)
+}
+
+type frameDecoder struct {
+	buf []byte
+	off int
+}
+
+func (d *frameDecoder) remaining() int { return len(d.buf) - d.off }
+
+func (d *frameDecoder) uvarint() (uint64, error) {
+	if d.off >= len(d.buf) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	value, count := binary.Uvarint(d.buf[d.off:])
+	if count == 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if count < 0 {
+		return 0, errors.New("binary integer overflows")
+	}
+	d.off += count
+	return value, nil
+}
+
+func (d *frameDecoder) bytes(max int) ([]byte, error) {
+	length, err := d.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if length > uint64(d.remaining()) || length > uint64(max) {
+		return nil, errors.New("binary field exceeds configured limit")
+	}
+	start := d.off
+	d.off += int(length)
+	return d.buf[start:d.off], nil
+}
+
+func (d *frameDecoder) string(max int) (string, error) {
+	value, err := d.bytes(max)
+	if err != nil {
+		return "", err
+	}
+	return string(value), nil
+}
+
+func (d *frameDecoder) boolean() (bool, error) {
+	if d.off >= len(d.buf) {
+		return false, io.ErrUnexpectedEOF
+	}
+	value := d.buf[d.off]
+	d.off++
+	if value > 1 {
+		return false, errors.New("invalid boolean value")
+	}
+	return value == 1, nil
+}
+
+func (d *frameDecoder) int64() (int64, error) {
+	value, err := d.uvarint()
+	if err != nil {
+		return 0, err
+	}
+	if value > uint64(^uint64(0)>>1) {
+		return 0, errors.New("integer exceeds int64")
+	}
+	return int64(value), nil
+}
+
+func (d *frameDecoder) capabilities() ([]Capability, error) {
+	count, err := d.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if count > MaxCapabilities || count > uint64(d.remaining()) {
+		return nil, errors.New("too many capabilities")
+	}
+	result := make([]Capability, int(count))
+	for i := range result {
+		value, err := d.uvarint()
+		if err != nil || value > uint64(^uint32(0)) {
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("capability is out of range")
+		}
+		result[i] = Capability(value)
+	}
+	return result, nil
+}
+
+func (d *frameDecoder) limits() (Limits, error) {
+	frame, err := d.int64()
+	if err != nil {
+		return Limits{}, err
+	}
+	record, err := d.int64()
+	if err != nil {
+		return Limits{}, err
+	}
+	batch, err := d.int64()
+	if err != nil {
+		return Limits{}, err
+	}
+	udp, err := d.int64()
+	if err != nil {
+		return Limits{}, err
+	}
+	streams, err := d.int64()
+	if err != nil {
+		return Limits{}, err
+	}
+	return Limits{MaxFrameBytes: frame, MaxRecordBytes: record, MaxWriteBatchBytes: batch, MaxUDPBytes: udp, MaxStreams: streams}, nil
+}
+
+func (d *frameDecoder) optionalError() (*ProtocolError, error) {
+	present, err := d.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if present == 0 {
+		return nil, nil
+	}
+	if present != 1 {
+		return nil, errors.New("invalid optional error marker")
+	}
+	code, err := d.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	detail, err := d.string(128)
+	if err != nil {
+		return nil, err
+	}
+	retryable, err := d.boolean()
+	if err != nil {
+		return nil, err
+	}
+	converted := ErrorCode(code)
+	if !knownErrorCode(converted) {
+		converted = ErrorInternal
+	}
+	return &ProtocolError{Code: converted, Detail: detail, Retryable: retryable}, nil
+}
+
+func (d *frameDecoder) done() error {
+	if d.off != len(d.buf) {
+		return errors.New("trailing bytes in payload")
+	}
+	return nil
+}
+
 func marshalPayload(typ byte, value any) ([]byte, error) {
-	var message proto.Message
+	e := frameEncoder{buf: make([]byte, 0, 128)}
 	switch typ {
 	case TypeHello:
 		v, ok := asHello(value)
 		if !ok {
 			return nil, errors.New("hello payload type mismatch")
 		}
-		message = &wirev4.Hello{AgentId: v.AgentID, Capabilities: capabilityValues(v.Capabilities), Limits: limitsValue(v.Limits)}
+		e.string(v.AgentID)
+		e.capabilities(v.Capabilities)
+		e.limits(v.Limits)
 	case TypeChallenge:
 		v, ok := asChallenge(value)
 		if !ok {
 			return nil, errors.New("challenge payload type mismatch")
 		}
-		message = &wirev4.Challenge{Nonce: append([]byte(nil), v.Nonce...), Capabilities: capabilityValues(v.Capabilities), Limits: limitsValue(v.Limits)}
+		e.bytes(v.Nonce)
+		e.capabilities(v.Capabilities)
+		e.limits(v.Limits)
 	case TypeAuth:
 		v, ok := asAuth(value)
 		if !ok {
 			return nil, errors.New("auth payload type mismatch")
 		}
-		message = &wirev4.Auth{Mac: append([]byte(nil), v.MAC...)}
+		e.bytes(v.MAC)
 	case TypeAuthOK:
 		v, ok := asAuthResult(value)
 		if !ok {
 			return nil, errors.New("auth result payload type mismatch")
 		}
-		message = &wirev4.AuthResult{Error: protocolErrorValue(v.Error)}
+		e.optionalError(v.Error)
 	case TypeRegister:
 		v, ok := asRegister(value)
 		if !ok {
 			return nil, errors.New("register payload type mismatch")
 		}
-		message = &wirev4.Register{Mappings: registrationValues(v.Mappings)}
+		if len(v.Mappings) > MaxMappings {
+			return nil, errors.New("too many mappings")
+		}
+		e.uvarint(uint64(len(v.Mappings)))
+		for _, mapping := range v.Mappings {
+			encodeRegistration(&e, mapping)
+		}
 	case TypeRegisterResult:
 		v, ok := asRegisterResult(value)
 		if !ok {
 			return nil, errors.New("register result payload type mismatch")
 		}
-		message = &wirev4.RegisterResult{Mappings: registrationValues(v.Mappings), Error: protocolErrorValue(v.Error)}
+		if len(v.Mappings) > MaxMappings {
+			return nil, errors.New("too many mappings")
+		}
+		e.uvarint(uint64(len(v.Mappings)))
+		for _, mapping := range v.Mappings {
+			encodeRegistration(&e, mapping)
+		}
+		e.optionalError(v.Error)
 	case TypeOpenProxy:
 		v, ok := asOpenProxy(value)
 		if !ok {
 			return nil, errors.New("open proxy payload type mismatch")
 		}
-		message = &wirev4.OpenProxy{Network: v.Network, Address: v.Address, Port: uint32(v.Port), Profile: v.Profile}
+		e.string(v.Network)
+		e.string(v.Address)
+		e.uvarint(uint64(v.Port))
+		e.string(v.Profile)
 	case TypeOpenReverse:
 		v, ok := asOpenReverse(value)
 		if !ok {
 			return nil, errors.New("open reverse payload type mismatch")
 		}
-		message = &wirev4.OpenReverse{Name: v.Name, Protocol: v.Protocol, Profile: v.Profile}
+		e.string(v.Name)
+		e.string(v.Protocol)
+		e.string(v.Profile)
 	case TypeOpenOK, TypeOpenError:
 		v, ok := asOpenResult(value)
 		if !ok {
 			return nil, errors.New("open result payload type mismatch")
 		}
-		message = &wirev4.OpenResult{Error: protocolErrorValue(v.Error)}
+		e.optionalError(v.Error)
 	case TypeData:
 		v, ok := asData(value)
 		if !ok {
 			return nil, errors.New("data payload type mismatch")
 		}
-		message = &wirev4.Data{Payload: append([]byte(nil), v.Payload...), Padding: append([]byte(nil), v.Padding...)}
+		e.bytes(v.Payload)
+		e.bytes(v.Padding)
 	case TypePing, TypePong:
 		if value != nil {
 			if _, ok := value.(*struct{}); !ok {
 				return nil, errors.New("empty payload type mismatch")
 			}
 		}
-		message = &wirev4.Empty{}
 	case TypeError:
 		v, ok := asProtocolError(value)
-		if !ok {
+		if !ok || v == nil {
 			return nil, errors.New("protocol error payload type mismatch")
 		}
-		message = &wirev4.Error{Error: protocolErrorValue(v)}
+		e.optionalError(v)
 	default:
 		return nil, fmt.Errorf("unsupported frame type %d", typ)
 	}
-	return proto.Marshal(message)
+	return e.buf, nil
 }
 
 func unmarshalPayload(typ byte, payload []byte, target any) error {
 	if !validType(typ) {
 		return fmt.Errorf("unsupported frame type %d", typ)
 	}
+	d := frameDecoder{buf: payload}
 	if isEmptyType(typ) {
 		if len(payload) != 0 {
-			var empty wirev4.Empty
-			if err := proto.Unmarshal(payload, &empty); err != nil {
-				return fmt.Errorf("decode empty payload: %w", err)
-			}
+			return errors.New("empty payload must be empty")
 		}
 		if target != nil {
 			if _, ok := target.(*struct{}); !ok {
@@ -686,140 +921,210 @@ func unmarshalPayload(typ byte, payload []byte, target any) error {
 	}
 	switch typ {
 	case TypeHello:
-		var value wirev4.Hello
-		if err := proto.Unmarshal(payload, &value); err != nil {
-			return err
-		}
-		if len(value.Capabilities) > MaxCapabilities {
-			return errors.New("too many capabilities")
-		}
 		v, ok := target.(*Hello)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("hello payload type mismatch")
 		}
-		*v = Hello{AgentID: value.AgentId, Capabilities: capabilitiesFromValues(value.Capabilities), Limits: limitsFromValue(value.Limits)}
-	case TypeChallenge:
-		var value wirev4.Challenge
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		var err error
+		v.AgentID, err = d.string(MaxAgentIDBytes)
+		if err != nil {
 			return err
 		}
-		if len(value.Capabilities) > MaxCapabilities {
-			return errors.New("too many capabilities")
+		v.Capabilities, err = d.capabilities()
+		if err != nil {
+			return err
 		}
+		v.Limits, err = d.limits()
+		if err != nil {
+			return err
+		}
+	case TypeChallenge:
 		v, ok := target.(*Challenge)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("challenge payload type mismatch")
 		}
-		*v = Challenge{Nonce: append([]byte(nil), value.Nonce...), Capabilities: capabilitiesFromValues(value.Capabilities), Limits: limitsFromValue(value.Limits)}
-	case TypeAuth:
-		var value wirev4.Auth
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		nonce, err := d.bytes(sha256.Size)
+		if err != nil {
 			return err
 		}
+		v.Nonce = append(v.Nonce[:0], nonce...)
+		v.Capabilities, err = d.capabilities()
+		if err != nil {
+			return err
+		}
+		v.Limits, err = d.limits()
+		if err != nil {
+			return err
+		}
+	case TypeAuth:
 		v, ok := target.(*Auth)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("auth payload type mismatch")
 		}
-		v.MAC = append([]byte(nil), value.Mac...)
-	case TypeAuthOK:
-		var value wirev4.AuthResult
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		mac, err := d.bytes(sha256.Size)
+		if err != nil {
 			return err
 		}
+		v.MAC = append(v.MAC[:0], mac...)
+	case TypeAuthOK:
 		v, ok := target.(*AuthResult)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("auth result payload type mismatch")
 		}
-		v.Error = protocolErrorFromValue(value.Error)
-	case TypeRegister:
-		var value wirev4.Register
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		var err error
+		v.Error, err = d.optionalError()
+		if err != nil {
 			return err
 		}
+	case TypeRegister:
 		v, ok := target.(*Register)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("register payload type mismatch")
 		}
-		mappings, err := registrationsFromValues(value.Mappings)
+		mappings, err := decodeRegistrations(&d)
 		if err != nil {
 			return err
 		}
 		v.Mappings = mappings
 	case TypeRegisterResult:
-		var value wirev4.RegisterResult
-		if err := proto.Unmarshal(payload, &value); err != nil {
-			return err
-		}
 		v, ok := target.(*RegisterResult)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("register result payload type mismatch")
 		}
-		mappings, err := registrationsFromValues(value.Mappings)
+		mappings, err := decodeRegistrations(&d)
 		if err != nil {
 			return err
 		}
 		v.Mappings = mappings
-		v.Error = protocolErrorFromValue(value.Error)
-	case TypeOpenProxy:
-		var value wirev4.OpenProxy
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		v.Error, err = d.optionalError()
+		if err != nil {
 			return err
 		}
+	case TypeOpenProxy:
 		v, ok := target.(*OpenProxy)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("open proxy payload type mismatch")
 		}
-		if value.Port > 65535 {
+		var err error
+		v.Network, err = d.string(16)
+		if err != nil {
+			return err
+		}
+		v.Address, err = d.string(MaxEndpointBytes)
+		if err != nil {
+			return err
+		}
+		port, err := d.uvarint()
+		if err != nil || port > 65535 {
+			if err != nil {
+				return err
+			}
 			return errors.New("open proxy port is out of range")
 		}
-		v.Network, v.Address, v.Port, v.Profile = value.Network, value.Address, uint16(value.Port), value.Profile
-	case TypeOpenReverse:
-		var value wirev4.OpenReverse
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		v.Port = uint16(port)
+		v.Profile, err = d.string(16)
+		if err != nil {
 			return err
 		}
+	case TypeOpenReverse:
 		v, ok := target.(*OpenReverse)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("open reverse payload type mismatch")
 		}
-		v.Name, v.Protocol, v.Profile = value.Name, value.Protocol, value.Profile
-	case TypeOpenOK, TypeOpenError:
-		var value wirev4.OpenResult
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		var err error
+		v.Name, err = d.string(MaxMappingNameBytes)
+		if err != nil {
 			return err
 		}
+		v.Protocol, err = d.string(8)
+		if err != nil {
+			return err
+		}
+		v.Profile, err = d.string(16)
+		if err != nil {
+			return err
+		}
+	case TypeOpenOK, TypeOpenError:
 		v, ok := target.(*OpenResult)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("open result payload type mismatch")
 		}
-		v.Error = protocolErrorFromValue(value.Error)
-	case TypeData:
-		var value wirev4.Data
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		var err error
+		v.Error, err = d.optionalError()
+		if err != nil {
 			return err
 		}
+	case TypeData:
 		v, ok := target.(*Data)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("data payload type mismatch")
 		}
-		v.Payload = append([]byte(nil), value.Payload...)
-		v.Padding = append([]byte(nil), value.Padding...)
-	case TypeError:
-		var value wirev4.Error
-		if err := proto.Unmarshal(payload, &value); err != nil {
+		payload, err := d.bytes(DefaultMaxFrame)
+		if err != nil {
 			return err
 		}
+		padding, err := d.bytes(DefaultMaxFrame)
+		if err != nil {
+			return err
+		}
+		v.Payload = append(v.Payload[:0], payload...)
+		v.Padding = append(v.Padding[:0], padding...)
+	case TypeError:
 		v, ok := target.(*ProtocolError)
-		if !ok {
+		if !ok || v == nil {
 			return errors.New("protocol error payload type mismatch")
 		}
-		converted := protocolErrorFromValue(value.Error)
+		converted, err := d.optionalError()
+		if err != nil {
+			return err
+		}
 		if converted == nil {
 			return errors.New("protocol error payload is missing")
 		}
 		*v = *converted
 	}
-	return nil
+	return d.done()
+}
+
+func encodeRegistration(e *frameEncoder, value TunnelRegistration) {
+	e.string(value.Name)
+	e.string(value.Protocol)
+	e.uvarint(uint64(value.GatewayPort))
+	e.string(value.Profile)
+}
+
+func decodeRegistrations(d *frameDecoder) ([]TunnelRegistration, error) {
+	count, err := d.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if count > MaxMappings || count > uint64(d.remaining()) {
+		return nil, errors.New("too many tunnel registrations")
+	}
+	result := make([]TunnelRegistration, int(count))
+	for i := range result {
+		result[i].Name, err = d.string(MaxMappingNameBytes)
+		if err != nil {
+			return nil, err
+		}
+		result[i].Protocol, err = d.string(8)
+		if err != nil {
+			return nil, err
+		}
+		port, err := d.uvarint()
+		if err != nil || port > 65535 {
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("tunnel gateway port is out of range")
+		}
+		result[i].GatewayPort = uint16(port)
+		result[i].Profile, err = d.string(16)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 func asHello(v any) (Hello, bool) {
@@ -833,6 +1138,7 @@ func asHello(v any) (Hello, bool) {
 	}
 	return Hello{}, false
 }
+
 func asChallenge(v any) (Challenge, bool) {
 	switch x := v.(type) {
 	case Challenge:
@@ -844,6 +1150,7 @@ func asChallenge(v any) (Challenge, bool) {
 	}
 	return Challenge{}, false
 }
+
 func asAuth(v any) (Auth, bool) {
 	switch x := v.(type) {
 	case Auth:
@@ -855,6 +1162,7 @@ func asAuth(v any) (Auth, bool) {
 	}
 	return Auth{}, false
 }
+
 func asAuthResult(v any) (AuthResult, bool) {
 	switch x := v.(type) {
 	case AuthResult:
@@ -866,6 +1174,7 @@ func asAuthResult(v any) (AuthResult, bool) {
 	}
 	return AuthResult{}, false
 }
+
 func asRegister(v any) (Register, bool) {
 	switch x := v.(type) {
 	case Register:
@@ -877,6 +1186,7 @@ func asRegister(v any) (Register, bool) {
 	}
 	return Register{}, false
 }
+
 func asRegisterResult(v any) (RegisterResult, bool) {
 	switch x := v.(type) {
 	case RegisterResult:
@@ -888,6 +1198,7 @@ func asRegisterResult(v any) (RegisterResult, bool) {
 	}
 	return RegisterResult{}, false
 }
+
 func asOpenProxy(v any) (OpenProxy, bool) {
 	switch x := v.(type) {
 	case OpenProxy:
@@ -899,6 +1210,7 @@ func asOpenProxy(v any) (OpenProxy, bool) {
 	}
 	return OpenProxy{}, false
 }
+
 func asOpenReverse(v any) (OpenReverse, bool) {
 	switch x := v.(type) {
 	case OpenReverse:
@@ -910,6 +1222,7 @@ func asOpenReverse(v any) (OpenReverse, bool) {
 	}
 	return OpenReverse{}, false
 }
+
 func asOpenResult(v any) (OpenResult, bool) {
 	switch x := v.(type) {
 	case OpenResult:
@@ -921,6 +1234,7 @@ func asOpenResult(v any) (OpenResult, bool) {
 	}
 	return OpenResult{}, false
 }
+
 func asData(v any) (Data, bool) {
 	switch x := v.(type) {
 	case Data:
@@ -932,6 +1246,7 @@ func asData(v any) (Data, bool) {
 	}
 	return Data{}, false
 }
+
 func asProtocolError(v any) (*ProtocolError, bool) {
 	switch x := v.(type) {
 	case ProtocolError:
@@ -940,88 +1255,6 @@ func asProtocolError(v any) (*ProtocolError, bool) {
 		return x, x != nil
 	}
 	return nil, false
-}
-
-func capabilityValues(values []Capability) []wirev4.Capability {
-	result := make([]wirev4.Capability, 0, len(values))
-	for _, value := range values {
-		result = append(result, wirev4.Capability(value))
-	}
-	return result
-}
-
-func capabilitiesFromValues(values []wirev4.Capability) []Capability {
-	result := make([]Capability, 0, len(values))
-	for _, value := range values {
-		result = append(result, Capability(value))
-	}
-	return result
-}
-
-func limitsValue(value Limits) *wirev4.Limits {
-	return &wirev4.Limits{MaxFrameBytes: uint64(value.MaxFrameBytes), MaxRecordBytes: uint64(value.MaxRecordBytes), MaxUdpBytes: uint64(value.MaxUDPBytes), MaxStreams: uint64(value.MaxStreams)}
-}
-
-func limitsFromValue(value *wirev4.Limits) Limits {
-	if value == nil {
-		return Limits{}
-	}
-	return Limits{MaxFrameBytes: int64(value.MaxFrameBytes), MaxRecordBytes: int64(value.MaxRecordBytes), MaxUDPBytes: int64(value.MaxUdpBytes), MaxStreams: int64(value.MaxStreams)}
-}
-
-func registrationValues(values []TunnelRegistration) []*wirev4.TunnelRegistration {
-	result := make([]*wirev4.TunnelRegistration, 0, len(values))
-	for _, value := range values {
-		result = append(result, &wirev4.TunnelRegistration{Name: value.Name, Protocol: value.Protocol, GatewayPort: uint32(value.GatewayPort), Profile: value.Profile})
-	}
-	return result
-}
-
-func registrationsFromValues(values []*wirev4.TunnelRegistration) ([]TunnelRegistration, error) {
-	if len(values) > MaxMappings {
-		return nil, errors.New("too many tunnel registrations")
-	}
-	result := make([]TunnelRegistration, 0, len(values))
-	for _, value := range values {
-		if value == nil {
-			return nil, errors.New("nil tunnel registration")
-		}
-		if value.GatewayPort > 65535 {
-			return nil, errors.New("tunnel gateway port is out of range")
-		}
-		result = append(result, TunnelRegistration{Name: value.Name, Protocol: value.Protocol, GatewayPort: uint16(value.GatewayPort), Profile: value.Profile})
-	}
-	return result, nil
-}
-
-func protocolErrorValue(value *ProtocolError) *wirev4.ProtocolError {
-	if value == nil {
-		return nil
-	}
-	code := value.Code
-	if !knownErrorCode(code) {
-		code = ErrorInternal
-	}
-	detail := value.Detail
-	if len(detail) > 128 {
-		detail = detail[:128]
-	}
-	return &wirev4.ProtocolError{Code: wirev4.ErrorCode(code), Detail: detail, Retryable: value.Retryable}
-}
-
-func protocolErrorFromValue(value *wirev4.ProtocolError) *ProtocolError {
-	if value == nil {
-		return nil
-	}
-	detail := value.Detail
-	if len(detail) > 128 {
-		detail = detail[:128]
-	}
-	code := ErrorCode(value.Code)
-	if !knownErrorCode(code) {
-		code = ErrorInternal
-	}
-	return &ProtocolError{Code: code, Detail: detail, Retryable: value.Retryable}
 }
 
 func writeAll(w io.Writer, p []byte) error {

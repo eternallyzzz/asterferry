@@ -32,7 +32,7 @@ mapfile -t runtime_packages < <(go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}
 filtered_packages=()
 for package in "${runtime_packages[@]}"; do
   case "$package" in
-    */cmd/asterferry-bench|*/internal/transport/wirev4) ;;
+    */cmd/asterferry-bench) ;;
     "") ;;
     *) filtered_packages+=("$package") ;;
   esac
@@ -44,7 +44,7 @@ profile_path="$output_dir/coverage.out"
 function_path="$output_dir/functions.txt"
 html_path="$output_dir/coverage.html"
 
-printf 'timestamp_utc=%s\ncommit=%s\ngo=%s\ngoos=%s\ngoarch=%s\nincluded_packages=%s\nexcluded_packages=cmd/asterferry-bench,internal/transport/wirev4\n' \
+printf 'timestamp_utc=%s\ncommit=%s\ngo=%s\ngoos=%s\ngoarch=%s\nincluded_packages=%s\nexcluded_packages=cmd/asterferry-bench\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "$(git rev-parse HEAD)" \
   "$go_version" \
