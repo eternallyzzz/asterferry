@@ -53,10 +53,15 @@ type leasedStream struct {
 	transport.Stream
 	release     func()
 	releaseOnce sync.Once
+	limits      transport.Limits
 }
 
-func newLeasedStream(stream transport.Stream, release func()) *leasedStream {
-	result := &leasedStream{Stream: stream, release: release}
+func newLeasedStream(stream transport.Stream, release func(), negotiated ...transport.Limits) *leasedStream {
+	var limits transport.Limits
+	if len(negotiated) > 0 {
+		limits = negotiated[0]
+	}
+	result := &leasedStream{Stream: stream, release: release, limits: limits}
 	if stream != nil {
 		go func() {
 			<-stream.Context().Done()
@@ -64,6 +69,16 @@ func newLeasedStream(stream transport.Stream, release func()) *leasedStream {
 		}()
 	}
 	return result
+}
+
+// sessionLimits lets protocol-aware outbound handlers apply the limits chosen
+// during the Agent/Gateway handshake without coupling the proxy package to the
+// Session type.
+func (s *leasedStream) sessionLimits() transport.Limits {
+	if s == nil {
+		return transport.Limits{}
+	}
+	return s.limits
 }
 
 func (s *leasedStream) releaseLease() {

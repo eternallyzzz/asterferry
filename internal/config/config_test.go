@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -42,7 +43,7 @@ func TestV3DefaultsAndRoleValidation(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if c.Management.Listen != "127.0.0.1:9090" || c.Limits.MaxFrameBytes == 0 || c.Obfuscation.ProxyProfile != ProfileBalanced {
+	if c.Management.Listen != "127.0.0.1:9090" || c.Shutdown.GracePeriodSec != 30 || c.Limits.MaxFrameBytes == 0 || c.Obfuscation.ProxyProfile != ProfileBalanced {
 		t.Fatal("defaults were not applied")
 	}
 	bad := gatewayConfig()
@@ -54,6 +55,24 @@ func TestV3DefaultsAndRoleValidation(t *testing.T) {
 	bad.Agent = &AgentConfig{}
 	if err := bad.Validate(); err == nil {
 		t.Fatal("mixed role sections should be rejected")
+	}
+}
+
+func TestShutdownGracePeriodValidation(t *testing.T) {
+	for _, value := range []int64{-1, 3601} {
+		c := gatewayConfig()
+		c.Shutdown.GracePeriodSec = value
+		if err := c.Validate(); err == nil {
+			t.Fatalf("grace period %d should be rejected", value)
+		}
+	}
+	c := gatewayConfig()
+	c.Shutdown.GracePeriodSec = 45
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Shutdown.GracePeriodSec != 45 {
+		t.Fatalf("explicit grace period was changed: %d", c.Shutdown.GracePeriodSec)
 	}
 }
 
@@ -83,6 +102,32 @@ func TestTransportPerformanceLimitsValidate(t *testing.T) {
 	bad.Transport.MaxStreamReadBuffer = 1 << 20
 	if err := bad.Validate(); err == nil {
 		t.Fatal("initial stream window exceeding max should fail")
+	}
+}
+
+func TestClusterNodeIDValidationAndRuntimeResolution(t *testing.T) {
+	c := gatewayConfig()
+	c.Cluster.NodeID = "gateway-a"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	bad := gatewayConfig()
+	bad.Cluster.NodeID = "gateway/a"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("invalid cluster node id should fail validation")
+	}
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "gateway.token")
+	if err := os.WriteFile(tokenPath, []byte("01234567890123456789012345678901"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.Gateway.Agents[0].TokenFile = tokenPath
+	opts, err := c.ResolveGateway()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Cluster.NodeID != "gateway-a" {
+		t.Fatalf("resolved node id = %q", opts.Cluster.NodeID)
 	}
 }
 
@@ -187,6 +232,7 @@ func TestEnvironmentOverrides(t *testing.T) {
 		"ASTERFERRY_LOG_SAMPLE_MAX_KEYS":     "128",
 		"ASTERFERRY_LOG_SAMPLING_ENABLED":    "false",
 		"ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG": "true",
+		"ASTERFERRY_SHUTDOWN_GRACE_PERIOD":   "45",
 	}
 	if err := ApplyEnvLookup(&c, func(key string) (string, bool) {
 		value, ok := values[key]
@@ -194,7 +240,7 @@ func TestEnvironmentOverrides(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if c.Logging.Level != "debug" || c.Logging.Format != "text" || c.Logging.Sampling.RatePerSecond != 9 || c.Logging.Sampling.Burst != 30 || c.Logging.Sampling.MaxKeys != 128 || c.Logging.Sampling.Enabled == nil || *c.Logging.Sampling.Enabled || !c.Logging.ExposeDomainAtDebug {
+	if c.Logging.Level != "debug" || c.Logging.Format != "text" || c.Logging.Sampling.RatePerSecond != 9 || c.Logging.Sampling.Burst != 30 || c.Logging.Sampling.MaxKeys != 128 || c.Logging.Sampling.Enabled == nil || *c.Logging.Sampling.Enabled || !c.Logging.ExposeDomainAtDebug || c.Shutdown.GracePeriodSec != 45 {
 		t.Fatalf("environment overrides not applied: %#v", c.Logging)
 	}
 	values["ASTERFERRY_LOG_SAMPLE_RATE"] = "not-a-number"
@@ -248,7 +294,7 @@ func TestResolveRuntimeOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Agent.Proxy.Sniff.Enabled || string(opts.Token) != "01234567890123456789012345678901" {
+	if opts.Agent.Proxy.Sniff.Enabled || opts.Shutdown.GracePeriod != 30*time.Second || string(opts.Token) != "01234567890123456789012345678901" {
 		t.Fatalf("runtime options lost resolved values: %#v", opts)
 	}
 	c.Agent.Proxy.Inbounds[0].Tag = "mutated"
@@ -271,5 +317,8 @@ func TestResolveGatewayReadsCredentials(t *testing.T) {
 	}
 	if len(opts.Agents) != 1 || string(opts.Agents[0].Token) != "01234567890123456789012345678901" {
 		t.Fatalf("gateway credentials were not resolved: %#v", opts.Agents)
+	}
+	if opts.Cluster.NodeID == "" {
+		t.Fatal("gateway node identity was not resolved")
 	}
 }

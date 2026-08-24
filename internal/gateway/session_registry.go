@@ -1,24 +1,62 @@
 package gateway
 
-import "sync"
+import (
+	"context"
+	"sync"
+
+	"asterferry/internal/cluster"
+)
+
+// sessionDirectory is the Gateway-local seam for Agent ownership. A future
+// coordinator can preserve these lifecycle operations while storing ownership
+// metadata outside the process; streams themselves remain local.
+type sessionDirectory interface {
+	Add(*Session, int64) (*Session, bool)
+	Remove(*Session)
+	Snapshot() []*Session
+	Count() int
+	CloseAll()
+}
 
 type sessionRegistry struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	nodeID   string
+	owners   cluster.OwnerStore
 }
 
-func newSessionRegistry() *sessionRegistry {
-	return &sessionRegistry{sessions: make(map[string]*Session)}
+func newSessionRegistry(nodeID string, stores ...cluster.OwnerStore) *sessionRegistry {
+	if nodeID == "" {
+		nodeID = "local"
+	}
+	var owners cluster.OwnerStore
+	if len(stores) > 0 {
+		owners = stores[0]
+	}
+	if owners == nil {
+		owners = cluster.NewLocalOwnerStore()
+	}
+	return &sessionRegistry{sessions: make(map[string]*Session), nodeID: nodeID, owners: owners}
 }
 
 func (r *sessionRegistry) Add(sess *Session, max int64) (*Session, bool) {
 	if r == nil || sess == nil {
 		return nil, false
 	}
+	if sess.sessionID == "" {
+		id, err := cluster.NewSessionID()
+		if err != nil {
+			return nil, false
+		}
+		sess.sessionID = id
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	old := r.sessions[sess.agentID]
 	if old == nil && max > 0 && int64(len(r.sessions)) >= max {
+		return nil, false
+	}
+	if _, _, err := r.owners.Claim(context.Background(), sess.owner(r.nodeID)); err != nil {
 		return nil, false
 	}
 	r.sessions[sess.agentID] = sess
@@ -34,6 +72,9 @@ func (r *sessionRegistry) Remove(sess *Session) {
 		delete(r.sessions, sess.agentID)
 	}
 	r.mu.Unlock()
+	if r.owners != nil && sess.sessionID != "" {
+		_ = r.owners.Release(context.Background(), sess.owner(r.nodeID))
+	}
 }
 
 func (r *sessionRegistry) Snapshot() []*Session {

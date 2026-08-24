@@ -34,6 +34,9 @@
    TCP/UDP ports. Keep the 9090/9091 management endpoints on loopback.
 
 5. Rotate certificates or configuration using a validate-then-restart process.
-   Agents reconnect automatically with exponential backoff. During a Gateway
-   restart, new business connections are rejected and existing connections are
-   closed cleanly.
+   Agents reconnect automatically with exponential backoff. On the first
+   `SIGTERM`/`SIGINT`, the service marks itself unready, rejects new traffic,
+   and drains admitted connections for `shutdown.grace_period_seconds` (30
+   seconds by default). The bundled unit uses `TimeoutStopSec=35s`; increase it
+   if the configuration uses a longer drain period. A second signal forces an
+   immediate close.

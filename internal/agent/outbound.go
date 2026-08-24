@@ -9,6 +9,7 @@ import (
 
 	"asterferry/internal/proxy"
 	"asterferry/internal/relay"
+	"asterferry/internal/transport"
 )
 
 type agentOutbound struct {
@@ -32,7 +33,11 @@ func (o agentOutbound) OpenStream(ctx context.Context, target proxy.Target, path
 	if err != nil {
 		return nil, err
 	}
-	return relay.NewConn(raw, o.agent.relayProfile(o.agent.cfg.Obfuscation.ProxyProfile)), nil
+	limits := transport.LimitsFromConfig(o.agent.cfg.Limits, o.agent.cfg.StreamLimit)
+	if negotiated, ok := raw.(interface{ sessionLimits() transport.Limits }); ok {
+		limits = negotiated.sessionLimits()
+	}
+	return relay.NewConn(raw, o.agent.relayProfileWithLimits(o.agent.cfg.Obfuscation.ProxyProfile, limits)), nil
 }
 
 func (o agentOutbound) OpenDatagram(ctx context.Context, target proxy.Target, path proxy.Path) (io.ReadWriteCloser, error) {

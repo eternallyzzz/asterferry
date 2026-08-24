@@ -26,61 +26,64 @@ import (
 )
 
 func BenchmarkAsterFerryProxy(b *testing.B) {
-	payload := bytes.Repeat([]byte("p"), 64<<10)
 	for _, mode := range []string{config.TransportObfuscationStandard, config.TransportObfuscationCamouflage} {
 		for _, profile := range []string{config.ProfileStandard, config.ProfileBalanced} {
-			for _, streams := range []int{1, 8, 32, 64} {
-				b.Run(fmt.Sprintf("mode=%s/profile=%s/streams=%d", mode, profile, streams), func(b *testing.B) {
-					_, a, echoPort := startBenchmarkPair(b, profile, mode)
-					profileConfig, err := relay.NewProfile(profile, 16<<10, 2048)
-					if err != nil {
-						b.Fatal(err)
-					}
-					connections := make([]*relay.Conn, 0, streams)
-					for i := 0; i < streams; i++ {
-						stream, err := a.OpenProxy(context.Background(), "tcp", "127.0.0.1", uint16(echoPort))
+			for _, payloadSize := range []int{16 << 10, 64 << 10} {
+				for _, streams := range []int{1, 8, 32, 64} {
+					mode, profile, payloadSize, streams := mode, profile, payloadSize, streams
+					b.Run(fmt.Sprintf("mode=%s/profile=%s/payload=%d/streams=%d", mode, profile, payloadSize, streams), func(b *testing.B) {
+						payload := bytes.Repeat([]byte("p"), payloadSize)
+						_, a, echoPort := startBenchmarkPair(b, profile, mode)
+						profileConfig, err := relay.NewProfile(profile, 16<<10, 2048)
 						if err != nil {
 							b.Fatal(err)
 						}
-						connections = append(connections, relay.NewConn(stream, profileConfig))
-					}
-					defer func() {
-						for _, conn := range connections {
-							_ = conn.Close()
+						connections := make([]*relay.Conn, 0, streams)
+						for i := 0; i < streams; i++ {
+							stream, err := a.OpenProxy(context.Background(), "tcp", "127.0.0.1", uint16(echoPort))
+							if err != nil {
+								b.Fatal(err)
+							}
+							connections = append(connections, relay.NewConn(stream, profileConfig))
 						}
-					}()
-
-					b.SetBytes(int64(len(payload) * streams))
-					b.ReportAllocs()
-					b.ResetTimer()
-					errs := make(chan error, streams)
-					var wg sync.WaitGroup
-					for _, conn := range connections {
-						conn := conn
-						wg.Add(1)
-						go func() {
-							defer wg.Done()
-							result := make([]byte, len(payload))
-							for i := 0; i < b.N; i++ {
-								if _, err := conn.Write(payload); err != nil {
-									errs <- err
-									return
-								}
-								if _, err := io.ReadFull(conn, result); err != nil {
-									errs <- err
-									return
-								}
+						defer func() {
+							for _, conn := range connections {
+								_ = conn.Close()
 							}
 						}()
-					}
-					wg.Wait()
-					b.StopTimer()
-					select {
-					case err := <-errs:
-						b.Fatal(err)
-					default:
-					}
-				})
+
+						b.SetBytes(int64(len(payload) * streams))
+						b.ReportAllocs()
+						b.ResetTimer()
+						errs := make(chan error, streams)
+						var wg sync.WaitGroup
+						for _, conn := range connections {
+							conn := conn
+							wg.Add(1)
+							go func() {
+								defer wg.Done()
+								result := make([]byte, len(payload))
+								for i := 0; i < b.N; i++ {
+									if _, err := conn.Write(payload); err != nil {
+										errs <- err
+										return
+									}
+									if _, err := io.ReadFull(conn, result); err != nil {
+										errs <- err
+										return
+									}
+								}
+							}()
+						}
+						wg.Wait()
+						b.StopTimer()
+						select {
+						case err := <-errs:
+							b.Fatal(err)
+						default:
+						}
+					})
+				}
 			}
 		}
 	}

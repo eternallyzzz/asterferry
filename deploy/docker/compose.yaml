@@ -6,6 +6,7 @@ services:
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
     command: ["gateway", "-c", "/etc/asterferry/config.yaml"]
     restart: unless-stopped
+    stop_grace_period: 35s
     init: true
     read_only: true
     cap_drop:
@@ -35,6 +36,7 @@ services:
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
     command: ["agent", "-c", "/etc/asterferry/config.yaml"]
     restart: unless-stopped
+    stop_grace_period: 35s
     init: true
     read_only: true
     cap_drop:

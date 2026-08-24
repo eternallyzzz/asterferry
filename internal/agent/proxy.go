@@ -354,6 +354,7 @@ type udpPath struct {
 	mu         sync.Mutex
 	last       atomic.Int64
 	dead       atomic.Bool
+	limits     transport.Limits
 	ctx        context.Context
 	cancel     context.CancelFunc
 }
@@ -365,7 +366,8 @@ func (p *udpPath) touch() {
 }
 
 func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, client *net.UDPConn, source *net.UDPAddr) *udpPath {
-	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: ctx}
+	limits := transport.LimitsFromConfig(a.cfg.Limits, a.cfg.StreamLimit)
+	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: ctx, limits: limits}
 	p.touch()
 	route := proxy.Path(a.route(tag, host))
 	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port}, route)
@@ -383,14 +385,51 @@ func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, c
 	}
 	p.stream = remote
 	p.remote = true
+	if negotiated, ok := remote.(interface{ sessionLimits() transport.Limits }); ok {
+		p.limits = negotiated.sessionLimits()
+	}
 	return p
+}
+
+func (p *udpPath) maxFrame() int64 {
+	if p != nil && p.limits.MaxFrameBytes > 0 {
+		return p.limits.MaxFrameBytes
+	}
+	if p != nil && p.agent != nil {
+		return p.agent.cfg.Limits.MaxFrameBytes
+	}
+	return transport.DefaultMaxFrame
+}
+
+func (p *udpPath) maxUDP() int64 {
+	if p != nil && p.limits.MaxUDPBytes > 0 {
+		return p.limits.MaxUDPBytes
+	}
+	if p != nil && p.agent != nil {
+		return p.agent.cfg.Limits.MaxUDPBytes
+	}
+	return 0
+}
+
+func (p *udpPath) maxPadding() int64 {
+	if p == nil || p.agent == nil {
+		return 0
+	}
+	padding := p.agent.cfg.Obfuscation.MaxPaddingBytes
+	if max := p.limits.MaxRecordBytes - 8; max >= 0 && padding > max {
+		padding = max
+	}
+	return padding
 }
 
 func (p *udpPath) write(payload []byte) error {
 	p.touch()
 	if p.remote {
-		f, _ := transport.JSONFrame(transport.TypeData, 0, transport.NewData(payload, p.agent.profile(p.agent.cfg.Obfuscation.ProxyProfile), p.agent.cfg.Obfuscation.MaxPaddingBytes))
-		return writeFrame(p.stream, f, p.agent.cfg.Limits.MaxFrameBytes)
+		f, err := transport.MessageFrame(transport.TypeData, 0, transport.NewData(payload, p.agent.profile(p.agent.cfg.Obfuscation.ProxyProfile), p.maxPadding()))
+		if err != nil {
+			return err
+		}
+		return writeFrame(p.stream, f, p.maxFrame())
 	}
 	_, err := p.conn.Write(payload)
 	return err
@@ -403,14 +442,14 @@ func (p *udpPath) readResponses() {
 	}()
 	if p.remote {
 		for {
-			f, err := transport.ReadFrame(p.stream, p.agent.cfg.Limits.MaxFrameBytes)
+			f, err := transport.ReadFrame(p.stream, p.maxFrame())
 			if err != nil {
 				return
 			}
 			if f.Type != transport.TypeData {
 				return
 			}
-			d, err := transport.DecodeData(f, p.agent.cfg.Limits.MaxUDPBytes, p.agent.cfg.Obfuscation.MaxPaddingBytes)
+			d, err := transport.DecodeData(f, p.maxUDP(), p.maxPadding())
 			if err != nil {
 				return
 			}
@@ -419,7 +458,7 @@ func (p *udpPath) readResponses() {
 			p.agent.metrics.BytesOut.Add(uint64(len(d.Payload)))
 		}
 	}
-	buf := make([]byte, p.agent.cfg.Limits.MaxUDPBytes)
+	buf := make([]byte, p.maxUDP())
 	for {
 		_ = p.conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, err := p.conn.Read(buf)

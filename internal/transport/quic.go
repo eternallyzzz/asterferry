@@ -24,6 +24,9 @@ const closeErrorCode quic.ApplicationErrorCode = 0x100
 // the operations required by the application protocol.
 type Listener interface {
 	Accept(context.Context) (Session, error)
+	// StopAccepting releases the listener socket while preserving accepted
+	// sessions. Close additionally tears down the underlying QUIC transport.
+	StopAccepting() error
 	Close() error
 }
 
@@ -66,6 +69,8 @@ type StatsProvider interface {
 type quicListener struct {
 	listener  *quic.Listener
 	closeFn   func() error
+	stopOnce  sync.Once
+	stopErr   error
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -81,14 +86,24 @@ func (l *quicListener) Accept(ctx context.Context) (Session, error) {
 	return &quicSession{conn: conn}, nil
 }
 
+func (l *quicListener) StopAccepting() error {
+	if l == nil {
+		return nil
+	}
+	l.stopOnce.Do(func() {
+		if l.listener != nil {
+			l.stopErr = l.listener.Close()
+		}
+	})
+	return l.stopErr
+}
+
 func (l *quicListener) Close() error {
 	if l == nil {
 		return nil
 	}
 	l.closeOnce.Do(func() {
-		if l.listener != nil {
-			l.closeErr = l.listener.Close()
-		}
+		l.closeErr = l.StopAccepting()
 		if l.closeFn != nil {
 			if err := l.closeFn(); l.closeErr == nil {
 				l.closeErr = err

@@ -3,16 +3,28 @@ package gateway
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
-	"asterferry/internal/relay"
 	"asterferry/internal/transport"
 )
+
+// mappingDirectory keeps port ownership and mapping lifecycle behind a local
+// interface so a future node-owner router does not have to change Gateway's
+// session handling. The current implementation always binds locally.
+type mappingDirectory interface {
+	Count() int
+	Register(*Session, []transport.TunnelRegistration) transport.RegisterResult
+	BeginDrain()
+	RemoveSession(*Session)
+	CloseAll()
+}
 
 type mappingManager struct {
 	server     *Gateway
 	mu         sync.RWMutex
 	registerMu sync.Mutex
 	items      map[string]*Mapping
+	draining   atomic.Bool
 }
 
 func newMappingManager(server *Gateway) *mappingManager {
@@ -30,44 +42,56 @@ func (m *mappingManager) Count() int {
 
 func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistration) transport.RegisterResult {
 	if m == nil || m.server == nil {
-		return transport.RegisterResult{Error: "mapping manager unavailable"}
+		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorInternal, "mapping manager unavailable", true)}
+	}
+	if m.draining.Load() || (m.server.life != nil && !m.server.life.IsRunning()) {
+		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, "gateway is draining", true)}
 	}
 	s := m.server
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()
+	if m.draining.Load() || (s.life != nil && !s.life.IsRunning()) {
+		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, "gateway is draining", true)}
+	}
 	cred := s.acl[sess.agentID]
 	if cred == nil {
-		return transport.RegisterResult{Error: "agent credentials disappeared"}
+		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorAuthFailed, "agent credentials unavailable", false)}
 	}
 	if len(specs) > int(s.cfg.StreamLimit) {
-		return transport.RegisterResult{Error: "mapping count exceeds agent limit"}
+		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, "mapping count exceeds agent limit", true)}
 	}
 	seen := map[string]bool{}
 	seenPorts := map[string]bool{}
 	for _, spec := range specs {
 		if spec.Name == "" || seen[spec.Name] {
-			return transport.RegisterResult{Error: "duplicate or empty mapping name"}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, "duplicate or empty mapping name", false)}
 		}
 		seen[spec.Name] = true
 		if spec.Protocol != "tcp" && spec.Protocol != "udp" {
-			return transport.RegisterResult{Error: "unsupported mapping protocol"}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, "unsupported mapping protocol", false)}
 		}
-		if _, err := relay.NewProfile(s.profile(spec.Profile), s.cfg.Limits.MaxRecordBytes, s.cfg.Obfuscation.MaxPaddingBytes); err != nil {
-			return transport.RegisterResult{Error: "unsupported mapping profile"}
+		if (spec.Protocol == "tcp" && !sess.hasCapability(transport.CapabilityReverseTCP)) || (spec.Protocol == "udp" && !sess.hasCapability(transport.CapabilityReverseUDP)) {
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorCapabilityMismatch, "reverse capability was not negotiated", false)}
+		}
+		if spec.Profile == "balanced" && !sess.hasCapability(transport.CapabilityRelayBalanced) {
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorCapabilityMismatch, "balanced relay capability was not negotiated", false)}
+		}
+		if _, err := sess.relayProfile(spec.Profile); err != nil {
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, "unsupported mapping profile", false)}
 		}
 		if !allowedPort(spec.Protocol, spec.GatewayPort, cred) {
-			return transport.RegisterResult{Error: fmt.Sprintf("port %d is not allowed", spec.GatewayPort)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorPolicyDenied, fmt.Sprintf("port %d is not allowed", spec.GatewayPort), false)}
 		}
 		key := mappingKey(spec.Protocol, spec.GatewayPort)
 		if seenPorts[key] {
-			return transport.RegisterResult{Error: fmt.Sprintf("port %d is registered more than once", spec.GatewayPort)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, fmt.Sprintf("port %d is registered more than once", spec.GatewayPort), false)}
 		}
 		seenPorts[key] = true
 		m.mu.RLock()
 		existing := m.items[key]
 		m.mu.RUnlock()
 		if existing != nil && existing.session != sess {
-			return transport.RegisterResult{Error: fmt.Sprintf("port %d is already in use", spec.GatewayPort)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, fmt.Sprintf("port %d is already in use", spec.GatewayPort), true)}
 		}
 	}
 
@@ -92,7 +116,7 @@ func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistr
 				_ = old.Close()
 			}
 			s.metrics.MappingFailures.Add(1)
-			return transport.RegisterResult{Error: fmt.Sprintf("bind %s/%d: %v", spec.Protocol, spec.GatewayPort, err)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, fmt.Sprintf("bind %s/%d failed", spec.Protocol, spec.GatewayPort), true)}
 		}
 		created = append(created, item)
 	}
@@ -105,6 +129,29 @@ func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistr
 		go item.Run()
 	}
 	return transport.RegisterResult{Mappings: specs}
+}
+
+// BeginDrain stops new reverse listener traffic while preserving mappings and
+// their already established connections until the role closes or times out.
+func (m *mappingManager) BeginDrain() {
+	if m == nil {
+		return
+	}
+	m.registerMu.Lock()
+	if m.draining.Swap(true) {
+		m.registerMu.Unlock()
+		return
+	}
+	m.registerMu.Unlock()
+	m.mu.RLock()
+	items := make([]*Mapping, 0, len(m.items))
+	for _, item := range m.items {
+		items = append(items, item)
+	}
+	m.mu.RUnlock()
+	for _, item := range items {
+		item.BeginDrain()
+	}
 }
 
 func (m *mappingManager) RemoveSession(sess *Session) {

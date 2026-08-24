@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -23,7 +24,9 @@ type sessionManager struct {
 	session   *Session
 	ready     chan struct{}
 	connects  atomic.Int64
+	retryBase time.Duration
 	closeOnce sync.Once
+	draining  atomic.Bool
 }
 
 func newSessionManager(parent context.Context, connect sessionConnector, logger *slog.Logger) *sessionManager {
@@ -45,32 +48,35 @@ func (m *sessionManager) Start() {
 }
 
 func (m *sessionManager) connectLoop() {
-	backoff := time.Second
+	backoff := m.retryDelay()
 	for {
-		if m.ctx.Err() != nil {
+		if m.ctx.Err() != nil || m.draining.Load() {
 			return
 		}
 		m.connects.Add(1)
 		conn, sess, err := m.connect(m.ctx)
 		if err == nil {
-			if m.ctx.Err() != nil {
+			if m.ctx.Err() != nil || m.draining.Load() {
 				sess.Close()
 				_ = transport.CloseSession(conn)
 				return
 			}
-			backoff = time.Second
+			backoff = m.retryDelay()
 			if !m.set(sess) {
 				_ = transport.CloseSession(conn)
 				return
 			}
 			if waitErr := sess.Wait(); waitErr != nil && m.ctx.Err() == nil {
-				m.logger.Info("QUIC session ended", "event", "agent.session.ended", "error_kind", lifecycle.ErrorKind(waitErr))
+				m.logger.Info("QUIC session ended", "event", "agent.session.ended", "error_kind", lifecycle.ErrorKind(waitErr), "session_id", sess.sessionID, "node_id", sess.agent.nodeID)
 			}
 			m.clear(sess)
 			_ = transport.CloseSession(conn)
+			if m.draining.Load() {
+				return
+			}
 			continue
 		}
-		if m.ctx.Err() != nil {
+		if m.ctx.Err() != nil || m.draining.Load() {
 			return
 		}
 		m.logger.Info("gateway connection failed", "event", "agent.gateway.connect_failed", "error_kind", lifecycle.ErrorKind(err))
@@ -89,13 +95,20 @@ func (m *sessionManager) connectLoop() {
 	}
 }
 
+func (m *sessionManager) retryDelay() time.Duration {
+	if m != nil && m.retryBase > 0 {
+		return m.retryBase
+	}
+	return time.Second
+}
+
 func (m *sessionManager) set(sess *Session) bool {
 	if sess == nil {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.ctx.Err() != nil {
+	if m.ctx.Err() != nil || m.draining.Load() {
 		sess.Close()
 		return false
 	}
@@ -127,6 +140,9 @@ func (m *sessionManager) wait(ctx context.Context) (*Session, error) {
 		if sess != nil {
 			return sess, nil
 		}
+		if m.draining.Load() {
+			return nil, errors.New("agent session manager is draining")
+		}
 		select {
 		case <-ready:
 		case <-ctx.Done():
@@ -134,6 +150,14 @@ func (m *sessionManager) wait(ctx context.Context) (*Session, error) {
 		case <-m.ctx.Done():
 			return nil, m.ctx.Err()
 		}
+	}
+}
+
+// BeginDrain stops reconnect attempts but leaves the current control session
+// alive so already admitted streams can finish.
+func (m *sessionManager) BeginDrain() {
+	if m != nil {
+		m.draining.Store(true)
 	}
 }
 

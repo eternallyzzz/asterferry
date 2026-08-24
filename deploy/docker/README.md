@@ -59,6 +59,13 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Both services use a 35-second Compose stop window for the default 30-second
+application drain. Set `shutdown.grace_period_seconds` in each configuration
+and increase the external stop window when using a longer period. The first
+termination signal marks the service unready, rejects new traffic, and allows
+admitted streams to finish; a second signal or an expired window closes the
+remaining sessions.
+
 The Gateway publishes QUIC UDP `4433`, reverse TCP `28080`, and reverse UDP
 `21003` by default. Keep these mappings aligned with the configured
 `gateway_port` values. Override host-side ports with

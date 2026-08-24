@@ -150,10 +150,26 @@ The chart runs as UID/GID 10001, drops all capabilities, disables privilege
 escalation, uses a read-only root filesystem, disables ServiceAccount token
 automounting, and uses the RuntimeDefault seccomp profile. Management endpoints
 remain loopback-only; probes execute `wget` inside the container against
-`/healthz` and `/readyz`.
+`/healthz` and `/readyz`. On the first termination signal, AsterFerry marks
+`/readyz` unavailable while keeping `/healthz` healthy, stops new admissions,
+and drains existing streams for `shutdown.grace_period_seconds` (30 seconds by
+default). The chart's 35-second `terminationGracePeriodSeconds` leaves a small
+supervisor buffer; increase it when configuring a longer application drain.
+The second signal or a deadline forces connection closure.
 
 Use `helm lint` and `helm template` before installation. Rotate credentials by
 updating the Secret and restarting the release after validating the updated
 configuration. The default single-replica Gateway topology is intentional;
 multiple replicas require a separate shared-port and session-coordination
 design.
+
+## Cluster readiness boundary
+
+Both roles accept an optional `cluster.node_id` identity field. The runtime
+reports it through the management status endpoint and includes it in session
+logs, but this field does not enable active-active behavior. Do not increase
+the Gateway `replicaCount` for production yet: QUIC sessions, reverse mapping
+listeners, and their owner state remain local to one process. A future
+Kubernetes cluster mode must add Lease-based ownership, L4 affinity, and
+reverse-port owner routing as one coordinated feature; it must not use the
+Kubernetes etcd datastore directly from the application.

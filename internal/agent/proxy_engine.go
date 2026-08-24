@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"asterferry/internal/config"
+	"asterferry/internal/lifecycle"
 )
 
 // ProxyEngine owns local proxy listener lifecycle. Protocol handling is
@@ -22,18 +23,23 @@ type ProxyEngine struct {
 	cancel    context.CancelFunc
 	listeners []net.Listener
 	closed    bool
+	draining  bool
+	stopOnce  sync.Once
+	stopErr   error
+	gate      *lifecycle.Gate
 }
 
 type ProxyEngineOptions struct {
 	Inbounds []config.Inbound
 	Handler  func(net.Conn, config.Inbound)
+	Gate     *lifecycle.Gate
 }
 
 func NewProxyEngine(opts ProxyEngineOptions) (*ProxyEngine, error) {
 	if opts.Handler == nil {
 		return nil, errors.New("proxy engine handler is required")
 	}
-	return &ProxyEngine{inbounds: append([]config.Inbound(nil), opts.Inbounds...), handler: opts.Handler}, nil
+	return &ProxyEngine{inbounds: append([]config.Inbound(nil), opts.Inbounds...), handler: opts.Handler, gate: opts.Gate}, nil
 }
 
 func (e *ProxyEngine) Start(parent context.Context) error {
@@ -44,7 +50,7 @@ func (e *ProxyEngine) Start(parent context.Context) error {
 		parent = context.Background()
 	}
 	e.mu.Lock()
-	if e.cancel != nil || e.closed {
+	if e.cancel != nil || e.closed || e.draining {
 		e.mu.Unlock()
 		return errors.New("proxy engine already started or closed")
 	}
@@ -61,7 +67,7 @@ func (e *ProxyEngine) Start(parent context.Context) error {
 			return fmt.Errorf("listen %s: %w", in.Tag, err)
 		}
 		e.mu.Lock()
-		if e.closed {
+		if e.closed || e.draining {
 			e.mu.Unlock()
 			_ = listener.Close()
 			_ = e.Close()
@@ -80,8 +86,45 @@ func (e *ProxyEngine) acceptLoop(listener net.Listener, in config.Inbound) {
 		if err != nil {
 			return
 		}
-		go e.handler(conn, in)
+		if e.gate != nil && !e.gate.TryAdd() {
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			if e.gate != nil {
+				defer e.gate.Done()
+			}
+			e.handler(conn, in)
+		}()
 	}
+}
+
+// BeginDrain closes local proxy listeners while allowing already accepted
+// connections to finish. Close remains the hard-stop path.
+func (e *ProxyEngine) BeginDrain() error {
+	if e == nil {
+		return nil
+	}
+	e.stopOnce.Do(func() {
+		e.mu.Lock()
+		e.draining = true
+		listeners := append([]net.Listener(nil), e.listeners...)
+		e.listeners = nil
+		e.mu.Unlock()
+		var first error
+		for _, listener := range listeners {
+			if err := listener.Close(); err != nil && first == nil {
+				first = err
+			}
+		}
+		e.mu.Lock()
+		e.stopErr = first
+		e.mu.Unlock()
+	})
+	e.mu.Lock()
+	err := e.stopErr
+	e.mu.Unlock()
+	return err
 }
 
 func (e *ProxyEngine) Close() error {
@@ -97,14 +140,6 @@ func (e *ProxyEngine) Close() error {
 	if e.cancel != nil {
 		e.cancel()
 	}
-	listeners := append([]net.Listener(nil), e.listeners...)
-	e.listeners = nil
 	e.mu.Unlock()
-	var first error
-	for _, listener := range listeners {
-		if err := listener.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
+	return e.BeginDrain()
 }

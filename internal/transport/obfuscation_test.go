@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"net"
 	"testing"
 	"time"
@@ -57,6 +58,22 @@ func TestObfuscatingPacketConnRoundTrip(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for obfuscated packet")
 	}
+}
+
+func FuzzObfuscationDecodeDoesNotPanic(f *testing.F) {
+	key := []byte("fuzz-obfuscation-key-01234567890123456789")
+	digest := sha256.Sum256(key)
+	f.Add([]byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+	f.Fuzz(func(t *testing.T, wire []byte) {
+		conn := &obfuscationPacketConn{
+			keys:    []obfuscationKey{{key: digest}},
+			parts:   make(map[fragmentKey]*fragmentAssembly),
+			sources: make(map[string]int),
+			opts:    testObfuscationOptions(key, nil),
+		}
+		dst := make([]byte, maxObfuscationDatagram)
+		_, _ = conn.decode(wire, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4433}, dst)
+	})
 }
 
 func TestObfuscatingPacketConnHandshakeFragments(t *testing.T) {

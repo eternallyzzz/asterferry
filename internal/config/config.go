@@ -11,10 +11,13 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"asterferry/internal/cluster"
+	"asterferry/internal/protocol"
 )
 
 const (
-	ConfigVersion = 3
+	ConfigVersion = protocol.Version
 
 	RoleGateway = "gateway"
 	RoleAgent   = "agent"
@@ -36,6 +39,8 @@ type Config struct {
 	Role        string            `yaml:"role"`
 	Transport   TransportConfig   `yaml:"transport"`
 	Management  ManagementConfig  `yaml:"management"`
+	Shutdown    ShutdownConfig    `yaml:"shutdown"`
+	Cluster     ClusterConfig     `yaml:"cluster"`
 	Limits      Limits            `yaml:"limits"`
 	Obfuscation ObfuscationConfig `yaml:"obfuscation"`
 	Logging     LoggingConfig     `yaml:"logging"`
@@ -83,6 +88,19 @@ type TransportConfig struct {
 
 type ManagementConfig struct {
 	Listen string `yaml:"listen"`
+}
+
+// ShutdownConfig bounds the graceful drain performed after SIGTERM/SIGINT.
+// Zero is normalized to the safe 30-second default during validation.
+type ShutdownConfig struct {
+	GracePeriodSec int64 `yaml:"grace_period_seconds"`
+}
+
+// ClusterConfig is identity metadata for future Gateway coordination. It is
+// intentionally not an enable switch: setting node_id does not change the
+// single-node data-plane behavior or add an external dependency.
+type ClusterConfig struct {
+	NodeID string `yaml:"node_id"`
 }
 
 type Limits struct {
@@ -308,6 +326,9 @@ func ApplyEnvLookup(c *Config, lookup func(string) (string, bool)) error {
 	if err := setInt("ASTERFERRY_LOG_SAMPLE_MAX_KEYS", &c.Logging.Sampling.MaxKeys); err != nil {
 		return err
 	}
+	if err := setInt("ASTERFERRY_SHUTDOWN_GRACE_PERIOD", &c.Shutdown.GracePeriodSec); err != nil {
+		return err
+	}
 	if err := setBool("ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG", &c.Logging.ExposeDomainAtDebug); err != nil {
 		return err
 	}
@@ -396,6 +417,18 @@ func (c *Config) Validate() error {
 	}
 	if !isLoopbackListen(c.Management.Listen) {
 		return errors.New("management.listen must bind to loopback")
+	}
+	if c.Shutdown.GracePeriodSec == 0 {
+		c.Shutdown.GracePeriodSec = 30
+	}
+	if c.Shutdown.GracePeriodSec < 1 || c.Shutdown.GracePeriodSec > 3600 {
+		return errors.New("shutdown.grace_period_seconds must be between 1 and 3600")
+	}
+	if nodeID := strings.TrimSpace(c.Cluster.NodeID); nodeID != "" {
+		if err := cluster.ValidateNodeID(nodeID); err != nil {
+			return errors.New("cluster.node_id is invalid")
+		}
+		c.Cluster.NodeID = nodeID
 	}
 	if c.Transport.MaxBidiRemoteStreams == 0 {
 		// Reserve one bidirectional stream for the control channel while

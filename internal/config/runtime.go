@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"time"
+
+	"asterferry/internal/cluster"
 )
 
 // AgentOptions is the normalized runtime view of an agent configuration.
@@ -13,6 +16,8 @@ import (
 type AgentOptions struct {
 	Transport            TransportConfig
 	Management           ManagementConfig
+	Shutdown             ShutdownOptions
+	Cluster              ClusterOptions
 	Limits               Limits
 	Obfuscation          ObfuscationConfig
 	TransportObfuscation TransportObfuscationOptions
@@ -37,6 +42,17 @@ type LoggingOptions struct {
 	Format              string
 	Sampling            SamplingOptions
 	ExposeDomainAtDebug bool
+}
+
+// ClusterOptions is the resolved identity metadata shared by both roles.
+// The current runtime only reports the identity; ownership remains local.
+type ClusterOptions struct {
+	NodeID string
+}
+
+// ShutdownOptions is the immutable runtime form of shutdown configuration.
+type ShutdownOptions struct {
+	GracePeriod time.Duration
 }
 
 type SniffOptions struct {
@@ -74,6 +90,8 @@ type GatewayAgentOptions struct {
 type GatewayOptions struct {
 	Transport            TransportConfig
 	Management           ManagementConfig
+	Shutdown             ShutdownOptions
+	Cluster              ClusterOptions
 	Limits               Limits
 	Obfuscation          ObfuscationConfig
 	TransportObfuscation TransportObfuscationOptions
@@ -116,6 +134,10 @@ func (c *Config) ResolveAgent() (*AgentOptions, error) {
 	if err != nil {
 		return nil, err
 	}
+	nodeID, err := cluster.ResolveNodeID(c.Cluster.NodeID)
+	if err != nil {
+		return nil, err
+	}
 	proxy := ProxyOptions{
 		Inbounds:     append([]Inbound(nil), c.Agent.Proxy.Inbounds...),
 		DefaultRoute: c.Agent.Proxy.DefaultRoute,
@@ -130,6 +152,8 @@ func (c *Config) ResolveAgent() (*AgentOptions, error) {
 	return &AgentOptions{
 		Transport:            c.Transport,
 		Management:           c.Management,
+		Shutdown:             ShutdownOptions{GracePeriod: time.Duration(c.Shutdown.GracePeriodSec) * time.Second},
+		Cluster:              ClusterOptions{NodeID: nodeID},
 		Limits:               c.Limits,
 		Obfuscation:          c.Obfuscation,
 		TransportObfuscation: transportObfuscation,
@@ -153,6 +177,10 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 	if err != nil {
 		return nil, err
 	}
+	nodeID, err := cluster.ResolveNodeID(c.Cluster.NodeID)
+	if err != nil {
+		return nil, err
+	}
 	agents := make([]GatewayAgentOptions, 0, len(c.Gateway.Agents))
 	for _, raw := range c.Gateway.Agents {
 		token, err := ReadToken(raw.TokenFile)
@@ -169,6 +197,8 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 	return &GatewayOptions{
 		Transport:            c.Transport,
 		Management:           c.Management,
+		Shutdown:             ShutdownOptions{GracePeriod: time.Duration(c.Shutdown.GracePeriodSec) * time.Second},
+		Cluster:              ClusterOptions{NodeID: nodeID},
 		Limits:               c.Limits,
 		Obfuscation:          c.Obfuscation,
 		TransportObfuscation: transportObfuscation,

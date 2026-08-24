@@ -66,7 +66,9 @@ agent:
         targetPort: 8080
 
 replicaCount: 1
-terminationGracePeriodSeconds: 30
+# Keep this greater than shutdown.grace_period_seconds to leave kubelet a
+# small buffer after the application has completed its bounded drain.
+terminationGracePeriodSeconds: 35
 podAnnotations: {}
 podLabels: {}
 env: []

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"asterferry/internal/cluster"
 	"asterferry/internal/config"
 	"asterferry/internal/lifecycle"
 	"asterferry/internal/observability"
@@ -21,6 +22,7 @@ import (
 
 type Agent struct {
 	cfg      *config.AgentOptions
+	nodeID   string
 	router   *routing.Router
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -29,6 +31,7 @@ type Agent struct {
 	logger   *slog.Logger
 	outbound proxy.Outbound
 	proxy    *ProxyEngine
+	life     *lifecycle.Gate
 
 	sessions  *sessionManager
 	mappings  map[string]config.Tunnel
@@ -39,7 +42,10 @@ type Agent struct {
 type Session struct {
 	agent     *Agent
 	conn      transport.Session
+	sessionID string
 	control   transport.Stream
+	caps      []transport.Capability
+	limits    transport.Limits
 	ctx       context.Context
 	cancel    context.CancelFunc
 	writeMu   sync.Mutex
@@ -49,8 +55,11 @@ type Session struct {
 
 type status struct {
 	Mode                        string `json:"mode"`
+	State                       string `json:"state"`
 	Ready                       bool   `json:"ready"`
 	Connected                   bool   `json:"connected"`
+	NodeID                      string `json:"node_id"`
+	SessionID                   string `json:"session_id,omitempty"`
 	AgentID                     string `json:"agent_id"`
 	Reconnects                  int64  `json:"reconnects"`
 	TransportObfuscationMode    string `json:"transport_obfuscation_mode"`
@@ -64,6 +73,10 @@ func New(cfg *config.AgentOptions, loggerOpt ...*slog.Logger) (*Agent, error) {
 	if err := transport.ValidateAgentCredentials(cfg); err != nil {
 		return nil, err
 	}
+	nodeID, err := cluster.ResolveNodeID(cfg.Cluster.NodeID)
+	if err != nil {
+		return nil, err
+	}
 	r, err := routing.NewOptions(cfg.Agent.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("load routing database: %w", err)
@@ -75,16 +88,18 @@ func New(cfg *config.AgentOptions, loggerOpt ...*slog.Logger) (*Agent, error) {
 	}
 	a := &Agent{
 		cfg:      cfg,
+		nodeID:   nodeID,
 		router:   r,
 		ctx:      ctx,
 		cancel:   cancel,
 		metrics:  &observability.Metrics{},
 		logger:   logger,
+		life:     lifecycle.NewGate(),
 		mappings: map[string]config.Tunnel{},
 	}
 	a.outbound = agentOutbound{agent: a}
 	a.sessions = newSessionManager(ctx, a.connectOnce, logger)
-	engine, err := NewProxyEngine(ProxyEngineOptions{Inbounds: cfg.Agent.Proxy.Inbounds, Handler: a.handleInbound})
+	engine, err := NewProxyEngine(ProxyEngineOptions{Inbounds: cfg.Agent.Proxy.Inbounds, Handler: a.handleInbound, Gate: a.life})
 	if err != nil {
 		cancel()
 		_ = r.Close()
@@ -116,6 +131,7 @@ func (a *Agent) Close() error {
 		return nil
 	}
 	a.closeOnce.Do(func() {
+		a.life.Stop()
 		a.cancel()
 		if a.proxy != nil {
 			_ = a.proxy.Close()
@@ -133,6 +149,47 @@ func (a *Agent) Close() error {
 	return a.closeErr
 }
 
+// Shutdown enters draining, stops new local work and reconnect attempts, and
+// waits for admitted handlers until ctx expires. The final Close is always
+// performed so callers never leave a half-shutdown Agent behind.
+func (a *Agent) Shutdown(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	started := a.life.BeginDrain()
+	if !started && a.life.State() == lifecycle.StateStopped {
+		return nil
+	}
+	if started {
+		a.metrics.BeginDrain()
+		a.logger.Warn("agent draining", "event", "runtime.draining", "role", config.RoleAgent, "node_id", a.nodeID, "grace_period", a.cfg.Shutdown.GracePeriod.String())
+		if a.proxy != nil {
+			_ = a.proxy.BeginDrain()
+		}
+		if a.sessions != nil {
+			a.sessions.BeginDrain()
+		}
+	}
+	err := a.life.Wait(ctx)
+	forced := err != nil
+	if forced {
+		a.logger.Warn("agent drain timed out", "event", "runtime.drain_timeout", "role", config.RoleAgent, "node_id", a.nodeID, "active_work", a.life.Active(), "error_kind", lifecycle.ErrorKind(err))
+	} else if started {
+		a.logger.Info("agent drain complete", "event", "runtime.drained", "role", config.RoleAgent, "node_id", a.nodeID)
+	}
+	if started {
+		a.metrics.RecordShutdown(forced)
+	}
+	closeErr := a.Close()
+	if closeErr != nil {
+		return closeErr
+	}
+	return err
+}
+
 func (a *Agent) handleInbound(conn net.Conn, in config.Inbound) {
 	if in.Protocol == "socks5" {
 		a.handleSOCKS(conn, in)
@@ -142,7 +199,7 @@ func (a *Agent) handleInbound(conn net.Conn, in config.Inbound) {
 }
 
 func (a *Agent) IsReady() bool {
-	return a.sessions != nil && a.sessions.IsReady()
+	return a.life != nil && a.life.IsRunning() && a.sessions != nil && a.sessions.IsReady()
 }
 
 func (a *Agent) Status() any {
@@ -157,13 +214,29 @@ func (a *Agent) Status() any {
 	}
 	return status{
 		Mode:                        config.RoleAgent,
+		State:                       a.life.State().String(),
 		Ready:                       connected,
 		Connected:                   connected,
+		NodeID:                      a.nodeID,
+		SessionID:                   a.currentSessionID(),
 		AgentID:                     a.cfg.Agent.ID,
 		Reconnects:                  reconnects,
 		TransportObfuscationMode:    a.cfg.TransportObfuscation.Mode,
 		TransportObfuscationKeyHash: keyHash,
 	}
+}
+
+func (a *Agent) currentSessionID() string {
+	if a == nil || a.sessions == nil {
+		return ""
+	}
+	a.sessions.mu.RLock()
+	sess := a.sessions.session
+	a.sessions.mu.RUnlock()
+	if sess == nil {
+		return ""
+	}
+	return sess.sessionID
 }
 
 func (a *Agent) connectOnce(ctx context.Context) (transport.Session, *Session, error) {
@@ -183,31 +256,49 @@ func (a *Agent) connectOnce(ctx context.Context) (transport.Session, *Session, e
 	defer cancelHandshake()
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	defer stopStreamContext()
-	max := a.cfg.Limits.MaxFrameBytes
-	hello, _ := transport.JSONFrame(transport.TypeHello, 1, transport.Hello{AgentID: a.cfg.Agent.ID})
+	localCaps := transport.AgentCapabilities(a.cfg)
+	localLimits := transport.LimitsFromConfig(a.cfg.Limits, a.cfg.StreamLimit)
+	max := localLimits.MaxFrameBytes
+	hello, _ := transport.MessageFrame(transport.TypeHello, 1, transport.Hello{AgentID: a.cfg.Agent.ID, Capabilities: localCaps, Limits: localLimits})
 	if err = writeFrame(stream, hello, max); err != nil {
 		return fail(err)
 	}
 	f, err := transport.ReadFrame(stream, max)
+	if err == nil && f.Type == transport.TypeError {
+		var protocolErr transport.ProtocolError
+		if decodeErr := transport.DecodeMessage(f, &protocolErr); decodeErr == nil {
+			return fail(&protocolErr)
+		}
+	}
 	if err != nil || f.Type != transport.TypeChallenge {
 		return fail(errors.New("gateway did not issue challenge"))
 	}
 	var challenge transport.Challenge
-	if err = transport.DecodeJSON(f, &challenge); err != nil {
+	if err = transport.DecodeMessage(f, &challenge); err != nil {
 		return fail(err)
 	}
-	auth, _ := transport.JSONFrame(transport.TypeAuth, 1, transport.Auth{MAC: transport.SignChallenge(a.cfg.Token, challenge.Nonce, a.cfg.Agent.ID)})
+	if err = transport.ValidateNegotiation(localCaps, challenge.Capabilities, localLimits, challenge.Limits); err != nil {
+		return fail(err)
+	}
+	max = challenge.Limits.MaxFrameBytes
+	auth, _ := transport.MessageFrame(transport.TypeAuth, 1, transport.Auth{MAC: transport.SignChallenge(a.cfg.Token, challenge.Nonce, a.cfg.Agent.ID, challenge.Capabilities, challenge.Limits)})
 	if err = writeFrame(stream, auth, max); err != nil {
 		return fail(err)
 	}
 	f, err = transport.ReadFrame(stream, max)
+	if err == nil && f.Type == transport.TypeError {
+		var protocolErr transport.ProtocolError
+		if decodeErr := transport.DecodeMessage(f, &protocolErr); decodeErr == nil {
+			return fail(&protocolErr)
+		}
+	}
 	if err != nil || f.Type != transport.TypeAuthOK {
 		return fail(errors.New("gateway rejected authentication"))
 	}
 	var result transport.AuthResult
-	if err = transport.DecodeJSON(f, &result); err != nil || result.Error != "" {
+	if err = transport.DecodeMessage(f, &result); err != nil || result.Error != nil {
 		if err == nil {
-			err = errors.New(result.Error)
+			err = result.Error
 		}
 		return fail(err)
 	}
@@ -215,18 +306,24 @@ func (a *Agent) connectOnce(ctx context.Context) (transport.Session, *Session, e
 	for _, t := range a.cfg.Agent.Reverse {
 		regs = append(regs, transport.TunnelRegistration{Name: t.Name, Protocol: t.Protocol, GatewayPort: t.GatewayPort, Profile: a.profile(a.cfg.Obfuscation.ReverseProfile)})
 	}
-	reg, _ := transport.JSONFrame(transport.TypeRegister, 2, transport.Register{Mappings: regs})
+	reg, _ := transport.MessageFrame(transport.TypeRegister, 2, transport.Register{Mappings: regs})
 	if err = writeFrame(stream, reg, max); err != nil {
 		return fail(err)
 	}
 	f, err = transport.ReadFrame(stream, max)
+	if err == nil && f.Type == transport.TypeError {
+		var protocolErr transport.ProtocolError
+		if decodeErr := transport.DecodeMessage(f, &protocolErr); decodeErr == nil {
+			return fail(&protocolErr)
+		}
+	}
 	if err != nil || f.Type != transport.TypeRegisterResult {
 		return fail(errors.New("gateway did not acknowledge mappings"))
 	}
 	var registerResult transport.RegisterResult
-	if err = transport.DecodeJSON(f, &registerResult); err != nil || registerResult.Error != "" {
+	if err = transport.DecodeMessage(f, &registerResult); err != nil || registerResult.Error != nil {
 		if err == nil {
-			err = errors.New(registerResult.Error)
+			err = registerResult.Error
 		}
 		return fail(err)
 	}
@@ -234,17 +331,94 @@ func (a *Agent) connectOnce(ctx context.Context) (transport.Session, *Session, e
 	cancelHandshake()
 	stopStreamContext()
 	stopStreamContext = transport.SetStreamContext(stream, sessionCtx)
-	streamLimit := a.cfg.StreamLimit
-	if streamLimit <= 0 {
-		streamLimit = a.cfg.Limits.MaxStreamsPerAgent
+	streamLimit := challenge.Limits.MaxStreams
+	sessionID, err := cluster.NewSessionID()
+	if err != nil {
+		cancel()
+		return fail(transport.NewProtocolError(transport.ErrorInternal, "session identity unavailable", true))
 	}
-	sess := &Session{agent: a, conn: conn, control: stream, ctx: sessionCtx, cancel: cancel, streamSem: make(chan struct{}, streamLimit)}
+	sess := &Session{agent: a, conn: conn, sessionID: sessionID, control: stream, caps: append([]transport.Capability(nil), challenge.Capabilities...), limits: challenge.Limits, ctx: sessionCtx, cancel: cancel, streamSem: make(chan struct{}, streamLimit)}
 	go sess.controlLoop()
 	go sess.acceptReverseLoop()
+	go sess.statsLoop()
 	return conn, sess, nil
 }
 
 func (s *Session) Wait() error { return transport.WaitConn(s.ctx, s.conn) }
+
+func (s *Session) statsLoop() {
+	if s == nil || s.agent == nil || s.agent.metrics == nil {
+		return
+	}
+	observe := func() {
+		if stats, ok := transport.SessionStats(s.conn); ok {
+			s.agent.metrics.ObserveQUIC(stats)
+		}
+	}
+	observe()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			observe()
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *Session) maxFrame() int64 {
+	if s != nil && s.limits.MaxFrameBytes > 0 {
+		return s.limits.MaxFrameBytes
+	}
+	if s != nil && s.agent != nil {
+		return s.agent.cfg.Limits.MaxFrameBytes
+	}
+	return transport.DefaultMaxFrame
+}
+
+func (s *Session) maxRecord() int64 {
+	if s != nil && s.limits.MaxRecordBytes > 0 {
+		return s.limits.MaxRecordBytes
+	}
+	if s != nil && s.agent != nil {
+		return s.agent.cfg.Limits.MaxRecordBytes
+	}
+	return 0
+}
+
+func (s *Session) maxUDP() int64 {
+	if s != nil && s.limits.MaxUDPBytes > 0 {
+		return s.limits.MaxUDPBytes
+	}
+	if s != nil && s.agent != nil {
+		return s.agent.cfg.Limits.MaxUDPBytes
+	}
+	return 0
+}
+
+func (s *Session) maxPadding() int64 {
+	if s == nil || s.agent == nil {
+		return 0
+	}
+	padding := s.agent.cfg.Obfuscation.MaxPaddingBytes
+	if max := s.maxRecord() - 8; max >= 0 && padding > max {
+		padding = max
+	}
+	return padding
+}
+
+func (s *Session) relayProfile(name string) relay.Profile {
+	if s == nil || s.agent == nil {
+		return relay.Profile{}
+	}
+	return s.agent.relayProfileWithLimits(name, s.limits)
+}
+
+func (s *Session) hasCapability(capability transport.Capability) bool {
+	return s != nil && transport.SupportsCapability(s.caps, capability)
+}
 
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
@@ -257,7 +431,7 @@ func (s *Session) Close() {
 func (s *Session) controlLoop() {
 	defer s.Close()
 	for {
-		f, err := transport.ReadFrame(s.control, s.agent.cfg.Limits.MaxFrameBytes)
+		f, err := transport.ReadFrame(s.control, s.maxFrame())
 		if err != nil {
 			if s.agent.ctx.Err() == nil {
 				s.agent.logger.Info("control loop ended", "event", "agent.control.ended", "error_kind", agentErrorKind(err))
@@ -265,7 +439,7 @@ func (s *Session) controlLoop() {
 			return
 		}
 		if f.Type == transport.TypePing {
-			pong, _ := transport.JSONFrame(transport.TypePong, f.RequestID, nil)
+			pong, _ := transport.MessageFrame(transport.TypePong, f.RequestID, nil)
 			_ = s.write(pong)
 		}
 	}
@@ -274,7 +448,7 @@ func (s *Session) controlLoop() {
 func (s *Session) write(f transport.Frame) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return writeFrame(s.control, f, s.agent.cfg.Limits.MaxFrameBytes)
+	return writeFrame(s.control, f, s.maxFrame())
 }
 
 func (s *Session) acceptReverseLoop() {
@@ -292,7 +466,18 @@ func (s *Session) acceptReverseLoop() {
 			_ = stream.Close()
 			continue
 		}
-		go s.handleReverse(stream, release)
+		if s.agent.life != nil && !s.agent.life.TryAdd() {
+			stream.Cancel()
+			_ = stream.Close()
+			release()
+			continue
+		}
+		go func() {
+			if s.agent.life != nil {
+				defer s.agent.life.Done()
+			}
+			s.handleReverse(stream, release)
+		}()
 	}
 }
 
@@ -301,7 +486,7 @@ func (s *Session) handleReverse(stream transport.Stream, release func()) {
 	defer release()
 	handshakeCtx, cancelHandshake := context.WithTimeout(s.ctx, time.Duration(s.agent.cfg.Transport.HandshakeTimeoutSec)*time.Second)
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
-	f, err := transport.ReadFrame(stream, s.agent.cfg.Limits.MaxFrameBytes)
+	f, err := transport.ReadFrame(stream, s.maxFrame())
 	cancelHandshake()
 	stopStreamContext()
 	stopStreamContext = transport.SetStreamContext(stream, s.ctx)
@@ -314,13 +499,17 @@ func (s *Session) handleReverse(stream transport.Stream, release func()) {
 		return
 	}
 	var open transport.OpenReverse
-	if err := transport.DecodeJSON(f, &open); err != nil {
+	if err := transport.DecodeMessage(f, &open); err != nil {
 		return
 	}
 	tunnel, ok := s.agent.mappings[open.Name]
+	if (open.Protocol == "tcp" && !s.hasCapability(transport.CapabilityReverseTCP)) || (open.Protocol == "udp" && !s.hasCapability(transport.CapabilityReverseUDP)) {
+		sendOpenError(stream, f.RequestID, transport.ErrorCapabilityMismatch, "reverse protocol capability was not negotiated", false, s.maxFrame())
+		return
+	}
 	if !ok || tunnel.Protocol != open.Protocol || open.Profile != s.agent.profile(s.agent.cfg.Obfuscation.ReverseProfile) {
 		s.agent.logger.Warn("reverse mapping rejected", "event", "agent.reverse.rejected", "mapping", open.Name, "security_audit", true)
-		sendOpenError(stream, f.RequestID, "unknown or invalid mapping", s.agent.cfg.Limits.MaxFrameBytes)
+		sendOpenError(stream, f.RequestID, transport.ErrorMappingRejected, "unknown or invalid mapping", false, s.maxFrame())
 		return
 	}
 	if open.Protocol == "tcp" {
@@ -335,16 +524,16 @@ func (s *Session) reverseTCP(stream transport.Stream, tunnel config.Tunnel, prof
 	conn, err := dialer.DialContext(s.ctx, "tcp", tunnel.Local)
 	if err != nil {
 		s.agent.logger.Info("reverse local dial failed", "event", "agent.reverse.local_dial_failed", "mapping", tunnel.Name, "error_kind", agentErrorKind(err))
-		sendOpenError(stream, 0, err.Error(), s.agent.cfg.Limits.MaxFrameBytes)
+		sendOpenError(stream, 0, transport.ErrorResourceExhausted, "local destination unavailable", true, s.maxFrame())
 		return
 	}
 	defer conn.Close()
-	ok, _ := transport.JSONFrame(transport.TypeOpenOK, 0, transport.OpenResult{})
-	if err := writeFrame(stream, ok, s.agent.cfg.Limits.MaxFrameBytes); err != nil {
+	ok, _ := transport.MessageFrame(transport.TypeOpenOK, 0, transport.OpenResult{})
+	if err := writeFrame(stream, ok, s.maxFrame()); err != nil {
 		s.agent.logger.Info("reverse status write failed", "event", "agent.reverse.status_write_failed", "mapping", tunnel.Name, "error_kind", agentErrorKind(err))
 		return
 	}
-	remote := relay.NewConn(stream, s.agent.relayProfile(profile))
+	remote := relay.NewConn(stream, s.relayProfile(profile))
 	s.agent.metrics.ActiveStreams.Add(1)
 	defer s.agent.metrics.ActiveStreams.Add(-1)
 	relay.Bidirectional(conn, remote, relay.Counters{In: func(n uint64) { s.agent.metrics.BytesIn.Add(n) }, Out: func(n uint64) { s.agent.metrics.BytesOut.Add(n) }})
@@ -353,17 +542,17 @@ func (s *Session) reverseTCP(stream transport.Stream, tunnel config.Tunnel, prof
 func (s *Session) reverseUDP(stream transport.Stream, tunnel config.Tunnel) {
 	local, err := net.ResolveUDPAddr("udp", tunnel.Local)
 	if err != nil {
-		sendOpenError(stream, 0, err.Error(), s.agent.cfg.Limits.MaxFrameBytes)
+		sendOpenError(stream, 0, transport.ErrorMappingRejected, "invalid local UDP destination", false, s.maxFrame())
 		return
 	}
 	conn, err := net.DialUDP("udp", nil, local)
 	if err != nil {
-		sendOpenError(stream, 0, err.Error(), s.agent.cfg.Limits.MaxFrameBytes)
+		sendOpenError(stream, 0, transport.ErrorResourceExhausted, "local destination unavailable", true, s.maxFrame())
 		return
 	}
 	defer conn.Close()
-	ok, _ := transport.JSONFrame(transport.TypeOpenOK, 0, transport.OpenResult{})
-	if err := writeFrame(stream, ok, s.agent.cfg.Limits.MaxFrameBytes); err != nil {
+	ok, _ := transport.MessageFrame(transport.TypeOpenOK, 0, transport.OpenResult{})
+	if err := writeFrame(stream, ok, s.maxFrame()); err != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -376,7 +565,7 @@ func (s *Session) reverseUDP(stream transport.Stream, tunnel config.Tunnel) {
 	errCh := make(chan error, 2)
 	go func() {
 		for {
-			f, err := transport.ReadFrame(stream, s.agent.cfg.Limits.MaxFrameBytes)
+			f, err := transport.ReadFrame(stream, s.maxFrame())
 			if err != nil {
 				errCh <- err
 				return
@@ -385,7 +574,7 @@ func (s *Session) reverseUDP(stream transport.Stream, tunnel config.Tunnel) {
 				errCh <- errors.New("unexpected reverse UDP frame")
 				return
 			}
-			d, err := transport.DecodeData(f, s.agent.cfg.Limits.MaxUDPBytes, s.agent.cfg.Obfuscation.MaxPaddingBytes)
+			d, err := transport.DecodeData(f, s.maxUDP(), s.maxPadding())
 			if err != nil {
 				errCh <- err
 				return
@@ -399,14 +588,14 @@ func (s *Session) reverseUDP(stream transport.Stream, tunnel config.Tunnel) {
 		}
 	}()
 	go func() {
-		buf := make([]byte, s.agent.cfg.Limits.MaxUDPBytes)
+		buf := make([]byte, s.maxUDP())
 		for {
 			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 			n, err := conn.Read(buf)
 			if n > 0 {
 				touch()
-				f, _ := transport.JSONFrame(transport.TypeData, 0, transport.NewData(buf[:n], s.agent.profile(s.agent.cfg.Obfuscation.ReverseProfile), s.agent.cfg.Obfuscation.MaxPaddingBytes))
-				if err := writeFrame(stream, f, s.agent.cfg.Limits.MaxFrameBytes); err != nil {
+				f, _ := transport.MessageFrame(transport.TypeData, 0, transport.NewData(buf[:n], s.agent.profile(s.agent.cfg.Obfuscation.ReverseProfile), s.maxPadding()))
+				if err := writeFrame(stream, f, s.maxFrame()); err != nil {
 					errCh <- err
 					return
 				}
@@ -438,6 +627,9 @@ func (a *Agent) OpenProxy(ctx context.Context, network, address string, port uin
 	if err != nil {
 		return nil, err
 	}
+	if !sess.hasCapability(transport.CapabilityEgressProxy) {
+		return nil, transport.NewProtocolError(transport.ErrorCapabilityMismatch, "egress proxy capability was not negotiated", false)
+	}
 	release, ok := sess.acquireStream(ctx)
 	if !ok {
 		if err := ctx.Err(); err != nil {
@@ -454,32 +646,40 @@ func (a *Agent) OpenProxy(ctx context.Context, network, address string, port uin
 	defer cancelHandshake()
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	defer stopStreamContext()
-	open, _ := transport.JSONFrame(transport.TypeOpenProxy, 0, transport.OpenProxy{Network: network, Address: address, Port: port, Profile: a.profile(a.cfg.Obfuscation.ProxyProfile)})
-	if err := writeFrame(stream, open, a.cfg.Limits.MaxFrameBytes); err != nil {
+	open, _ := transport.MessageFrame(transport.TypeOpenProxy, 0, transport.OpenProxy{Network: network, Address: address, Port: port, Profile: a.profile(a.cfg.Obfuscation.ProxyProfile)})
+	if err := writeFrame(stream, open, sess.maxFrame()); err != nil {
 		_ = stream.Close()
 		release()
 		return nil, err
 	}
-	f, err := transport.ReadFrame(stream, a.cfg.Limits.MaxFrameBytes)
+	f, err := transport.ReadFrame(stream, sess.maxFrame())
 	if err != nil {
 		_ = stream.Close()
 		release()
 		return nil, err
 	}
 	if f.Type != transport.TypeOpenOK {
+		if f.Type == transport.TypeError {
+			var protocolErr transport.ProtocolError
+			if decodeErr := transport.DecodeMessage(f, &protocolErr); decodeErr == nil {
+				_ = stream.Close()
+				release()
+				return nil, &protocolErr
+			}
+		}
 		var failure transport.OpenResult
-		_ = transport.DecodeJSON(f, &failure)
+		_ = transport.DecodeMessage(f, &failure)
 		_ = stream.Close()
 		release()
-		if failure.Error == "" {
-			failure.Error = "remote open failed"
+		if failure.Error == nil {
+			failure.Error = transport.NewProtocolError(transport.ErrorInternal, "remote open failed", false)
 		}
-		return nil, errors.New(failure.Error)
+		return nil, failure.Error
 	}
 	cancelHandshake()
 	stopStreamContext()
 	stopStreamContext = transport.SetStreamContext(stream, ctx)
-	return newLeasedStream(stream, release), nil
+	return newLeasedStream(stream, release, sess.limits), nil
 }
 
 func (a *Agent) route(inbound, host string) string {
@@ -493,9 +693,21 @@ func (a *Agent) route(inbound, host string) string {
 }
 
 func (a *Agent) relayProfile(name string) relay.Profile {
-	p, err := relay.NewProfile(a.profile(name), a.cfg.Limits.MaxRecordBytes, a.cfg.Obfuscation.MaxPaddingBytes)
+	return a.relayProfileWithLimits(name, transport.Limits{MaxRecordBytes: a.cfg.Limits.MaxRecordBytes})
+}
+
+func (a *Agent) relayProfileWithLimits(name string, limits transport.Limits) relay.Profile {
+	maxRecord := limits.MaxRecordBytes
+	if maxRecord <= 0 {
+		maxRecord = a.cfg.Limits.MaxRecordBytes
+	}
+	maxPadding := a.cfg.Obfuscation.MaxPaddingBytes
+	if max := maxRecord - 8; max >= 0 && maxPadding > max {
+		maxPadding = max
+	}
+	p, err := relay.NewProfile(a.profile(name), maxRecord, maxPadding)
 	if err != nil {
-		p, _ = relay.NewProfile(config.ProfileStandard, a.cfg.Limits.MaxRecordBytes, 0)
+		p, _ = relay.NewProfile(config.ProfileStandard, maxRecord, 0)
 	}
 	return p
 }
@@ -511,8 +723,8 @@ func writeFrame(stream io.Writer, f transport.Frame, max int64) error {
 	return nil
 }
 
-func sendOpenError(stream io.Writer, id uint64, message string, max int64) {
-	f, _ := transport.JSONFrame(transport.TypeOpenError, id, transport.OpenResult{Error: message})
+func sendOpenError(stream io.Writer, id uint64, code transport.ErrorCode, message string, retryable bool, max int64) {
+	f, _ := transport.MessageFrame(transport.TypeOpenError, id, transport.OpenResult{Error: transport.NewProtocolError(code, message, retryable)})
 	_ = writeFrame(stream, f, max)
 }
 

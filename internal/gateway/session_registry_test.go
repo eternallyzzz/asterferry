@@ -1,9 +1,12 @@
 package gateway
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestSessionRegistryReplaceAndLimit(t *testing.T) {
-	r := newSessionRegistry()
+	r := newSessionRegistry("test-node")
 	first := &Session{agentID: "edge"}
 	second := &Session{agentID: "edge"}
 	if old, ok := r.Add(first, 1); !ok || old != nil {
@@ -14,6 +17,10 @@ func TestSessionRegistryReplaceAndLimit(t *testing.T) {
 	}
 	if old, ok := r.Add(second, 1); !ok || old != first {
 		t.Fatalf("replacement: old=%p ok=%v", old, ok)
+	}
+	owner, ok, err := r.owners.Lookup(context.Background(), "edge")
+	if err != nil || !ok || owner.SessionID != second.sessionID || owner.NodeID != "test-node" {
+		t.Fatalf("owner metadata mismatch: owner=%+v ok=%v err=%v", owner, ok, err)
 	}
 	if r.Count() != 1 || len(r.Snapshot()) != 1 {
 		t.Fatal("registry count/snapshot mismatch")

@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -15,10 +14,11 @@ import (
 	"golang.org/x/crypto/blake2b"
 
 	"asterferry/internal/config"
+	"asterferry/internal/protocol"
 )
 
 const (
-	obfuscationVersion  byte = 1
+	obfuscationVersion  byte = protocol.ObfuscationVersion
 	obfuscationData     byte = 0
 	obfuscationFragment byte = 1
 
@@ -33,11 +33,12 @@ const (
 	maxReassemblyBytes     = 1 << 20
 	maxObfuscationDatagram = 64 << 10
 	reassemblyTTL          = time.Second
+	randomBufferSize       = 32 << 10
 )
 
 const (
-	obfuscationMaskDomain = "asterferry/v3/datagram-mask/"
-	obfuscationTagDomain  = "asterferry/v3/datagram-tag/"
+	obfuscationMaskDomain = protocol.DatagramMaskDomain
+	obfuscationTagDomain  = protocol.DatagramTagDomain
 	maskInputBytes        = len(obfuscationMaskDomain) + 32 + obfuscationSaltBytes + 4
 	tagInputBytes         = 2048
 )
@@ -79,6 +80,10 @@ type obfuscationPacketConn struct {
 	writeBody []byte
 	writeMask []byte
 	writeWire []byte
+
+	randomMu  sync.Mutex
+	randomBuf []byte
+	randomPos int
 }
 
 type fragmentKey struct {
@@ -261,7 +266,7 @@ func (c *obfuscationPacketConn) writeFragments(packet []byte, addr net.Addr) err
 		return errors.New("QUIC datagram requires too many camouflage fragments")
 	}
 	var idBytes [2]byte
-	if _, err := io.ReadFull(rand.Reader, idBytes[:]); err != nil {
+	if err := c.randomBytes(idBytes[:]); err != nil {
 		return err
 	}
 	id := binary.BigEndian.Uint16(idBytes[:])
@@ -299,11 +304,11 @@ func (c *obfuscationPacketConn) fragmentBody(id uint16, index, total byte, paylo
 	maxPadding := maxInt(0, maxWire-base)
 	padding := minPadding
 	if maxPadding > minPadding {
-		random, err := randomUint16()
-		if err != nil {
+		var randomBytes [2]byte
+		if err := c.randomBytes(randomBytes[:]); err != nil {
 			return nil, err
 		}
-		padding += int(random) % (maxPadding - minPadding + 1)
+		padding += int(binary.BigEndian.Uint16(randomBytes[:])) % (maxPadding - minPadding + 1)
 	}
 	body := c.writeBuffer(&c.writeBody, fragmentHeaderBytes+len(payload)+padding)
 	body[0] = obfuscationVersion
@@ -315,7 +320,7 @@ func (c *obfuscationPacketConn) fragmentBody(id uint16, index, total byte, paylo
 	binary.BigEndian.PutUint16(body[8:10], uint16(padding))
 	copy(body[fragmentHeaderBytes:], payload)
 	if padding > 0 {
-		if _, err := io.ReadFull(rand.Reader, body[fragmentHeaderBytes+len(payload):]); err != nil {
+		if err := c.randomBytes(body[fragmentHeaderBytes+len(payload):]); err != nil {
 			return nil, err
 		}
 	}
@@ -324,7 +329,7 @@ func (c *obfuscationPacketConn) fragmentBody(id uint16, index, total byte, paylo
 
 func (c *obfuscationPacketConn) seal(body []byte) ([]byte, error) {
 	var salt [obfuscationSaltBytes]byte
-	if _, err := io.ReadFull(rand.Reader, salt[:]); err != nil {
+	if err := c.randomBytes(salt[:]); err != nil {
 		return nil, err
 	}
 	masked := c.writeBuffer(&c.writeMask, len(body))
@@ -527,12 +532,33 @@ func (c *obfuscationPacketConn) writeBuffer(buffer *[]byte, size int) []byte {
 	return (*buffer)[:size]
 }
 
-func randomUint16() (uint16, error) {
-	var b [2]byte
-	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
-		return 0, err
+// randomBytes amortizes operating-system CSPRNG calls across packets while
+// retaining cryptographically random output. It is used only for salts,
+// fragment IDs, and camouflage padding; the packet key and tag construction
+// remain unchanged.
+func (c *obfuscationPacketConn) randomBytes(dst []byte) error {
+	if len(dst) == 0 {
+		return nil
 	}
-	return binary.BigEndian.Uint16(b[:]), nil
+	c.randomMu.Lock()
+	defer c.randomMu.Unlock()
+	for len(dst) > 0 {
+		if c.randomPos >= len(c.randomBuf) {
+			if cap(c.randomBuf) < randomBufferSize {
+				c.randomBuf = make([]byte, randomBufferSize)
+			} else {
+				c.randomBuf = c.randomBuf[:randomBufferSize]
+			}
+			if _, err := rand.Read(c.randomBuf); err != nil {
+				return err
+			}
+			c.randomPos = 0
+		}
+		n := copy(dst, c.randomBuf[c.randomPos:])
+		c.randomPos += n
+		dst = dst[n:]
+	}
+	return nil
 }
 
 func maxInt(a, b int) int {

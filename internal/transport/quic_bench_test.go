@@ -22,62 +22,81 @@ import (
 )
 
 func BenchmarkQUICStream(b *testing.B) {
-	payload := make([]byte, 16<<10)
+	payloadSizes := []int{16 << 10, 64 << 10}
+	directions := []string{"upload", "download", "roundtrip"}
 	for _, mode := range []string{config.TransportObfuscationStandard, config.TransportObfuscationCamouflage} {
-		for _, streams := range []int{1, 8, 32, 64} {
-			mode, streams := mode, streams
-			b.Run(fmt.Sprintf("mode=%s/streams=%d", mode, streams), func(b *testing.B) {
-				client, cleanup := startBenchmarkQUIC(b, streams+1, mode)
-				defer cleanup()
-				connections := make([]Stream, 0, streams)
-				for i := 0; i < streams; i++ {
-					stream, err := client.OpenStream(context.Background())
-					if err != nil {
-						b.Fatal(err)
-					}
-					connections = append(connections, stream)
-				}
-				defer func() {
-					for _, stream := range connections {
-						_ = stream.Close()
-					}
-				}()
-				b.SetBytes(int64(len(payload) * streams))
-				b.ReportAllocs()
-				b.ResetTimer()
-				errs := make(chan error, streams)
-				var wg sync.WaitGroup
-				for _, stream := range connections {
-					stream := stream
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						result := make([]byte, len(payload))
-						for i := 0; i < b.N; i++ {
-							if _, err := stream.Write(payload); err != nil {
-								errs <- err
-								return
+		for _, direction := range directions {
+			for _, payloadSize := range payloadSizes {
+				for _, streams := range []int{1, 8, 32, 64} {
+					mode, direction, payloadSize, streams := mode, direction, payloadSize, streams
+					b.Run(fmt.Sprintf("mode=%s/direction=%s/payload=%d/streams=%d", mode, direction, payloadSize, streams), func(b *testing.B) {
+						payload := make([]byte, payloadSize)
+						client, cleanup := startBenchmarkQUIC(b, streams+1, mode, direction, payload)
+						defer cleanup()
+						connections := make([]Stream, 0, streams)
+						for i := 0; i < streams; i++ {
+							stream, err := client.OpenStream(context.Background())
+							if err != nil {
+								b.Fatal(err)
 							}
-							if _, err := io.ReadFull(stream, result); err != nil {
-								errs <- err
-								return
-							}
+							connections = append(connections, stream)
 						}
-					}()
+						defer func() {
+							for _, stream := range connections {
+								_ = stream.Close()
+							}
+						}()
+						b.SetBytes(int64(len(payload) * streams))
+						b.ReportAllocs()
+						b.ResetTimer()
+						errs := make(chan error, streams)
+						var wg sync.WaitGroup
+						for _, stream := range connections {
+							stream := stream
+							wg.Add(1)
+							go func() {
+								defer wg.Done()
+								result := make([]byte, len(payload))
+								for i := 0; i < b.N; i++ {
+									switch direction {
+									case "upload":
+										if err := writeAll(stream, payload); err != nil {
+											errs <- err
+											return
+										}
+									case "download":
+										if _, err := io.ReadFull(stream, result); err != nil {
+											errs <- err
+											return
+										}
+									default:
+										if err := writeAll(stream, payload); err != nil {
+											errs <- err
+											return
+										}
+										if _, err := io.ReadFull(stream, result); err != nil {
+											errs <- err
+											return
+										}
+									}
+								}
+							}()
+						}
+						wg.Wait()
+						b.StopTimer()
+						select {
+						case err := <-errs:
+							b.Fatal(err)
+						default:
+						}
+					})
 				}
-				wg.Wait()
-				b.StopTimer()
-				select {
-				case err := <-errs:
-					b.Fatal(err)
-				default:
-				}
-			})
+			}
 		}
 	}
 }
 
-func startBenchmarkQUIC(t testing.TB, streams int, mode string) (Session, func()) {
+func startBenchmarkQUIC(t testing.TB, streams int, mode, direction string, payload []byte) (Session, func()) {
 	t.Helper()
 	serverTLS, clientTLS := benchmarkTLSConfigs(t)
 	transportConfig := config.TransportConfig{
@@ -87,6 +106,8 @@ func startBenchmarkQUIC(t testing.TB, streams int, mode string) (Session, func()
 		InitialConnectionReceiveWindow: 8 << 20,
 		MaxStreamReadBuffer:            16 << 20,
 		MaxConnReadBuffer:              64 << 20,
+		UDPReadBufferBytes:             16 << 20,
+		UDPWriteBufferBytes:            16 << 20,
 		HandshakeTimeoutSec:            10,
 		IdleTimeoutSec:                 30,
 	}
@@ -96,6 +117,10 @@ func startBenchmarkQUIC(t testing.TB, streams int, mode string) (Session, func()
 	}
 	serverUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configureUDPBuffers(serverUDP, transportConfig); err != nil {
+		_ = serverUDP.Close()
 		t.Fatal(err)
 	}
 	serverPacketConn, err := NewObfuscatingPacketConn(serverUDP, obfuscation)
@@ -124,12 +149,30 @@ func startBenchmarkQUIC(t testing.TB, streams int, mode string) (Session, func()
 			}
 			go func() {
 				defer stream.Close()
-				_, _ = io.Copy(stream, stream)
+				switch direction {
+				case "upload":
+					_, _ = io.Copy(io.Discard, stream)
+				case "download":
+					for {
+						if err := writeAll(stream, payload); err != nil {
+							return
+						}
+					}
+				default:
+					_, _ = io.Copy(stream, stream)
+				}
 			}()
 		}
 	}()
 	clientUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
+		_ = listener.Close()
+		_ = serverTransport.Close()
+		_ = serverPacketConn.Close()
+		t.Fatal(err)
+	}
+	if err := configureUDPBuffers(clientUDP, transportConfig); err != nil {
+		_ = clientUDP.Close()
 		_ = listener.Close()
 		_ = serverTransport.Close()
 		_ = serverPacketConn.Close()

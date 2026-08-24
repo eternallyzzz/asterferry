@@ -1,5 +1,5 @@
-# AsterFerry v3 public Gateway configuration.
-version: 3
+# AsterFerry v4 public Gateway configuration.
+version: 4
 role: gateway
 
 transport:
@@ -13,12 +13,25 @@ transport:
   # initial_connection_receive_window_bytes: 8388608
   # max_stream_read_buffer: 16777216
   # max_conn_read_buffer: 67108864
+  # High-BDP links may benefit from larger OS UDP queues (measure first).
+  # udp_read_buffer_bytes: 16777216
+  # udp_write_buffer_bytes: 16777216
   handshake_timeout_seconds: 10
   idle_timeout_seconds: 1800
   keep_alive_seconds: 20
 
 management:
   listen: "127.0.0.1:9090"
+
+shutdown:
+  # On SIGTERM/SIGINT, stop new traffic and wait up to this long for active
+  # streams. The process then closes remaining sessions forcefully.
+  grace_period_seconds: 30
+
+# Optional identity metadata reserved for future Kubernetes coordination.
+# This does not enable clustering; omit it for the normal single-node mode.
+# cluster:
+#   node_id: "gateway-a"
 
 limits:
   max_agents: 256
@@ -35,7 +48,7 @@ obfuscation:
   reverse_profile: standard
   max_padding_bytes: 2048
   transport:
-    # camouflage is the v3 default. Set standard only during an explicit
+    # camouflage is the v4 default. Set standard only during an explicit
     # migration or on a trusted network where raw QUIC is required.
     mode: camouflage
     key_file: "/etc/asterferry/obfs.key"

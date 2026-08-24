@@ -1,8 +1,11 @@
-# AsterFerry v3 configuration examples
+# AsterFerry v4 configuration examples
 
 The configuration uses two fixed roles: `gateway` (public entry point) and
 `agent` (internal node). The old `tunnels` section is now named `reverse`, and
 the public port field is `gateway_port`.
+
+The examples use protocol/configuration version 4. Gateway and Agent must be
+upgraded together; v3 configurations and connections are rejected.
 
 ## 1. Generate a deployment identifier
 
@@ -60,6 +63,13 @@ current key while inbound packets accept both keys for the overlap window.
   and privacy-preserving domain hashes are the production defaults. Use the
   documented `ASTERFERRY_*` environment variables for deployment-specific
   overrides.
+- Configure `shutdown.grace_period_seconds` for the bounded drain after
+  `SIGTERM`/`SIGINT` (30 seconds by default). The first signal rejects new
+  traffic while admitted streams finish; a second signal forces close. Config
+  changes take effect after validation and restart, not through SIGHUP.
+- `cluster.node_id` is optional identity metadata for future Kubernetes
+  coordination. It does not enable multiple Gateway replicas or external
+  Redis/etcd coordination.
 - `obfuscation.transport.mode` defaults to `camouflage`. It masks QUIC UDP
   datagrams and shapes only handshake packets. `max_wire_packet_bytes` bounds
   each shaped fragment; normal QUIC data keeps native packet coalescing.

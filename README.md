@@ -4,7 +4,7 @@ AsterFerry is a lightweight private-network relay. A public `gateway` and an
 internal `agent` connect over TLS 1.3 and QUIC to provide local SOCKS5/HTTP
 proxying and TCP/UDP reverse mappings.
 
-The current configuration and wire protocol are v3, with strict role
+The current configuration and wire protocol are v4, with strict role
 separation:
 
 - `gateway`: public entry point, Agent mTLS/token authentication, reverse port
@@ -41,14 +41,31 @@ both proxy protocols and deployment configuration.
 At runtime, the Agent composes a `ProxyEngine` and a reconnecting session
 manager. The Gateway composes a session registry, mapping manager, and egress
 proxy service. These components own their own shutdown and concurrency state;
-the role objects only assemble them and expose status.
+the role objects only assemble them and expose status. Both roles share a
+`running -> draining -> stopped` lifecycle gate so admission and active-work
+accounting cannot diverge between the two data planes.
+
+## Graceful shutdown
+
+`shutdown.grace_period_seconds` controls the bounded drain after the first
+`SIGTERM` or `SIGINT` (default 30 seconds, maximum 3600 seconds). During drain,
+`/readyz` returns 503 while `/healthz` remains healthy; new sessions, streams,
+proxy accepts, reconnects, and reverse mappings are rejected, while already
+admitted traffic is allowed to finish. When the deadline expires, remaining
+work is closed forcefully and the process exits as an intentional operational
+shutdown. A second termination signal skips the wait and closes immediately.
+
+Configuration changes are intentionally validate-then-restart; SIGHUP does not
+reload configuration. Keep the supervisor's termination window longer than the
+configured drain period (the bundled Docker, systemd, and Helm defaults use a
+35-second window for the 30-second application default).
 
 Proxy payloads are carried inside encrypted QUIC streams using AsterFerry relay
 records. The `balanced` profile adds bounded random padding to reduce fixed-size
 fingerprints; it does not impersonate HTTP/3, WebSocket, or another application
 protocol.
 
-The v3 default also applies a versioned outer UDP camouflage layer around QUIC.
+The v4 default also applies a versioned outer UDP camouflage layer around QUIC.
 It uses an independent key file, random salts, keyed packet tags, and bounded
 handshake shaping. This hides QUIC packet bytes from passive DPI and silently
 drops unauthenticated probes. Normal QUIC data keeps native packet coalescing;
@@ -75,6 +92,19 @@ process-scoped keyed hash; plaintext domains require both DEBUG logging and the
 explicit `ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG=true` override. Payloads, cookies,
 credentials, and headers are never logged.
 
+## v4 protocol negotiation
+
+Control and data messages use the checked-in protobuf schema under `proto/`.
+The outer frame carries a v4 version, stable type, request ID, and an inner
+typed protobuf payload. During the authenticated handshake, the Agent and
+Gateway negotiate supported features and the minimum of their frame, record,
+UDP, and stream limits. The required `errors.v1` and `limits.v1` capabilities
+must be present on both sides; there is no v3 fallback.
+
+Protocol failures use stable error codes and a retryable flag. Remote error
+details are deliberately short and sanitized, while full diagnostics remain
+local log fields.
+
 ## Configuration examples
 
 Copyable templates are available in [examples/README.md](examples/README.md),
@@ -92,6 +122,15 @@ published to `ghcr.io/eternallyzzz/asterferry` for version tags.
 The Gateway firewall must allow the QUIC UDP port and the configured reverse
 TCP/UDP ports. Management endpoints bind to loopback by default: Gateway uses
 `127.0.0.1:9090` and Agent uses `127.0.0.1:9091`.
+
+### Cluster readiness
+
+The optional `cluster.node_id` field is identity metadata for future Gateway
+coordination. It does not enable clustering, connect to Redis/etcd, or make
+multiple Gateway replicas safe. Keep the Gateway at one replica until a
+coordinated owner store, L4 connection affinity, and reverse-port routing are
+deployed together. The v4 data plane remains local to the Gateway that owns an
+Agent session; existing QUIC streams cannot be migrated between nodes.
 
 ## Security boundaries
 
@@ -118,6 +157,7 @@ ASTERFERRY_LOG_SAMPLE_BURST=20
 ASTERFERRY_LOG_SAMPLE_SUMMARY_INTERVAL=60
 ASTERFERRY_LOG_SAMPLE_MAX_KEYS=4096
 ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG=false
+ASTERFERRY_SHUTDOWN_GRACE_PERIOD=30
 ASTERFERRY_SNIFF_ENABLED=true
 ASTERFERRY_SNIFF_MAX_BYTES=16384
 ASTERFERRY_SNIFF_TIMEOUT_MS=250
@@ -133,7 +173,7 @@ go vet ./...
 ```
 
 The historical `myproxy` and `myfrp` projects were design references only;
-their v1 configuration and wire protocol are not compatible with AsterFerry v3.
+their v1 configuration and wire protocol are not compatible with AsterFerry v4.
 
 ## Performance validation
 
@@ -151,10 +191,18 @@ bash scripts/bench-wsl.sh
 
 Results are written under the ignored `tmp/perf/` directory. The benchmark
 matrix covers standard/camouflage transport modes, one/eight/32/64 streams,
-and both `standard` and `balanced` relay profiles. WSL runs should use an ext4 checkout when measuring
-runtime performance; `/mnt/d` is acceptable for a quick smoke test but can
-distort build and startup timings. Record the WSL `net.core.rmem_max` and
-`net.core.wmem_max` values as well: restricted UDP socket limits can dominate
-Linux/WSL results before application tuning. The raw QUIC benchmark uses 16 KiB writes
-to match the relay record size, while the full proxy benchmark uses 64 KiB
-application writes.
+and both `standard` and `balanced` relay profiles. Raw QUIC benchmarks include
+upload, download, and round-trip directions at 16 KiB and 64 KiB payloads;
+full proxy benchmarks report round-trip goodput at both payload sizes. The
+Windows script writes `metadata.json` and `summary.json`. On a WSL image that
+does not have Go installed, `scripts/bench-wsl.ps1` cross-builds static Linux
+benchmark binaries with Go 1.26.5 and runs them inside WSL. WSL runs should
+use an ext4 checkout when measuring runtime performance; `/mnt/d` is
+acceptable for a quick smoke test but can distort build and startup timings.
+Record the WSL `net.core.rmem_max` and `net.core.wmem_max` values as well:
+restricted UDP socket limits can dominate Linux/WSL results before application
+tuning. For a two-process Windows↔WSL reverse-tunnel measurement, use
+`scripts/bench-cross-platform.ps1` with separately prepared v4 configs; it
+uses `cmd/asterferry-bench` and emits a JSON goodput result. The configs must
+map a TCP reverse tunnel to the benchmark echo endpoint; the script does not
+generate or copy certificates and private keys.

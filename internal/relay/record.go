@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"asterferry/internal/protocol"
 )
 
 const recordHeaderSize = 8
+
+const randomBufferSize = 32 << 10
 
 // Profile controls the application record shape used inside an encrypted
 // QUIC stream. The record layer hides the exact write boundaries and, for the
@@ -43,6 +47,10 @@ type Conn struct {
 	writeMu sync.Mutex
 	readMu  sync.Mutex
 	readBuf []byte
+
+	randomMu  sync.Mutex
+	randomBuf []byte
+	randomPos int
 }
 
 func NewConn(underlying io.ReadWriteCloser, profile Profile) *Conn {
@@ -72,22 +80,18 @@ func (c *Conn) Write(p []byte) (int, error) {
 
 func (c *Conn) writeRecord(payload []byte) error {
 	padding := c.paddingLen(len(payload))
-	header := make([]byte, recordHeaderSize)
-	header[0] = 1 // record version
+	var header [recordHeaderSize]byte
+	header[0] = protocol.RelayRecordVersion
 	binary.BigEndian.PutUint32(header[2:6], uint32(len(payload)))
 	binary.BigEndian.PutUint16(header[6:8], uint16(padding))
-	if err := writeAll(c.underlying, header); err != nil {
+	if err := writeAll(c.underlying, header[:]); err != nil {
 		return err
 	}
 	if err := writeAll(c.underlying, payload); err != nil {
 		return err
 	}
 	if padding > 0 {
-		pad := make([]byte, padding)
-		if _, err := rand.Read(pad); err != nil {
-			return err
-		}
-		if err := writeAll(c.underlying, pad); err != nil {
+		if err := c.writeRandom(padding); err != nil {
 			return err
 		}
 	}
@@ -122,7 +126,7 @@ func (c *Conn) readRecord() ([]byte, error) {
 	if _, err := io.ReadFull(c.underlying, header); err != nil {
 		return nil, err
 	}
-	if header[0] != 1 || header[1] != 0 {
+	if header[0] != protocol.RelayRecordVersion || header[1] != 0 {
 		return nil, errors.New("invalid relay record header")
 	}
 	payloadLen := int64(binary.BigEndian.Uint32(header[2:6]))
@@ -144,7 +148,81 @@ func (c *Conn) readRecord() ([]byte, error) {
 }
 
 func (c *Conn) paddingLen(payloadLen int) int {
-	return PaddingLength(c.profile.Name, int64(recordHeaderSize+payloadLen), c.profile.MaxPadding)
+	if c.profile.Name != "balanced" || c.profile.MaxPadding == 0 {
+		return 0
+	}
+	base := int64(recordHeaderSize + payloadLen)
+	for _, bucket := range []int{512, 1024, 2048, 4096, 8192, 16384} {
+		if int64(bucket) < base || int64(bucket)-base > c.profile.MaxPadding {
+			continue
+		}
+		available := int64(bucket) - base
+		if available == 0 {
+			return 0
+		}
+		var random [2]byte
+		if err := c.randomBytes(random[:]); err != nil {
+			return int(available)
+		}
+		return int(int64(binary.BigEndian.Uint16(random[:])) % (available + 1))
+	}
+	return 0
+}
+
+func (c *Conn) randomBytes(dst []byte) error {
+	if len(dst) == 0 {
+		return nil
+	}
+	c.randomMu.Lock()
+	defer c.randomMu.Unlock()
+	for len(dst) > 0 {
+		if c.randomPos >= len(c.randomBuf) {
+			if cap(c.randomBuf) < randomBufferSize {
+				c.randomBuf = make([]byte, randomBufferSize)
+			} else {
+				c.randomBuf = c.randomBuf[:randomBufferSize]
+			}
+			if _, err := rand.Read(c.randomBuf); err != nil {
+				return err
+			}
+			c.randomPos = 0
+		}
+		n := copy(dst, c.randomBuf[c.randomPos:])
+		c.randomPos += n
+		dst = dst[n:]
+	}
+	return nil
+}
+
+func (c *Conn) writeRandom(size int) error {
+	if size <= 0 {
+		return nil
+	}
+	c.randomMu.Lock()
+	defer c.randomMu.Unlock()
+	for size > 0 {
+		if c.randomPos >= len(c.randomBuf) {
+			if cap(c.randomBuf) < randomBufferSize {
+				c.randomBuf = make([]byte, randomBufferSize)
+			} else {
+				c.randomBuf = c.randomBuf[:randomBufferSize]
+			}
+			if _, err := rand.Read(c.randomBuf); err != nil {
+				return err
+			}
+			c.randomPos = 0
+		}
+		n := len(c.randomBuf) - c.randomPos
+		if n > size {
+			n = size
+		}
+		if err := writeAll(c.underlying, c.randomBuf[c.randomPos:c.randomPos+n]); err != nil {
+			return err
+		}
+		c.randomPos += n
+		size -= n
+	}
+	return nil
 }
 
 // PaddingLength returns a bounded random padding length for a payload already
