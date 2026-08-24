@@ -36,6 +36,7 @@ type Gateway struct {
 	owners    cluster.OwnerStore
 	egress    *egressProxy
 	acl       map[string]*credential
+	admission *handshakeAdmission
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -88,7 +89,7 @@ func New(cfg *config.GatewayOptions, loggerOpt ...*slog.Logger) (*Gateway, error
 		logger = loggerOpt[0]
 	}
 	owners := cluster.NewLocalOwnerStore()
-	s := &Gateway{cfg: cfg, nodeID: nodeID, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, life: lifecycle.NewGate(), owners: owners, sessions: newSessionRegistry(nodeID, owners), acl: map[string]*credential{}}
+	s := &Gateway{cfg: cfg, nodeID: nodeID, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, life: lifecycle.NewGate(), owners: owners, sessions: newSessionRegistry(nodeID, owners), acl: map[string]*credential{}, admission: newHandshakeAdmission(cfg.Limits.MaxPendingHandshakes)}
 	s.mappings = newMappingManager(s)
 	s.egress = newEgressProxy(s)
 	for _, agent := range cfg.Agents {
@@ -110,7 +111,7 @@ func (s *Gateway) Start() error {
 		return err
 	}
 	s.ep = ep
-	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s)
+	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s, s.cfg.Management.AuthToken)
 	if err != nil {
 		_ = ep.Close()
 		return err
@@ -218,6 +219,14 @@ func (s *Gateway) acceptLoop() {
 }
 
 func (s *Gateway) handleConn(conn transport.Session) {
+	releasePending, sourceKey, allowed := s.admission.begin(conn)
+	if !allowed {
+		s.metrics.AuthFailures.Add(1)
+		s.logger.Warn("connection rejected before authentication", "event", "gateway.auth.admission_rejected", "source", sourceKey, "security_audit", true)
+		_ = transport.CloseSession(conn)
+		return
+	}
+	defer releasePending()
 	admitted := s.life == nil || s.life.TryAdd()
 	if !admitted {
 		_ = transport.CloseSession(conn)
@@ -232,25 +241,29 @@ func (s *Gateway) handleConn(conn transport.Session) {
 	}
 	s.metrics.Connections.Add(1)
 	defer s.metrics.Connections.Add(-1)
-	stream, err := conn.AcceptStream(s.ctx)
+	handshakeCtx, cancelHandshake := context.WithTimeout(s.ctx, time.Duration(s.cfg.Transport.HandshakeTimeoutSec)*time.Second)
+	stream, err := conn.AcceptStream(handshakeCtx)
 	if err != nil {
-		s.logger.Error("accept control stream failed", "event", "gateway.control_stream.accept_failed", "error_kind", errorKind(err))
+		cancelHandshake()
+		s.admission.failure(sourceKey)
+		s.logger.Warn("accept control stream failed", "event", "gateway.control_stream.accept_failed", "error_kind", errorKind(err), "security_audit", true)
 		_ = transport.CloseSession(conn)
 		return
 	}
 	if s.life != nil && !s.life.IsRunning() {
+		cancelHandshake()
 		_ = transport.CloseSession(conn)
 		return
 	}
-	handshakeCtx, cancelHandshake := context.WithTimeout(s.ctx, time.Duration(s.cfg.Transport.HandshakeTimeoutSec)*time.Second)
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	sess, err := s.authenticate(conn, stream)
-	cancelHandshake()
 	stopStreamContext()
+	cancelHandshake()
 	if err != nil {
+		s.admission.failure(sourceKey)
 		if protocolErr, ok := err.(*transport.ProtocolError); ok {
 			if failure, frameErr := transport.MessageFrame(transport.TypeError, 0, *protocolErr); frameErr == nil {
-				_ = writeFrame(stream, failure, s.cfg.Limits.MaxFrameBytes)
+				_ = writeFrame(stream, failure, transport.HandshakeMaxFrame)
 			}
 		}
 		s.logger.Warn("connection rejected", "event", "gateway.auth.rejected", "error_kind", errorKind(err), "security_audit", true)
@@ -258,6 +271,10 @@ func (s *Gateway) handleConn(conn transport.Session) {
 		_ = transport.CloseSession(conn)
 		return
 	}
+	s.admission.success(sourceKey)
+	// The bounded admission slot protects only the unauthenticated handshake;
+	// authenticated sessions are governed by the session and stream limits.
+	releasePending()
 	if s.life != nil && !s.life.IsRunning() {
 		_ = transport.CloseSession(conn)
 		return
@@ -312,24 +329,30 @@ func (s *Gateway) handleConn(conn transport.Session) {
 }
 
 func (s *Gateway) authenticate(conn transport.Session, stream transport.Stream) (*Session, error) {
-	max := s.cfg.Limits.MaxFrameBytes
+	max := int64(transport.HandshakeMaxFrame)
 	f, err := transport.ReadFrame(stream, max)
-	if err != nil || f.Type != transport.TypeHello {
+	if err != nil || f.Type != transport.TypeHello || f.RequestID == 0 {
 		return nil, transport.NewProtocolError(transport.ErrorInvalidFrame, "invalid hello", false)
 	}
 	var hello transport.Hello
 	if err := transport.DecodeMessage(f, &hello); err != nil {
 		return nil, err
 	}
-	if err := transport.ValidateCapabilities(hello.Capabilities); err != nil {
+	helloRequestID := f.RequestID
+	if err := transport.ValidateHello(hello); err != nil {
 		return nil, transport.NewProtocolError(transport.ErrorCapabilityMismatch, "invalid capabilities", false)
 	}
-	if err := transport.ValidateLimits(hello.Limits); err != nil {
-		return nil, transport.NewProtocolError(transport.ErrorLimitMismatch, "invalid limits", false)
+	peerCertificates := conn.PeerCertificates()
+	if len(peerCertificates) == 0 {
+		return nil, transport.NewProtocolError(transport.ErrorAuthFailed, "authentication failed", false)
+	}
+	peerID, ok := transport.CertificateAgentID(peerCertificates[0])
+	if !ok || peerID != hello.AgentID {
+		return nil, transport.NewProtocolError(transport.ErrorAuthFailed, "authentication failed", false)
 	}
 	cred := s.acl[hello.AgentID]
 	if cred == nil {
-		return nil, transport.NewProtocolError(transport.ErrorAuthFailed, "unknown agent", false)
+		return nil, transport.NewProtocolError(transport.ErrorAuthFailed, "authentication failed", false)
 	}
 	nonce, err := transport.NewNonce()
 	if err != nil {
@@ -348,18 +371,21 @@ func (s *Gateway) authenticate(conn transport.Session, stream transport.Stream) 
 		return nil, err
 	}
 	f, err = transport.ReadFrame(stream, max)
-	if err != nil || f.Type != transport.TypeAuth {
+	if err != nil || f.Type != transport.TypeAuth || f.RequestID != helloRequestID {
 		return nil, transport.NewProtocolError(transport.ErrorInvalidFrame, "invalid auth response", false)
 	}
 	var auth transport.Auth
 	if err := transport.DecodeMessage(f, &auth); err != nil {
 		return nil, transport.NewProtocolError(transport.ErrorInvalidFrame, "invalid auth payload", false)
 	}
+	if err := transport.ValidateAuth(auth); err != nil {
+		return nil, transport.NewProtocolError(transport.ErrorInvalidFrame, "invalid auth payload", false)
+	}
 	if !transport.VerifyChallenge(cred.token, nonce, auth.MAC, hello.AgentID, selectedCaps, selectedLimits) {
 		return nil, transport.NewProtocolError(transport.ErrorAuthFailed, "authentication failed", false)
 	}
-	ok, _ := transport.MessageFrame(transport.TypeAuthOK, f.RequestID, transport.AuthResult{})
-	if err := writeFrame(stream, ok, max); err != nil {
+	authOK, _ := transport.MessageFrame(transport.TypeAuthOK, f.RequestID, transport.AuthResult{})
+	if err := writeFrame(stream, authOK, max); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -392,7 +418,7 @@ func (s *Session) owner(nodeID string) cluster.Owner {
 func (s *Gateway) controlLoop(sess *Session, stream transport.Stream) {
 	defer stream.Close()
 	for {
-		f, err := transport.ReadFrame(stream, sess.maxFrame())
+		f, err := transport.ReadFrame(stream, transport.HandshakeMaxFrame)
 		if err != nil {
 			if s.ctx.Err() == nil {
 				s.logger.Info("control loop ended", "event", "gateway.control.ended", "agent_id", sess.agentID, "session_id", sess.sessionID, "node_id", s.nodeID, "error_kind", errorKind(err))
@@ -401,8 +427,14 @@ func (s *Gateway) controlLoop(sess *Session, stream transport.Stream) {
 		}
 		switch f.Type {
 		case transport.TypeRegister:
+			if f.RequestID == 0 {
+				return
+			}
 			var reg transport.Register
 			if err := transport.DecodeMessage(f, &reg); err != nil {
+				return
+			}
+			if err := transport.ValidateRegister(reg); err != nil {
 				return
 			}
 			result := s.mappings.Register(sess, reg.Mappings)
@@ -411,6 +443,9 @@ func (s *Gateway) controlLoop(sess *Session, stream transport.Stream) {
 				return
 			}
 		case transport.TypePing:
+			if f.RequestID == 0 {
+				return
+			}
 			pong, _ := transport.MessageFrame(transport.TypePong, f.RequestID, nil)
 			if writeErr := sess.writeControl(stream, pong); writeErr != nil {
 				return
@@ -431,18 +466,22 @@ func (s *Gateway) handleAgentStream(sess *Session, stream transport.Stream) {
 	defer stream.Close()
 	handshakeCtx, cancelHandshake := context.WithTimeout(sess.ctx, time.Duration(s.cfg.Transport.HandshakeTimeoutSec)*time.Second)
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
-	f, err := transport.ReadFrame(stream, sess.maxFrame())
+	f, err := transport.ReadFrame(stream, transport.HandshakeMaxFrame)
 	cancelHandshake()
 	stopStreamContext()
 	stopStreamContext = transport.SetStreamContext(stream, sess.ctx)
 	defer stopStreamContext()
-	if err != nil || f.Type != transport.TypeOpenProxy {
+	if err != nil || f.Type != transport.TypeOpenProxy || f.RequestID == 0 {
 		sendProtocolError(stream, f.RequestID, transport.ErrorInvalidFrame, "invalid proxy open", false, sess.maxFrame())
 		return
 	}
 	var open transport.OpenProxy
 	if err := transport.DecodeMessage(f, &open); err != nil {
 		sendProtocolError(stream, f.RequestID, transport.ErrorInvalidFrame, "invalid proxy payload", false, sess.maxFrame())
+		return
+	}
+	if err := transport.ValidateOpenProxy(open); err != nil {
+		sendProtocolError(stream, f.RequestID, transport.ErrorMappingRejected, "invalid proxy payload", false, sess.maxFrame())
 		return
 	}
 	if !sess.hasCapability(transport.CapabilityEgressProxy) {
@@ -468,6 +507,9 @@ func (s *Gateway) handleAgentStream(sess *Session, stream transport.Stream) {
 	if err != nil {
 		sendOpenError(stream, f.RequestID, transport.ErrorPolicyDenied, "egress policy denied", false, sess.maxFrame())
 		return
+	}
+	if cred.egress.IsSpecialException(address) {
+		s.logger.Warn("special-use egress exception used", "event", "security.egress.special_exception", "agent_id", sess.agentID, "network", open.Network, "address", address, "security_audit", true)
 	}
 	release, ok := cred.egress.Acquire()
 	if !ok {
@@ -502,7 +544,7 @@ func (s *Gateway) proxyTCP(sess *Session, stream transport.Stream, address strin
 	s.metrics.ActiveStreams.Add(1)
 	defer s.metrics.ActiveStreams.Add(-1)
 	remote := relay.NewConn(stream, profile)
-	relay.Bidirectional(remote, conn, relay.Counters{In: func(n uint64) { s.metrics.BytesIn.Add(n) }, Out: func(n uint64) { s.metrics.BytesOut.Add(n) }})
+	relay.BidirectionalWithIdle(sess.ctx, remote, conn, time.Duration(s.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { s.metrics.BytesIn.Add(n) }, Out: func(n uint64) { s.metrics.BytesOut.Add(n) }})
 }
 
 func (s *Gateway) proxyUDP(sess *Session, stream transport.Stream, address string, requestID uint64, profile string) {

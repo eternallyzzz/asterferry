@@ -250,6 +250,91 @@ func TestObfuscatingPacketConnPreviousKeyAndWrongKey(t *testing.T) {
 	}
 }
 
+func TestObfuscatingPacketConnSocketDelegationAndValidation(t *testing.T) {
+	if _, err := NewObfuscatingPacketConn(nil, config.TransportObfuscationOptions{}); err == nil {
+		t.Fatal("nil UDP socket should fail")
+	}
+	standardUDP, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, err := NewObfuscatingPacketConn(standardUDP, config.TransportObfuscationOptions{Mode: config.TransportObfuscationStandard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if standard != standardUDP {
+		t.Fatal("standard obfuscation should preserve the native UDP socket")
+	}
+	_ = standard.Close()
+
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := NewObfuscatingPacketConn(udp, testObfuscationOptions([]byte("delegation-key-01234567890123456789"), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := wrapped.(*obfuscationPacketConn)
+	if conn.LocalAddr() == nil {
+		t.Fatal("wrapped local address is nil")
+	}
+	if err := conn.SetReadBuffer(64 << 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetWriteBuffer(64 << 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal("close should be idempotent: ", err)
+	}
+}
+
+func TestFragmentEvictionReleasesAccounting(t *testing.T) {
+	now := time.Now()
+	conn := &obfuscationPacketConn{
+		parts:   make(map[fragmentKey]*fragmentAssembly),
+		sources: make(map[string]int),
+	}
+	expired := fragmentKey{source: "expired", id: 1}
+	live := fragmentKey{source: "live", id: 2}
+	conn.parts[expired] = &fragmentAssembly{
+		total:    2,
+		parts:    [][]byte{[]byte("old"), nil},
+		bytes:    3,
+		deadline: now.Add(-time.Second),
+	}
+	conn.parts[live] = &fragmentAssembly{
+		total:    2,
+		parts:    [][]byte{[]byte("new"), nil},
+		bytes:    3,
+		deadline: now.Add(time.Second),
+	}
+	conn.sources[expired.source] = 1
+	conn.sources[live.source] = 1
+	conn.bytes = 6
+
+	conn.evictFragmentsLocked(now)
+	if _, ok := conn.parts[expired]; ok || conn.sources[expired.source] != 0 || conn.bytes != 3 {
+		t.Fatalf("expired fragment accounting = parts %#v sources %#v bytes %d", conn.parts, conn.sources, conn.bytes)
+	}
+	if _, ok := conn.parts[live]; !ok || conn.sources[live.source] != 1 {
+		t.Fatalf("live fragment was evicted: %#v", conn.parts)
+	}
+}
+
 func testObfuscationOptions(current, previous []byte) config.TransportObfuscationOptions {
 	return config.TransportObfuscationOptions{
 		Mode:               config.TransportObfuscationCamouflage,

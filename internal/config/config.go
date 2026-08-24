@@ -4,14 +4,18 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"asterferry/internal/addresspolicy"
 	"asterferry/internal/cluster"
 	"asterferry/internal/protocol"
 )
@@ -87,7 +91,9 @@ type TransportConfig struct {
 }
 
 type ManagementConfig struct {
-	Listen string `yaml:"listen"`
+	Listen        string `yaml:"listen"`
+	AuthTokenFile string `yaml:"auth_token_file"`
+	AuthToken     []byte `yaml:"-"`
 }
 
 // ShutdownConfig bounds the graceful drain performed after SIGTERM/SIGINT.
@@ -107,11 +113,14 @@ type Limits struct {
 	MaxAgents              int64 `yaml:"max_agents"`
 	MaxConnectionsPerAgent int64 `yaml:"max_connections_per_agent"`
 	MaxStreamsPerAgent     int64 `yaml:"max_streams_per_agent"`
+	MaxPendingHandshakes   int64 `yaml:"max_pending_handshakes"`
+	MaxInboundConnections  int64 `yaml:"max_inbound_connections"`
 	MaxFrameBytes          int64 `yaml:"max_frame_bytes"`
 	MaxRecordBytes         int64 `yaml:"max_record_bytes"`
 	MaxUDPBytes            int64 `yaml:"max_udp_bytes"`
 	DialTimeoutSec         int64 `yaml:"dial_timeout_seconds"`
 	UDPIdleTimeoutSec      int64 `yaml:"udp_idle_timeout_seconds"`
+	RelayIdleTimeoutSec    int64 `yaml:"relay_idle_timeout_seconds"`
 }
 
 type ObfuscationConfig struct {
@@ -167,12 +176,12 @@ type ReverseACL struct {
 }
 
 type EgressPolicy struct {
-	Enabled             bool     `yaml:"enabled"`
-	TCPPorts            []string `yaml:"tcp_ports"`
-	UDPPorts            []string `yaml:"udp_ports"`
-	AllowCIDRs          []string `yaml:"allow_cidrs"`
-	DenyPrivateNetworks bool     `yaml:"deny_private_networks"`
-	MaxConnections      int64    `yaml:"max_connections"`
+	Enabled           bool     `yaml:"enabled"`
+	TCPPorts          []string `yaml:"tcp_ports"`
+	UDPPorts          []string `yaml:"udp_ports"`
+	AllowCIDRs        []string `yaml:"allow_cidrs"`
+	AllowSpecialCIDRs []string `yaml:"allow_special_cidrs"`
+	MaxConnections    int64    `yaml:"max_connections"`
 }
 
 type AgentConfig struct {
@@ -230,7 +239,8 @@ type Tunnel struct {
 type PortRange struct{ Min, Max uint16 }
 
 func Load(path string) (*Config, error) {
-	b, err := os.ReadFile(filepath.Clean(path))
+	cleanPath := filepath.Clean(path)
+	b, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
@@ -240,10 +250,58 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("parse config: multiple YAML documents are not allowed")
+		}
+		return nil, fmt.Errorf("parse config: trailing document: %w", err)
+	}
+	baseDir, err := filepath.Abs(filepath.Dir(cleanPath))
+	if err != nil {
+		return nil, fmt.Errorf("resolve config directory: %w", err)
+	}
+	resolveFilePaths(&c, baseDir)
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// resolveFilePaths makes file references portable when a configuration is
+// started from a directory other than the process working directory. Absolute
+// paths retain their meaning; only deployment-material paths are rebased.
+func resolveFilePaths(c *Config, baseDir string) {
+	if c == nil {
+		return
+	}
+	resolve := func(path string) string {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return ""
+		}
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path)
+		}
+		return filepath.Clean(filepath.Join(baseDir, path))
+	}
+	c.Management.AuthTokenFile = resolve(c.Management.AuthTokenFile)
+	c.Obfuscation.Transport.KeyFile = resolve(c.Obfuscation.Transport.KeyFile)
+	c.Obfuscation.Transport.PreviousKeyFile = resolve(c.Obfuscation.Transport.PreviousKeyFile)
+	if c.Gateway != nil {
+		c.Gateway.TLS.CertFile = resolve(c.Gateway.TLS.CertFile)
+		c.Gateway.TLS.KeyFile = resolve(c.Gateway.TLS.KeyFile)
+		c.Gateway.TLS.ClientCAFile = resolve(c.Gateway.TLS.ClientCAFile)
+		for i := range c.Gateway.Agents {
+			c.Gateway.Agents[i].TokenFile = resolve(c.Gateway.Agents[i].TokenFile)
+		}
+	}
+	if c.Agent != nil {
+		c.Agent.TokenFile = resolve(c.Agent.TokenFile)
+		c.Agent.TLS.CAFile = resolve(c.Agent.TLS.CAFile)
+		c.Agent.TLS.CertFile = resolve(c.Agent.TLS.CertFile)
+		c.Agent.TLS.KeyFile = resolve(c.Agent.TLS.KeyFile)
+	}
 }
 
 // ApplyEnv applies supported ASTERFERRY_* overrides after YAML loading. It is
@@ -418,6 +476,10 @@ func (c *Config) Validate() error {
 	if !isLoopbackListen(c.Management.Listen) {
 		return errors.New("management.listen must bind to loopback")
 	}
+	if strings.TrimSpace(c.Management.AuthTokenFile) == "" {
+		return errors.New("management.auth_token_file is required")
+	}
+	c.Management.AuthTokenFile = filepath.Clean(strings.TrimSpace(c.Management.AuthTokenFile))
 	if c.Shutdown.GracePeriodSec == 0 {
 		c.Shutdown.GracePeriodSec = 30
 	}
@@ -449,6 +511,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Transport.HandshakeTimeoutSec < 1 || c.Transport.IdleTimeoutSec < 1 || c.Transport.KeepAliveSec < 1 {
 		return errors.New("transport timeouts must be positive")
+	}
+	if c.Transport.HandshakeTimeoutSec > 60 {
+		return errors.New("transport.handshake_timeout_seconds must not exceed 60")
 	}
 	if c.Transport.InitialStreamReceiveWindow < 0 || c.Transport.InitialConnectionReceiveWindow < 0 || c.Transport.MaxStreamReadBuffer < 0 || c.Transport.MaxStreamWriteBuffer < 0 || c.Transport.MaxConnReadBuffer < 0 || c.Transport.UDPReadBufferBytes < 0 || c.Transport.UDPWriteBufferBytes < 0 {
 		return errors.New("transport buffer limits cannot be negative")
@@ -501,6 +566,18 @@ func (c *Config) Validate() error {
 	if c.Limits.MaxStreamsPerAgent == 0 {
 		c.Limits.MaxStreamsPerAgent = 256
 	}
+	if c.Limits.MaxPendingHandshakes == 0 {
+		c.Limits.MaxPendingHandshakes = 2 * c.Limits.MaxAgents
+		if c.Limits.MaxPendingHandshakes < 32 {
+			c.Limits.MaxPendingHandshakes = 32
+		}
+		if c.Limits.MaxPendingHandshakes > 4096 {
+			c.Limits.MaxPendingHandshakes = 4096
+		}
+	}
+	if c.Limits.MaxInboundConnections == 0 {
+		c.Limits.MaxInboundConnections = 1024
+	}
 	if c.Limits.MaxFrameBytes == 0 {
 		c.Limits.MaxFrameBytes = 16 << 20
 	}
@@ -516,7 +593,10 @@ func (c *Config) Validate() error {
 	if c.Limits.UDPIdleTimeoutSec == 0 {
 		c.Limits.UDPIdleTimeoutSec = 30
 	}
-	if c.Limits.MaxAgents < 1 || c.Limits.MaxAgents > 100000 || c.Limits.MaxConnectionsPerAgent < 1 || c.Limits.MaxConnectionsPerAgent > 65536 || c.Limits.MaxStreamsPerAgent < 1 || c.Limits.MaxStreamsPerAgent > 65536 {
+	if c.Limits.RelayIdleTimeoutSec == 0 {
+		c.Limits.RelayIdleTimeoutSec = 1800
+	}
+	if c.Limits.MaxAgents < 1 || c.Limits.MaxAgents > 100000 || c.Limits.MaxConnectionsPerAgent < 1 || c.Limits.MaxConnectionsPerAgent > 65536 || c.Limits.MaxStreamsPerAgent < 1 || c.Limits.MaxStreamsPerAgent > 65536 || c.Limits.MaxPendingHandshakes < 8 || c.Limits.MaxPendingHandshakes > 4096 || c.Limits.MaxInboundConnections < 1 || c.Limits.MaxInboundConnections > 65536 {
 		return errors.New("limits must be positive")
 	}
 	if c.Limits.MaxFrameBytes < 1024 || c.Limits.MaxFrameBytes > 64<<20 {
@@ -533,6 +613,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.UDPIdleTimeoutSec < 1 {
 		return errors.New("limits.udp_idle_timeout_seconds must be positive")
+	}
+	if c.Limits.RelayIdleTimeoutSec < 60 || c.Limits.RelayIdleTimeoutSec > 86400 {
+		return errors.New("limits.relay_idle_timeout_seconds must be between 60 and 86400")
 	}
 	if c.Obfuscation.ProxyProfile == "" {
 		c.Obfuscation.ProxyProfile = ProfileBalanced
@@ -624,9 +707,13 @@ func (c *Config) validateGateway() error {
 		return errors.New("gateway.agents must contain at least one agent")
 	}
 	seen := map[string]bool{}
-	for _, agent := range g.Agents {
-		if agent.ID == "" || seen[agent.ID] {
-			return errors.New("gateway agent IDs must be non-empty and unique")
+	for index := range g.Agents {
+		agent := &g.Agents[index]
+		if err := validateIdentifier(agent.ID, "gateway agent id", 128); err != nil {
+			return err
+		}
+		if seen[agent.ID] {
+			return errors.New("gateway agent IDs must be unique")
 		}
 		seen[agent.ID] = true
 		if agent.TokenFile == "" {
@@ -636,10 +723,6 @@ func (c *Config) validateGateway() error {
 			return err
 		}
 		if agent.Egress.Enabled {
-			// Private, loopback, link-local and metadata destinations are denied
-			// by default; an explicit future allow-private policy must be added
-			// as a separate, auditable option rather than relying on bool zero.
-			agent.Egress.DenyPrivateNetworks = true
 			if agent.Egress.MaxConnections == 0 {
 				agent.Egress.MaxConnections = c.Limits.MaxConnectionsPerAgent
 			}
@@ -656,7 +739,10 @@ func (c *Config) validateGateway() error {
 
 func (c *Config) validateAgent() error {
 	a := c.Agent
-	if a.ID == "" || a.Server == "" || a.TokenFile == "" {
+	if err := validateIdentifier(a.ID, "agent.id", 128); err != nil {
+		return err
+	}
+	if a.Server == "" || a.TokenFile == "" {
 		return errors.New("agent.id, agent.server and agent.token_file are required")
 	}
 	if a.TLS.CAFile == "" || a.TLS.CertFile == "" || a.TLS.KeyFile == "" || a.TLS.ServerName == "" {
@@ -694,8 +780,11 @@ func (c *Config) validateAgent() error {
 	}
 	seenTags := map[string]bool{}
 	for _, in := range a.Proxy.Inbounds {
-		if in.Tag == "" || seenTags[in.Tag] {
-			return errors.New("proxy inbound tags must be non-empty and unique")
+		if err := validateIdentifier(in.Tag, "proxy inbound tag", 128); err != nil {
+			return err
+		}
+		if seenTags[in.Tag] {
+			return errors.New("proxy inbound tags must be unique")
 		}
 		seenTags[in.Tag] = true
 		if in.Protocol != "socks5" && in.Protocol != "http" {
@@ -716,8 +805,11 @@ func (c *Config) validateAgent() error {
 	}
 	seenNames := map[string]bool{}
 	for _, t := range a.Reverse {
-		if t.Name == "" || seenNames[t.Name] {
-			return errors.New("reverse mapping names must be non-empty and unique")
+		if err := validateIdentifier(t.Name, "reverse mapping name", 128); err != nil {
+			return err
+		}
+		if seenNames[t.Name] {
+			return errors.New("reverse mapping names must be unique")
 		}
 		seenNames[t.Name] = true
 		if t.Protocol != "tcp" && t.Protocol != "udp" {
@@ -785,6 +877,15 @@ func validateEgress(p EgressPolicy, id string) error {
 			return fmt.Errorf("agent %q egress allow_cidr: %w", id, err)
 		}
 	}
+	for _, cidr := range p.AllowSpecialCIDRs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			return fmt.Errorf("agent %q egress allow_special_cidr: %w", id, err)
+		}
+		if !addresspolicy.IsSpecialPrefix(prefix) {
+			return fmt.Errorf("agent %q egress allow_special_cidr must be within a special-use range", id)
+		}
+	}
 	if p.MaxConnections < 0 || p.MaxConnections > 65536 {
 		return fmt.Errorf("agent %q egress max_connections is out of range", id)
 	}
@@ -793,6 +894,25 @@ func validateEgress(p EgressPolicy, id string) error {
 
 func validProfile(profile string) bool {
 	return profile == ProfileStandard || profile == ProfileBalanced
+}
+
+func validateIdentifier(value, field string, max int) error {
+	if value == "" || len(value) > max {
+		return fmt.Errorf("%s must be between 1 and %d bytes", field, max)
+	}
+	if !isASCIIAlphaNumeric(value[0]) {
+		return fmt.Errorf("%s must start with an ASCII letter or digit", field)
+	}
+	for i := 1; i < len(value); i++ {
+		if !isASCIIAlphaNumeric(value[i]) && value[i] != '-' && value[i] != '_' && value[i] != '.' {
+			return fmt.Errorf("%s contains an invalid character", field)
+		}
+	}
+	return nil
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
 
 func isLoopbackListen(address string) bool {
@@ -863,9 +983,9 @@ func ParsePortRanges(values []string) ([]PortRange, error) {
 func (p PortRange) Contains(port uint16) bool { return port >= p.Min && port <= p.Max }
 
 func ReadToken(path string) ([]byte, error) {
-	b, err := os.ReadFile(filepath.Clean(path))
+	b, err := readSecretFile(path, "token")
 	if err != nil {
-		return nil, fmt.Errorf("read token: %w", err)
+		return nil, err
 	}
 	b = []byte(strings.TrimSpace(string(b)))
 	if len(b) < 32 {
@@ -878,9 +998,9 @@ func ReadToken(path string) ([]byte, error) {
 // newline is accepted so secrets generated by command-line tools remain easy
 // to provision, while the bounded size prevents accidental key-file misuse.
 func ReadSecret(path string) ([]byte, error) {
-	b, err := os.ReadFile(filepath.Clean(path))
+	b, err := readSecretFile(path, "secret")
 	if err != nil {
-		return nil, fmt.Errorf("read secret: %w", err)
+		return nil, err
 	}
 	b = []byte(strings.TrimSpace(string(b)))
 	if len(b) < 32 {
@@ -888,6 +1008,28 @@ func ReadSecret(path string) ([]byte, error) {
 	}
 	if len(b) > 128 {
 		return nil, errors.New("secret must not contain more than 128 bytes")
+	}
+	return b, nil
+}
+
+func readSecretFile(path, kind string) ([]byte, error) {
+	clean := filepath.Clean(strings.TrimSpace(path))
+	if clean == "." || clean == "" {
+		return nil, fmt.Errorf("read %s: path is required", kind)
+	}
+	info, err := os.Stat(clean)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", kind, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("read %s: path must be a regular file", kind)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("read %s: file must not be writable by group or other users", kind)
+	}
+	b, err := os.ReadFile(clean)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", kind, err)
 	}
 	return b, nil
 }

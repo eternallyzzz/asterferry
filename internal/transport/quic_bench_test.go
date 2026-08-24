@@ -236,17 +236,3 @@ func benchmarkTLSConfigs(t testing.TB) (*tls.Config, *tls.Config) {
 	client := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, NextProtos: []string{"af-raw-benchmark"}}
 	return server, client
 }
-
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	var digits [20]byte
-	pos := len(digits)
-	for value > 0 {
-		pos--
-		digits[pos] = byte('0' + value%10)
-		value /= 10
-	}
-	return string(digits[pos:])
-}

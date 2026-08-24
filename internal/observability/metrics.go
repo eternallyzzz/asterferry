@@ -1,10 +1,13 @@
 package observability
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -111,7 +114,10 @@ type StatusProvider interface {
 	IsReady() bool
 }
 
-func Start(listen string, metrics *Metrics, provider StatusProvider) (*Server, error) {
+func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte) (*Server, error) {
+	if len(authToken) < 32 {
+		return nil, errors.New("management authentication token must contain at least 32 bytes")
+	}
 	if metrics == nil {
 		metrics = &Metrics{}
 	}
@@ -129,8 +135,19 @@ func Start(listen string, metrics *Metrics, provider StatusProvider) (*Server, e
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) })
-	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, _ *http.Request) {
+	protected := func(next http.HandlerFunc) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !authorized(r, authToken) {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="asterferry-management"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("unauthorized\n"))
+				return
+			}
+			next(w, r)
+		})
+	}
+	mux.Handle("/metrics", protected(func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) }))
+	mux.Handle("/v1/status", protected(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if provider == nil {
 			_, _ = w.Write([]byte("{}\n"))
@@ -142,15 +159,53 @@ func Start(listen string, metrics *Metrics, provider StatusProvider) (*Server, e
 			return
 		}
 		_, _ = w.Write(b)
-	})
+	}))
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err
 	}
-	hs := &http.Server{Addr: listen, Handler: mux}
+	hs := &http.Server{
+		Addr:              listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+	}
 	s := &Server{httpServer: hs, listener: ln, Metrics: metrics}
 	go func() { _ = hs.Serve(ln) }()
 	return s, nil
+}
+
+func authorized(r *http.Request, token []byte) bool {
+	if r == nil {
+		return false
+	}
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(value) < len("Bearer ")+1 || !strings.EqualFold(value[:len("Bearer ")], "Bearer ") {
+		return false
+	}
+	presented := strings.TrimSpace(value[len("Bearer "):])
+	if presented == "" {
+		return false
+	}
+	wantHash := sha256.Sum256(token)
+	gotHash := sha256.Sum256([]byte(presented))
+	return subtleConstantTimeCompare(gotHash[:], wantHash[:])
+}
+
+// Kept as a tiny wrapper to make the authentication decision easy to test
+// without exposing crypto implementation details to the HTTP handlers.
+func subtleConstantTimeCompare(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := range a {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
 }
 
 func (s *Server) Close() error {

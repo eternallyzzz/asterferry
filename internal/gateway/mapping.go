@@ -109,10 +109,20 @@ func (m *Mapping) runTCP() {
 			_ = conn.Close()
 			continue
 		}
+		release, allowed := m.acquireConnection()
+		if !allowed {
+			if m.server.life != nil {
+				m.server.life.Done()
+			}
+			_ = conn.Close()
+			m.server.metrics.MappingFailures.Add(1)
+			continue
+		}
 		go func() {
 			if m.server.life != nil {
 				defer m.server.life.Done()
 			}
+			defer release()
 			m.handleTCP(conn)
 		}()
 	}
@@ -120,12 +130,6 @@ func (m *Mapping) runTCP() {
 
 func (m *Mapping) handleTCP(local net.Conn) {
 	defer local.Close()
-	release, ok := m.acquireConnection()
-	if !ok {
-		m.server.metrics.MappingFailures.Add(1)
-		return
-	}
-	defer release()
 	stream, err := m.session.openStream(m.ctx)
 	if err != nil {
 		m.server.logger.Info("reverse stream open failed", "event", "gateway.reverse.open_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
@@ -133,12 +137,13 @@ func (m *Mapping) handleTCP(local net.Conn) {
 		return
 	}
 	defer stream.Close()
-	open, _ := transport.MessageFrame(transport.TypeOpenReverse, 0, transport.OpenReverse{Name: m.spec.Name, Protocol: "tcp", Profile: m.spec.Profile})
+	requestID := uint64(1)
+	open, _ := transport.MessageFrame(transport.TypeOpenReverse, requestID, transport.OpenReverse{Name: m.spec.Name, Protocol: "tcp", Profile: m.spec.Profile})
 	if err := writeFrame(stream, open, m.session.maxFrame()); err != nil {
 		m.server.logger.Info("reverse open write failed", "event", "gateway.reverse.open_write_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
 		return
 	}
-	if !m.waitOpenOK(stream) {
+	if !m.waitOpenOK(stream, requestID) {
 		m.server.logger.Info("reverse open rejected", "event", "gateway.reverse.rejected", "mapping", m.spec.Name)
 		return
 	}
@@ -149,21 +154,21 @@ func (m *Mapping) handleTCP(local net.Conn) {
 		return
 	}
 	remote := relay.NewConn(stream, profile)
-	relay.Bidirectional(local, remote, relay.Counters{In: func(n uint64) { m.server.metrics.BytesIn.Add(n) }, Out: func(n uint64) { m.server.metrics.BytesOut.Add(n) }})
+	relay.BidirectionalWithIdle(m.ctx, local, remote, time.Duration(m.server.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { m.server.metrics.BytesIn.Add(n) }, Out: func(n uint64) { m.server.metrics.BytesOut.Add(n) }})
 }
 
-func (m *Mapping) waitOpenOK(stream transport.Stream) bool {
+func (m *Mapping) waitOpenOK(stream transport.Stream, requestID uint64) bool {
 	handshakeCtx, cancelHandshake := context.WithTimeout(m.ctx, time.Duration(m.server.cfg.Transport.HandshakeTimeoutSec)*time.Second)
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
-	f, err := transport.ReadFrame(stream, m.session.maxFrame())
+	f, err := transport.ReadFrame(stream, transport.HandshakeMaxFrame)
 	cancelHandshake()
 	stopStreamContext()
-	stopStreamContext = transport.SetStreamContext(stream, m.ctx)
+	_ = transport.SetStreamContext(stream, m.ctx)
 	if err != nil {
 		m.server.logger.Info("reverse status read failed", "event", "gateway.reverse.status_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
 		return false
 	}
-	if f.Type != transport.TypeOpenOK {
+	if f.Type != transport.TypeOpenOK || f.RequestID != requestID {
 		return false
 	}
 	var result transport.OpenResult
@@ -185,6 +190,7 @@ type udpAssociation struct {
 func (m *Mapping) runUDP() {
 	defer m.Close()
 	associations := map[string]*udpAssociation{}
+	pending := map[string]struct{}{}
 	var mu sync.Mutex
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -197,13 +203,10 @@ func (m *Mapping) runUDP() {
 				delete(associations, key)
 				stale = append(stale, a)
 			}
+			clear(pending)
 			mu.Unlock()
 			for _, a := range stale {
-				a.cancel()
-				_ = a.stream.Close()
-				if a.release != nil {
-					a.release()
-				}
+				closeUDPAssociation(a)
 			}
 			return
 		case <-ticker.C:
@@ -218,11 +221,7 @@ func (m *Mapping) runUDP() {
 			}
 			mu.Unlock()
 			for _, a := range stale {
-				a.cancel()
-				_ = a.stream.Close()
-				if a.release != nil {
-					a.release()
-				}
+				closeUDPAssociation(a)
 			}
 		default:
 			buf := make([]byte, m.session.maxUDP())
@@ -237,74 +236,109 @@ func (m *Mapping) runUDP() {
 			key := addr.String()
 			mu.Lock()
 			a := associations[key]
-			if a == nil {
-				if m.draining.Load() || (m.server.life != nil && !m.server.life.IsRunning()) {
-					mu.Unlock()
-					continue
-				}
-				release, allowed := m.acquireConnection()
-				if !allowed {
-					mu.Unlock()
-					m.server.metrics.MappingFailures.Add(1)
-					continue
-				}
-				stream, openErr := m.session.openStream(m.ctx)
-				if openErr == nil {
-					ctx, cancel := context.WithCancel(m.ctx)
-					a = &udpAssociation{stream: stream, addr: addr, last: time.Now(), cancel: cancel, release: release}
-					open, _ := transport.MessageFrame(transport.TypeOpenReverse, 0, transport.OpenReverse{Name: m.spec.Name, Protocol: "udp", Profile: m.spec.Profile})
-					if writeErr := writeFrame(stream, open, m.session.maxFrame()); writeErr == nil && m.waitOpenOK(stream) {
-						if m.server.life != nil && !m.server.life.TryAdd() {
-							_ = stream.Close()
-							cancel()
-							release()
-							a = nil
-						} else {
-							associations[key] = a
-							association := a
-							go func() {
-								if m.server.life != nil {
-									defer m.server.life.Done()
-								}
-								m.readUDPAssociation(ctx, association, key, associations, &mu)
-							}()
-						}
-					} else {
-						_ = stream.Close()
-						cancel()
-						release()
-						a = nil
-					}
-				} else {
-					release()
+			_, waiting := pending[key]
+			var release func()
+			reserved := false
+			if a == nil && !waiting && !m.draining.Load() && (m.server.life == nil || m.server.life.IsRunning()) {
+				release, reserved = m.acquireConnection()
+				if reserved {
+					pending[key] = struct{}{}
 				}
 			}
+			mu.Unlock()
+
+			if a == nil && !waiting && reserved {
+				candidate := m.openUDPAssociation(addr, release)
+				discard := candidate
+				installed := false
+				mu.Lock()
+				delete(pending, key)
+				if candidate != nil && associations[key] == nil && !m.draining.Load() && (m.server.life == nil || m.server.life.IsRunning()) {
+					if m.server.life != nil && !m.server.life.TryAdd() {
+						candidate = nil
+					} else {
+						associations[key] = candidate
+						a = candidate
+						installed = true
+						association := candidate
+						go func() {
+							if m.server.life != nil {
+								defer m.server.life.Done()
+							}
+							m.readUDPAssociation(m.ctx, association, key, associations, &mu)
+						}()
+					}
+				}
+				if a == nil {
+					a = associations[key]
+				}
+				mu.Unlock()
+				if !installed {
+					closeUDPAssociation(discard)
+				}
+			}
+
 			var failed *udpAssociation
 			if a != nil {
-				a.last = time.Now()
+				mu.Lock()
+				if associations[key] == a {
+					a.last = time.Now()
+				}
+				mu.Unlock()
 				a.mu.Lock()
 				f, _ := transport.MessageFrame(transport.TypeData, 0, transport.NewData(buf[:n], m.spec.Profile, m.session.maxPadding()))
 				err = writeFrame(a.stream, f, m.session.maxFrame())
 				a.mu.Unlock()
 				if err != nil {
+					mu.Lock()
 					if associations[key] == a {
 						delete(associations, key)
 					}
+					mu.Unlock()
 					failed = a
 				}
 			}
-			mu.Unlock()
 			if failed != nil {
-				failed.cancel()
-				_ = failed.stream.Close()
-				if failed.release != nil {
-					failed.release()
-				}
+				closeUDPAssociation(failed)
 			}
 			if err != nil {
 				m.server.metrics.MappingFailures.Add(1)
 			}
 		}
+	}
+}
+
+func (m *Mapping) openUDPAssociation(addr *net.UDPAddr, release func()) *udpAssociation {
+	stream, err := m.session.openStream(m.ctx)
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		return nil
+	}
+	_, cancel := context.WithCancel(m.ctx)
+	association := &udpAssociation{stream: stream, addr: addr, last: time.Now(), cancel: cancel, release: release}
+	requestID := uint64(1)
+	open, _ := transport.MessageFrame(transport.TypeOpenReverse, requestID, transport.OpenReverse{Name: m.spec.Name, Protocol: "udp", Profile: m.spec.Profile})
+	if err := writeFrame(stream, open, m.session.maxFrame()); err != nil || !m.waitOpenOK(stream, requestID) {
+		closeUDPAssociation(association)
+		return nil
+	}
+	return association
+}
+
+func closeUDPAssociation(association *udpAssociation) {
+	if association == nil {
+		return
+	}
+	if association.cancel != nil {
+		association.cancel()
+	}
+	if association.stream != nil {
+		_ = association.stream.Close()
+	}
+	if association.release != nil {
+		association.release()
 	}
 }
 

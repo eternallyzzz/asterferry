@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 )
 
@@ -19,12 +20,16 @@ const (
 )
 
 type Target struct {
-	Network string
-	Host    string
-	Port    uint16
+	Network    string
+	Host       string
+	Port       uint16
+	ResolvedIP netip.Addr
 }
 
 func (t Target) Address() string {
+	if t.ResolvedIP.IsValid() {
+		return net.JoinHostPort(t.ResolvedIP.String(), strconv.Itoa(int(t.Port)))
+	}
 	return net.JoinHostPort(t.Host, strconv.Itoa(int(t.Port)))
 }
 

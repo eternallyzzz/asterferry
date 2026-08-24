@@ -54,4 +54,10 @@ func TestLocalOwnerStoreRejectsCanceledContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("canceled claim should fail")
 	}
+	if err := NewLocalOwnerStore().Release(context.Background(), Owner{}); err == nil {
+		t.Fatal("invalid owner release should fail")
+	}
+	if _, _, err := NewLocalOwnerStore().Lookup(context.Background(), " "); err == nil {
+		t.Fatal("empty agent lookup should fail")
+	}
 }

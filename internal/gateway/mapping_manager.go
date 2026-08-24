@@ -47,6 +47,9 @@ func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistr
 	if m.draining.Load() || (m.server.life != nil && !m.server.life.IsRunning()) {
 		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, "gateway is draining", true)}
 	}
+	if err := transport.ValidateRegister(transport.Register{Mappings: specs}); err != nil {
+		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, "invalid mapping registration", false)}
+	}
 	s := m.server
 	m.registerMu.Lock()
 	defer m.registerMu.Unlock()

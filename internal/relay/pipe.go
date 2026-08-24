@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"context"
 	"io"
 	"sync"
+	"time"
 )
 
 type Counters struct{ In, Out func(uint64) }
@@ -15,6 +17,21 @@ var copyBuffers = sync.Pool{New: func() any {
 }}
 
 func Bidirectional(a, b io.ReadWriteCloser, counters Counters) {
+	BidirectionalWithIdle(context.Background(), a, b, 0, counters)
+}
+
+// BidirectionalWithIdle relays both directions while closing both endpoints
+// after timeout without observing bytes. The watchdog is context-bound so a
+// role shutdown also interrupts blocked socket reads.
+func BidirectionalWithIdle(ctx context.Context, a, b io.ReadWriteCloser, timeout time.Duration, counters Counters) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	touch, stopIdle := StartIdleWatch(ctx, timeout, func() {
+		_ = a.Close()
+		_ = b.Close()
+	})
+	defer stopIdle()
 	var wg sync.WaitGroup
 	copyOne := func(dst io.WriteCloser, src io.Reader, count func(uint64)) {
 		defer wg.Done()
@@ -24,6 +41,7 @@ func Bidirectional(a, b io.ReadWriteCloser, counters Counters) {
 		for {
 			n, err := src.Read(buf)
 			if n > 0 {
+				touch()
 				written := 0
 				var werr error
 				for written < n {

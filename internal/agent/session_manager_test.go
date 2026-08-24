@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +31,19 @@ func TestSessionManagerWaitAndClear(t *testing.T) {
 	if _, err := m.wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected wait timeout, got %v", err)
 	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionManagerBeginDrainRejectsWait(t *testing.T) {
+	m := newSessionManager(context.Background(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m.BeginDrain()
+	if _, err := m.wait(context.Background()); err == nil || err.Error() != "agent session manager is draining" {
+		t.Fatalf("draining wait error = %v", err)
+	}
+	var nilManager *sessionManager
+	nilManager.BeginDrain()
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +125,10 @@ func (s *managerFakeSession) AcceptStream(context.Context) (transport.Stream, er
 }
 
 func (s *managerFakeSession) Context() context.Context { return s.ctx }
+
+func (s *managerFakeSession) RemoteAddr() net.Addr { return nil }
+
+func (s *managerFakeSession) PeerCertificates() []*x509.Certificate { return nil }
 
 func (s *managerFakeSession) Close() error {
 	s.closeOnce.Do(s.cancel)

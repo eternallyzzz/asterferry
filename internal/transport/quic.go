@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,8 @@ type Session interface {
 	OpenStream(context.Context) (Stream, error)
 	AcceptStream(context.Context) (Stream, error)
 	Context() context.Context
+	RemoteAddr() net.Addr
+	PeerCertificates() []*x509.Certificate
 	Close() error
 }
 
@@ -147,6 +150,21 @@ func (s *quicSession) Context() context.Context {
 		return context.Background()
 	}
 	return s.conn.Context()
+}
+
+func (s *quicSession) RemoteAddr() net.Addr {
+	if s == nil || s.conn == nil {
+		return nil
+	}
+	return s.conn.RemoteAddr()
+}
+
+func (s *quicSession) PeerCertificates() []*x509.Certificate {
+	if s == nil || s.conn == nil {
+		return nil
+	}
+	peer := s.conn.ConnectionState().TLS.PeerCertificates
+	return append([]*x509.Certificate(nil), peer...)
 }
 
 func (s *quicSession) Close() error {
@@ -271,8 +289,20 @@ func ValidateAgentCredentials(cfg *config.AgentOptions) error {
 	if !pool.AppendCertsFromPEM(caBytes) {
 		return errors.New("agent.tls.ca_file does not contain a certificate")
 	}
-	if _, err := tls.LoadX509KeyPair(cfg.Agent.TLS.CertFile, cfg.Agent.TLS.KeyFile); err != nil {
+	cert, err := tls.LoadX509KeyPair(cfg.Agent.TLS.CertFile, cfg.Agent.TLS.KeyFile)
+	if err != nil {
 		return fmt.Errorf("load agent certificate: %w", err)
+	}
+	if len(cert.Certificate) == 0 {
+		return errors.New("agent certificate is empty")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse agent certificate: %w", err)
+	}
+	identity, ok := CertificateAgentID(leaf)
+	if !ok || identity != cfg.Agent.ID {
+		return fmt.Errorf("agent certificate URI SAN must be %q", AgentIdentityURI(cfg.Agent.ID))
 	}
 	if len(cfg.Token) < 32 {
 		return errors.New("agent token must contain at least 32 bytes")
@@ -339,6 +369,7 @@ func quicConfigWithObfuscation(cfg config.TransportConfig, obfs config.Transport
 		HandshakeIdleTimeout: time.Duration(cfg.HandshakeTimeoutSec) * time.Second,
 		MaxIdleTimeout:       time.Duration(cfg.IdleTimeoutSec) * time.Second,
 		KeepAlivePeriod:      time.Duration(cfg.KeepAliveSec) * time.Second,
+		Allow0RTT:            false,
 	}
 	if obfs.Mode == config.TransportObfuscationCamouflage {
 		// The datagram wrapper changes packet sizes and cannot safely forward
@@ -364,6 +395,31 @@ func quicConfigWithObfuscation(cfg config.TransportConfig, obfs config.Transport
 		q.MaxConnectionReceiveWindow = uint64(cfg.MaxConnReadBuffer)
 	}
 	return q
+}
+
+const agentIdentityPrefix = "urn:asterferry:agent:"
+
+func AgentIdentityURI(agentID string) string { return agentIdentityPrefix + agentID }
+
+// CertificateAgentID extracts the single AsterFerry URI identity. Other URI
+// SANs are permitted for certificate tooling, but multiple AsterFerry
+// identities are rejected to prevent ambiguous binding.
+func CertificateAgentID(cert *x509.Certificate) (string, bool) {
+	if cert == nil {
+		return "", false
+	}
+	identity := ""
+	for _, uri := range cert.URIs {
+		if uri == nil || !strings.HasPrefix(uri.String(), agentIdentityPrefix) {
+			continue
+		}
+		candidate := strings.TrimPrefix(uri.String(), agentIdentityPrefix)
+		if candidate == "" || strings.ContainsAny(candidate, "\r\n") || identity != "" {
+			return "", false
+		}
+		identity = candidate
+	}
+	return identity, identity != ""
 }
 
 func configureUDPBuffers(conn *net.UDPConn, cfg config.TransportConfig) error {

@@ -7,7 +7,24 @@ the public port field is `gateway_port`.
 The examples use protocol/configuration version 4. Gateway and Agent must be
 upgraded together; v3 configurations and connections are rejected.
 
-## 1. Generate a deployment identifier
+For the fastest local test, generate a complete pair instead of following the
+manual certificate steps below:
+
+```powershell
+asterferry init --dir ./asterferry --profile dev
+asterferry doctor --config ./asterferry/config/gateway.yaml
+asterferry doctor --config ./asterferry/config/agent.yaml
+```
+
+The generated development certificates are self-signed and must not be used
+for production. Use `--profile prod` to generate private keys and CSRs for an
+external PKI; the resulting configuration is intentionally not startable
+until the signed certificates and CA files are installed.
+
+The paths in generated configurations are relative to each configuration file,
+so the whole bundle can be moved between a Windows checkout and WSL.
+
+## 1. Generate a deployment identifier (manual production setup)
 
 Generate an ALPN identifier used only by the Gateway and Agent in one
 deployment:
@@ -26,6 +43,10 @@ The Gateway uses a server certificate and an Agent client CA. Each Agent uses
 its own client certificate. Self-signed certificates are suitable for testing;
 production deployments should use an internal CA or an established PKI.
 
+Every Agent client certificate must contain a URI SAN exactly matching
+`urn:asterferry:agent:<agent-id>`; the Common Name is not used for identity
+binding. Regenerate certificates when changing an Agent ID.
+
 The Agent server name must match a SAN on the Gateway certificate. Restrict
 certificate and private-key permissions to the service account.
 
@@ -33,11 +54,16 @@ certificate and private-key permissions to the service account.
 
 ```powershell
 openssl rand -hex 32 | Set-Content -NoNewline edge-a.token
+openssl rand -hex 32 | Set-Content -NoNewline management.token
 ```
 
 Use the same token file contents on the Gateway and the corresponding Agent.
 Use a separate token for every Agent. Never commit tokens, private keys, or real
 certificates to the repository.
+
+The management token is independent from Agent tokens. Set
+`management.auth_token_file` on both roles. Health probes remain anonymous;
+`/metrics` and `/v1/status` require the Bearer token.
 
 Create the same independent transport-obfuscation key on the Gateway and
 Agent. It is not a replacement for mTLS or the Agent token:
@@ -54,6 +80,9 @@ current key while inbound packets accept both keys for the overlap window.
 
 - Gateway: `gateway.listen`, TLS files, and `gateway.agents[].token_file`
 - Gateway: define independent `reverse` and `egress` ACLs for each Agent
+- Gateway: special-use/private destinations are denied by default; use a
+  narrow `egress.allow_special_cidrs` entry only for an explicitly approved
+  development or internal destination
 - Agent: `agent.server`, `agent.tls.*`, and `agent.token_file`
 - Agent: point `agent.reverse[].local` at internal services
 - Agent: configure local proxy listeners under `agent.proxy.inbounds`; the
@@ -79,13 +108,15 @@ current key while inbound packets accept both keys for the overlap window.
 Proxy listeners bind to loopback by default. If a listener binds to another
 address, credentials are required.
 
-## 5. Validate and start
+## 5. Validate, diagnose and start
 
 ```powershell
-asterferry validate -c examples/gateway.yaml
-asterferry validate -c examples/agent.yaml
-asterferry gateway -c examples/gateway.yaml
-asterferry agent -c examples/agent.yaml
+asterferry validate --config examples/gateway.yaml
+asterferry validate --config examples/agent.yaml
+asterferry doctor --config examples/gateway.yaml
+asterferry doctor --config examples/agent.yaml
+asterferry gateway --config examples/gateway.yaml
+asterferry agent --config examples/agent.yaml
 ```
 
 The Gateway firewall must allow UDP `4433` and the configured reverse TCP/UDP

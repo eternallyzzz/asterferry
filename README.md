@@ -13,10 +13,37 @@ separation:
   registers internal services as reverse mappings.
 
 ```text
-asterferry gateway -c gateway.yaml
-asterferry agent   -c agent.yaml
-asterferry validate -c agent.yaml
+asterferry gateway --config gateway.yaml
+asterferry agent   --config agent.yaml
+asterferry validate --config agent.yaml
 ```
+
+## Quick start
+
+For a local Gateway-Agent test pair, let the CLI generate the configuration,
+tokens, obfuscation key, and self-signed certificates:
+
+```powershell
+asterferry init --dir ./asterferry --profile dev
+asterferry doctor --config ./asterferry/config/gateway.yaml
+asterferry doctor --config ./asterferry/config/agent.yaml
+```
+
+Start the two roles in separate terminals:
+
+```powershell
+asterferry gateway --config ./asterferry/config/gateway.yaml
+asterferry agent --config ./asterferry/config/agent.yaml
+```
+
+Use `asterferry status --config ...` to inspect a running role. The generated
+`dev` certificates are for local testing only. For production, use
+`asterferry init --profile prod`, submit the generated CSRs to the deployment
+PKI, install the CA/certificates, and run `doctor` before starting.
+
+Every command has focused help. `asterferry completion powershell` (or
+`bash`/`zsh`) generates shell completion scripts, and `version` reports the
+build and protocol versions without loading a configuration file.
 
 ## Traffic model
 
@@ -79,7 +106,7 @@ per-datagram transform is applied before sending. On Linux/WSL, raise the UDP
 socket buffer limits before comparing throughput.
 
 The transport uses the production-ready `github.com/quic-go/quic-go` library
-and is built with Go 1.26.5. Application logs use the standard-library
+and is built with Go 1.26.7. Application logs use the standard-library
 `log/slog` package. JSON is the default format; set `logging.format` to `text`
 when a human-readable stream is preferred. INFO and DEBUG records use bounded
 per-event sampling (5 records/second, burst 20 by default), while warnings,
@@ -110,8 +137,9 @@ local log fields.
 Copyable templates are available in [examples/README.md](examples/README.md),
 [examples/gateway.yaml](examples/gateway.yaml), and
 [examples/agent.yaml](examples/agent.yaml). Before production deployment,
-replace the certificates, client CA, token, deployment-specific ALPN, and all
-sample addresses.
+replace the certificates (the Agent client certificate URI SAN must be
+`urn:asterferry:agent:<agent-id>`), client CA, Agent token, management token,
+deployment-specific ALPN, and all sample addresses.
 
 Container deployment guides are available for
 [Docker](deploy/docker/README.md) and
@@ -122,6 +150,10 @@ published to `ghcr.io/eternallyzzz/asterferry` for version tags.
 The Gateway firewall must allow the QUIC UDP port and the configured reverse
 TCP/UDP ports. Management endpoints bind to loopback by default: Gateway uses
 `127.0.0.1:9090` and Agent uses `127.0.0.1:9091`.
+
+Configuration file references to certificates, tokens, and keys are resolved
+relative to the configuration file directory. Absolute paths are unchanged;
+this makes generated bundles portable between working directories and WSL.
 
 ### Cluster readiness
 
@@ -135,10 +167,13 @@ Agent session; existing QUIC streams cannot be migrated between nodes.
 ## Security boundaries
 
 - Production deployments require a Gateway server certificate, Agent client
-  certificates, and a per-Agent token.
+  certificates with URI SAN identity binding, a per-Agent token, and an
+  independent management Bearer token. Health probes are anonymous; metrics
+  and status require the management token.
 - Gateway egress proxying applies per-Agent, protocol, port, and destination-IP
-  ACLs. Private, loopback, link-local, and metadata addresses are denied by
-  default.
+  ACLs. Special-use, private, loopback, link-local, metadata, and reserved
+  addresses are denied by default; use narrow `allow_special_cidrs` entries
+  only for explicitly approved exceptions.
 - Management endpoints must not be exposed to the public network.
 - Logs do not record tokens, private keys, proxy payloads, cookies, credentials,
   or plaintext destinations by default.
@@ -165,12 +200,60 @@ ASTERFERRY_SNIFF_TIMEOUT_MS=250
 
 ## Verification
 
+The local full-verification entry point checks the native Windows toolchain,
+the selected WSL distribution, Linux/Windows cross-builds, a local multi-
+platform Docker image build, and both Helm release roles. It never pushes an
+image or creates a release:
+
 ```powershell
-asterferry validate -c examples/gateway.yaml
-asterferry validate -c examples/agent.yaml
-go test ./...
-go vet ./...
+.\scripts\test-all.ps1
+.\scripts\test-all.ps1 -WslDistro Debian -FullBench
 ```
+
+The default run performs `gofmt` validation, `go vet`, uncached tests, race
+tests, and builds for Windows amd64 plus Linux amd64/arm64. WSL must have Go
+1.26.7, `gcc`, and a working race-test toolchain for strict full verification.
+If WSL has no Go installation, pass `-SkipRace`; the runner cross-compiles
+each package's functional test binary on Windows and executes those binaries
+inside WSL, while clearly reporting that race testing was skipped. Docker
+Buildx and Helm are required for the container and chart checks. Use
+`-FullBench` to run the complete Windows and WSL performance matrices; results
+and verification logs are written under ignored `tmp/test/` and `tmp/perf/`
+directories.
+
+For a quick configuration-only check, the built binary can still validate the
+examples directly:
+
+```powershell
+asterferry validate --config examples/gateway.yaml
+asterferry validate --config examples/agent.yaml
+```
+
+`validate` checks YAML and semantic configuration rules without requiring
+mounted secrets. `doctor` performs the local deployment checks, including
+secret permissions, TLS identities and certificate expiry, and temporary port
+availability checks. Use `doctor --skip-ports` when the role is already
+running.
+
+### Coverage
+
+Generate runtime coverage reports for Windows and the selected native WSL
+distribution with:
+
+```powershell
+.\scripts\coverage.ps1
+.\scripts\coverage.ps1 -WslDistro Debian
+```
+
+The command runs the complete Go test suite with `-coverpkg`, so the existing
+integration tests contribute coverage to the Agent, Gateway, and Transport
+runtime packages. It writes separate `coverage.out`, `functions.txt`,
+`coverage.html`, logs, and metadata under `tmp/coverage/windows/` and
+`tmp/coverage/wsl/`. The generated protobuf package
+`internal/transport/wirev4` and the benchmark-only command
+`cmd/asterferry-bench` are excluded from the runtime denominator. The WSL
+distribution must have the expected Go toolchain installed; coverage does not
+fall back to cross-compiled test binaries.
 
 The historical `myproxy` and `myfrp` projects were design references only;
 their v1 configuration and wire protocol are not compatible with AsterFerry v4.
@@ -179,7 +262,7 @@ their v1 configuration and wire protocol are not compatible with AsterFerry v4.
 
 The repository includes three benchmark layers: raw QUIC streams,
 `AsterFerry` proxy streams, and relay record round trips. Run the same command
-on native Windows and in WSL with Go 1.26.5:
+on native Windows and in WSL with Go 1.26.7:
 
 ```powershell
 ./scripts/bench-windows.ps1
@@ -196,7 +279,7 @@ upload, download, and round-trip directions at 16 KiB and 64 KiB payloads;
 full proxy benchmarks report round-trip goodput at both payload sizes. The
 Windows script writes `metadata.json` and `summary.json`. On a WSL image that
 does not have Go installed, `scripts/bench-wsl.ps1` cross-builds static Linux
-benchmark binaries with Go 1.26.5 and runs them inside WSL. WSL runs should
+benchmark binaries with Go 1.26.7 and runs them inside WSL. WSL runs should
 use an ext4 checkout when measuring runtime performance; `/mnt/d` is
 acceptable for a quick smoke test but can distort build and startup timings.
 Record the WSL `net.core.rmem_max` and `net.core.wmem_max` values as well:

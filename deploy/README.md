@@ -16,9 +16,14 @@
 3. Validate before replacing a running configuration:
 
    ```sh
-   /usr/local/bin/asterferry validate -c /etc/asterferry/gateway.yaml
-   /usr/local/bin/asterferry validate -c /etc/asterferry/agent.yaml
+   /usr/local/bin/asterferry validate --config /etc/asterferry/gateway.yaml
+   /usr/local/bin/asterferry validate --config /etc/asterferry/agent.yaml
+   /usr/local/bin/asterferry doctor --config /etc/asterferry/gateway.yaml --skip-ports
+   /usr/local/bin/asterferry doctor --config /etc/asterferry/agent.yaml --skip-ports
    ```
+
+   `status --config ...` queries the loopback management endpoint of a running
+   role and uses the configured management token automatically.
 
 4. Install and start the appropriate service:
 

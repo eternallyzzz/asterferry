@@ -130,6 +130,10 @@ func (c *Config) ResolveAgent() (*AgentOptions, error) {
 	if err != nil {
 		return nil, err
 	}
+	management, err := resolveManagement(c.Management)
+	if err != nil {
+		return nil, err
+	}
 	transportObfuscation, err := resolveTransportObfuscation(c.Obfuscation.Transport)
 	if err != nil {
 		return nil, err
@@ -151,7 +155,7 @@ func (c *Config) ResolveAgent() (*AgentOptions, error) {
 	reverse := append([]Tunnel(nil), c.Agent.Reverse...)
 	return &AgentOptions{
 		Transport:            c.Transport,
-		Management:           c.Management,
+		Management:           management,
 		Shutdown:             ShutdownOptions{GracePeriod: time.Duration(c.Shutdown.GracePeriodSec) * time.Second},
 		Cluster:              ClusterOptions{NodeID: nodeID},
 		Limits:               c.Limits,
@@ -171,6 +175,10 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 		return nil, errors.New("gateway configuration is required")
 	}
 	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	management, err := resolveManagement(c.Management)
+	if err != nil {
 		return nil, err
 	}
 	transportObfuscation, err := resolveTransportObfuscation(c.Obfuscation.Transport)
@@ -196,7 +204,7 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 	}
 	return &GatewayOptions{
 		Transport:            c.Transport,
-		Management:           c.Management,
+		Management:           management,
 		Shutdown:             ShutdownOptions{GracePeriod: time.Duration(c.Shutdown.GracePeriodSec) * time.Second},
 		Cluster:              ClusterOptions{NodeID: nodeID},
 		Limits:               c.Limits,
@@ -210,6 +218,15 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 		Agents:      agents,
 		StreamLimit: UsableStreamLimit(c.Transport, c.Limits),
 	}, nil
+}
+
+func resolveManagement(raw ManagementConfig) (ManagementConfig, error) {
+	token, err := ReadToken(raw.AuthTokenFile)
+	if err != nil {
+		return ManagementConfig{}, fmt.Errorf("management authentication token: %w", err)
+	}
+	raw.AuthToken = append([]byte(nil), token...)
+	return raw, nil
 }
 
 func resolveTransportObfuscation(raw TransportObfuscationConfig) (TransportObfuscationOptions, error) {
@@ -264,5 +281,6 @@ func cloneEgressPolicy(raw EgressPolicy) EgressPolicy {
 	raw.TCPPorts = append([]string(nil), raw.TCPPorts...)
 	raw.UDPPorts = append([]string(nil), raw.UDPPorts...)
 	raw.AllowCIDRs = append([]string(nil), raw.AllowCIDRs...)
+	raw.AllowSpecialCIDRs = append([]string(nil), raw.AllowSpecialCIDRs...)
 	return raw
 }

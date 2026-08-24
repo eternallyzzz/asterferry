@@ -20,6 +20,7 @@ transport:
 
 management:
   listen: "127.0.0.1:9091"
+  auth_token_file: "/etc/asterferry/management.token"
 
 shutdown:
   # On SIGTERM/SIGINT, stop new traffic and wait up to this long for active

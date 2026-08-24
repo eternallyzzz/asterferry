@@ -24,9 +24,10 @@ func TestParsePortRanges(t *testing.T) {
 
 func gatewayConfig() Config {
 	return Config{
-		Version:   ConfigVersion,
-		Role:      RoleGateway,
-		Transport: TransportConfig{ALPN: "af-test-123456"},
+		Version:    ConfigVersion,
+		Role:       RoleGateway,
+		Transport:  TransportConfig{ALPN: "af-test-123456"},
+		Management: ManagementConfig{AuthTokenFile: "management-token"},
 		Obfuscation: ObfuscationConfig{Transport: TransportObfuscationConfig{
 			Mode: TransportObfuscationStandard,
 		}},
@@ -55,6 +56,18 @@ func TestV3DefaultsAndRoleValidation(t *testing.T) {
 	bad.Agent = &AgentConfig{}
 	if err := bad.Validate(); err == nil {
 		t.Fatal("mixed role sections should be rejected")
+	}
+}
+
+func TestGatewayEgressDefaultConnectionLimitIsPersisted(t *testing.T) {
+	c := gatewayConfig()
+	c.Gateway.Agents[0].Reverse = ReverseACL{}
+	c.Gateway.Agents[0].Egress = EgressPolicy{Enabled: true, TCPPorts: []string{"443"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := c.Gateway.Agents[0].Egress.MaxConnections, c.Limits.MaxConnectionsPerAgent; got != want {
+		t.Fatalf("egress max connections = %d, want default %d", got, want)
 	}
 }
 
@@ -122,6 +135,7 @@ func TestClusterNodeIDValidationAndRuntimeResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Gateway.Agents[0].TokenFile = tokenPath
+	c.Management.AuthTokenFile = tokenPath
 	opts, err := c.ResolveGateway()
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +167,7 @@ func TestTransportObfuscationDefaultsAndResolution(t *testing.T) {
 			TLS:   AgentTLS{CAFile: "ca", CertFile: "cert", KeyFile: "key", ServerName: "gateway.example.com"},
 			Proxy: ProxyConfig{Inbounds: []Inbound{{Tag: "socks", Protocol: "socks5", Listen: "127.0.0.1:1080"}}},
 		},
+		Management: ManagementConfig{AuthTokenFile: tokenPath},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
@@ -188,6 +203,7 @@ func TestTransportObfuscationRejectsInvalidRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Gateway.Agents[0].TokenFile = tokenPath
+	c.Management.AuthTokenFile = tokenPath
 	if _, err := c.ResolveGateway(); err == nil {
 		t.Fatal("identical current and previous keys should be rejected")
 	}
@@ -208,6 +224,7 @@ func TestAgentProxySecurityValidation(t *testing.T) {
 			TLS:       AgentTLS{CAFile: "ca", CertFile: "cert", KeyFile: "key", ServerName: "gateway.example.com"},
 			Proxy:     ProxyConfig{Inbounds: []Inbound{{Tag: "socks", Protocol: "socks5", Listen: "127.0.0.1:1080"}}},
 		},
+		Management: ManagementConfig{AuthTokenFile: "management-token"},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
@@ -289,6 +306,7 @@ func TestResolveRuntimeOptions(t *testing.T) {
 			TLS:       AgentTLS{CAFile: "ca", CertFile: "cert", KeyFile: "key", ServerName: "gateway.example.com"},
 			Proxy:     ProxyConfig{Sniff: SniffConfig{Enabled: boolPtr(false)}, Inbounds: []Inbound{{Tag: "socks", Protocol: "socks5", Listen: "127.0.0.1:1080"}}},
 		},
+		Management: ManagementConfig{AuthTokenFile: tokenPath},
 	}
 	opts, err := c.ResolveAgent()
 	if err != nil {
@@ -311,6 +329,7 @@ func TestResolveGatewayReadsCredentials(t *testing.T) {
 	}
 	c := gatewayConfig()
 	c.Gateway.Agents[0].TokenFile = tokenPath
+	c.Management.AuthTokenFile = tokenPath
 	opts, err := c.ResolveGateway()
 	if err != nil {
 		t.Fatal(err)

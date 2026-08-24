@@ -44,9 +44,17 @@ const (
 )
 
 var (
-	obfuscationReadPool = sync.Pool{New: func() any { return make([]byte, 64<<10) }}
-	obfuscationBodyPool = sync.Pool{New: func() any { return make([]byte, 16<<10) }}
+	obfuscationReadPool = sync.Pool{New: func() any {
+		return &obfuscationPoolBuffer{bytes: make([]byte, 64<<10)}
+	}}
+	obfuscationBodyPool = sync.Pool{New: func() any {
+		return &obfuscationPoolBuffer{bytes: make([]byte, 16<<10)}
+	}}
 )
+
+type obfuscationPoolBuffer struct {
+	bytes []byte
+}
 
 type obfuscationKey struct {
 	key [32]byte
@@ -152,12 +160,17 @@ func (c *obfuscationPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	if c == nil || c.conn == nil {
 		return 0, nil, net.ErrClosed
 	}
-	buffer := obfuscationReadPool.Get().([]byte)
+	pooled := obfuscationReadPool.Get().(*obfuscationPoolBuffer)
+	buffer := pooled.bytes
 	if required := maxInt(64<<10, int(c.opts.MaxWirePacketBytes)+256); cap(buffer) < required {
 		buffer = make([]byte, required)
+		pooled.bytes = buffer
 	}
 	buffer = buffer[:cap(buffer)]
-	defer obfuscationReadPool.Put(buffer[:64<<10])
+	defer func() {
+		pooled.bytes = buffer[:64<<10]
+		obfuscationReadPool.Put(pooled)
+	}()
 	for {
 		n, addr, err := c.conn.ReadFrom(buffer)
 		if err != nil {
@@ -358,9 +371,11 @@ func (c *obfuscationPacketConn) decode(wire []byte, addr net.Addr, dst []byte) (
 		if c.metrics != nil {
 			c.metrics.ObfuscationPacketAccepted(key != c.keys[0])
 		}
-		body := obfuscationBodyPool.Get().([]byte)
+		pooled := obfuscationBodyPool.Get().(*obfuscationPoolBuffer)
+		body := pooled.bytes
 		if cap(body) < len(masked) {
 			body = make([]byte, len(masked))
+			pooled.bytes = body
 		}
 		body = body[:len(masked)]
 		copy(body, masked)
@@ -369,7 +384,7 @@ func (c *obfuscationPacketConn) decode(wire []byte, addr net.Addr, dst []byte) (
 			if c.metrics != nil {
 				c.metrics.ObfuscationFragmentDropped()
 			}
-			putObfuscationBody(body)
+			putObfuscationBody(pooled)
 			return nil, false
 		}
 		switch body[1] {
@@ -379,21 +394,21 @@ func (c *obfuscationPacketConn) decode(wire []byte, addr net.Addr, dst []byte) (
 				if c.metrics != nil {
 					c.metrics.ObfuscationFragmentDropped()
 				}
-				putObfuscationBody(body)
+				putObfuscationBody(pooled)
 				return nil, false
 			}
 			copy(dst, payload)
-			putObfuscationBody(body)
+			putObfuscationBody(pooled)
 			return dst[:len(payload)], true
 		case obfuscationFragment:
 			packet, ok := c.acceptFragment(body, addr)
-			putObfuscationBody(body)
+			putObfuscationBody(pooled)
 			return packet, ok
 		default:
 			if c.metrics != nil {
 				c.metrics.ObfuscationFragmentDropped()
 			}
-			putObfuscationBody(body)
+			putObfuscationBody(pooled)
 			return nil, false
 		}
 	}
@@ -519,9 +534,10 @@ func (c *obfuscationPacketConn) tag(salt, masked []byte, key [32]byte) [obfuscat
 	return tag
 }
 
-func putObfuscationBody(buffer []byte) {
-	if cap(buffer) >= 16<<10 {
-		obfuscationBodyPool.Put(buffer[:16<<10])
+func putObfuscationBody(buffer *obfuscationPoolBuffer) {
+	if buffer != nil && cap(buffer.bytes) >= 16<<10 {
+		buffer.bytes = buffer.bytes[:16<<10]
+		obfuscationBodyPool.Put(buffer)
 	}
 }
 

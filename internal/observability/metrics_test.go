@@ -41,3 +41,22 @@ func TestObserveQUICAndMetricsEndpointSnapshot(t *testing.T) {
 		}
 	}
 }
+
+func TestObfuscationCountersAndNilMetrics(t *testing.T) {
+	m := &Metrics{}
+	m.ObfuscationPacketAccepted(false)
+	m.ObfuscationPacketAccepted(true)
+	m.ObfuscationPacketRejected()
+	m.ObfuscationFragmentDropped()
+	m.RecordShutdown(false)
+	if m.ObfuscationAccepted.Load() != 2 || m.ObfuscationPreviousKey.Load() != 1 || m.ObfuscationRejected.Load() != 1 || m.ObfuscationFragmentsDropped.Load() != 1 || m.Shutdowns.Load() != 1 || m.ForcedShutdowns.Load() != 0 {
+		t.Fatalf("obfuscation counters = accepted=%d previous=%d rejected=%d dropped=%d shutdowns=%d forced=%d", m.ObfuscationAccepted.Load(), m.ObfuscationPreviousKey.Load(), m.ObfuscationRejected.Load(), m.ObfuscationFragmentsDropped.Load(), m.Shutdowns.Load(), m.ForcedShutdowns.Load())
+	}
+	var nilMetrics *Metrics
+	nilMetrics.BeginDrain()
+	nilMetrics.RecordShutdown(true)
+	nilMetrics.ObserveQUIC(transport.ConnectionStats{})
+	nilMetrics.ObfuscationPacketAccepted(true)
+	nilMetrics.ObfuscationPacketRejected()
+	nilMetrics.ObfuscationFragmentDropped()
+}

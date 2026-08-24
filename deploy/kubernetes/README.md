@@ -3,7 +3,7 @@
 AsterFerry is packaged as one role-selectable Helm Chart. Install it twice for
 a normal deployment: once as a `gateway` release and once as an `agent`
 release. The chart does not create credential Secrets; certificates, private
-keys, and tokens must be created out of band.
+keys, Agent tokens, and management tokens must be created out of band.
 
 ## Prepare configuration and Secrets
 
@@ -17,6 +17,8 @@ gateway:
     cert_file: /etc/asterferry/secrets/server.crt
     key_file: /etc/asterferry/secrets/server.key
     client_ca_file: /etc/asterferry/secrets/agents-ca.crt
+management:
+  auth_token_file: /etc/asterferry/secrets/management.token
 obfuscation:
   transport:
     mode: camouflage
@@ -38,13 +40,29 @@ kubectl -n asterferry create secret generic asterferry-gateway-secrets \
   --from-file=server.key=./secrets/gateway/server.key \
   --from-file=agents-ca.crt=./secrets/gateway/agents-ca.crt \
   --from-file=edge-a.token=./secrets/gateway/edge-a.token \
+  --from-file=management.token=./secrets/gateway/management.token \
   --from-file=obfs.key=./secrets/gateway/obfs.key
 ```
 
 Create corresponding Agent ConfigMap and Secret resources with the Agent CA,
-client certificate, client key, token, and the same `obfs.key` (plus the
+client certificate (URI SAN `urn:asterferry:agent:<agent-id>`), client key,
+Agent token, management token, and the same `obfs.key` (plus the
 optional `obfs.key.previous` during rotation). Never commit these files or put
 their contents into `values.yaml`.
+
+Before applying a ConfigMap and Secret, run the local preflight checks against
+the same configuration and secret paths:
+
+```sh
+asterferry validate --config ./config/gateway.yaml
+asterferry doctor --config ./config/gateway.yaml --skip-ports
+asterferry validate --config ./config/agent.yaml
+asterferry doctor --config ./config/agent.yaml --skip-ports
+```
+
+After rollout, use the Kubernetes readiness probe for availability and query
+`asterferry status --config ...` from an administrative context when the
+loopback management endpoint is reachable.
 
 ## Install Gateway
 

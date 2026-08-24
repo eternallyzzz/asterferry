@@ -22,6 +22,8 @@ type ProxyEngine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	listeners []net.Listener
+	active    map[net.Conn]struct{}
+	maxActive int64
 	closed    bool
 	draining  bool
 	stopOnce  sync.Once
@@ -30,16 +32,21 @@ type ProxyEngine struct {
 }
 
 type ProxyEngineOptions struct {
-	Inbounds []config.Inbound
-	Handler  func(net.Conn, config.Inbound)
-	Gate     *lifecycle.Gate
+	Inbounds       []config.Inbound
+	Handler        func(net.Conn, config.Inbound)
+	Gate           *lifecycle.Gate
+	MaxConnections int64
 }
 
 func NewProxyEngine(opts ProxyEngineOptions) (*ProxyEngine, error) {
 	if opts.Handler == nil {
 		return nil, errors.New("proxy engine handler is required")
 	}
-	return &ProxyEngine{inbounds: append([]config.Inbound(nil), opts.Inbounds...), handler: opts.Handler, gate: opts.Gate}, nil
+	maxActive := opts.MaxConnections
+	if maxActive < 1 {
+		maxActive = 1024
+	}
+	return &ProxyEngine{inbounds: append([]config.Inbound(nil), opts.Inbounds...), handler: opts.Handler, gate: opts.Gate, active: make(map[net.Conn]struct{}), maxActive: maxActive}, nil
 }
 
 func (e *ProxyEngine) Start(parent context.Context) error {
@@ -86,7 +93,12 @@ func (e *ProxyEngine) acceptLoop(listener net.Listener, in config.Inbound) {
 		if err != nil {
 			return
 		}
+		if !e.admitConnection(conn) {
+			_ = conn.Close()
+			continue
+		}
 		if e.gate != nil && !e.gate.TryAdd() {
+			e.releaseConnection(conn)
 			_ = conn.Close()
 			continue
 		}
@@ -94,9 +106,26 @@ func (e *ProxyEngine) acceptLoop(listener net.Listener, in config.Inbound) {
 			if e.gate != nil {
 				defer e.gate.Done()
 			}
+			defer e.releaseConnection(conn)
 			e.handler(conn, in)
 		}()
 	}
+}
+
+func (e *ProxyEngine) admitConnection(conn net.Conn) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.draining || len(e.active) >= int(e.maxActive) {
+		return false
+	}
+	e.active[conn] = struct{}{}
+	return true
+}
+
+func (e *ProxyEngine) releaseConnection(conn net.Conn) {
+	e.mu.Lock()
+	delete(e.active, conn)
+	e.mu.Unlock()
 }
 
 // BeginDrain closes local proxy listeners while allowing already accepted
@@ -141,5 +170,15 @@ func (e *ProxyEngine) Close() error {
 		e.cancel()
 	}
 	e.mu.Unlock()
-	return e.BeginDrain()
+	err := e.BeginDrain()
+	e.mu.Lock()
+	active := make([]net.Conn, 0, len(e.active))
+	for conn := range e.active {
+		active = append(active, conn)
+	}
+	e.mu.Unlock()
+	for _, conn := range active {
+		_ = conn.Close()
+	}
+	return err
 }

@@ -2,8 +2,9 @@ package agent
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,7 +107,7 @@ func socksAuth(br *bufio.Reader, conn net.Conn, in config.Inbound) error {
 	if _, err = io.ReadFull(br, pass); err != nil {
 		return err
 	}
-	if string(user) != in.User || string(pass) != in.Password {
+	if !constantTimeStringEqual(string(user), in.User) || !constantTimeStringEqual(string(pass), in.Password) {
 		_, _ = conn.Write([]byte{1, 1})
 		return errors.New("invalid credentials")
 	}
@@ -173,17 +175,19 @@ func readSocksAddress(r io.ByteReader, initial ...byte) (string, uint16, error) 
 }
 
 func socksReply(conn net.Conn, code byte, addr net.IP, port uint16) {
-	if addr == nil || addr.To4() == nil {
-		addr = net.IPv4zero
+	address := addr.To4()
+	if address == nil {
+		address = net.IPv4zero
 	}
 	b := []byte{5, code, 0, 1, 0, 0, 0, 0, 0, 0}
+	copy(b[4:8], address)
 	binary.BigEndian.PutUint16(b[8:], port)
 	_, _ = conn.Write(b)
 }
 
 func (a *Agent) handleSOCKSConnect(conn net.Conn, br *bufio.Reader, tag, host string, port uint16) {
-	route := a.route(tag, host)
-	remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: port}, proxy.Path(route))
+	route, resolvedIP := a.routeTarget(tag, host)
+	remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: port, ResolvedIP: resolvedIP}, proxy.Path(route))
 	if err != nil {
 		a.logProxyEvent(tag, "socks5", host, port, route, "open_failed", route, agentErrorKind(err))
 		socksReply(conn, 5, nil, 0)
@@ -201,7 +205,7 @@ func (a *Agent) handleSOCKSConnect(conn net.Conn, br *bufio.Reader, tag, host st
 	socksReply(conn, 0, replyIP, replyPort)
 	client := a.sniffClient(conn, br, tag, "socks5", port)
 	a.logProxyEvent(tag, "socks5", host, port, route, "connected", route, "")
-	relay.Bidirectional(client, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
+	relay.BidirectionalWithIdle(a.ctx, client, remote, time.Duration(a.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
 }
 
 func (a *Agent) handleSOCKSUDP(control net.Conn, tag string) {
@@ -351,7 +355,6 @@ type udpPath struct {
 	clientAddr *net.UDPAddr
 	target     string
 	remote     bool
-	mu         sync.Mutex
 	last       atomic.Int64
 	dead       atomic.Bool
 	limits     transport.Limits
@@ -369,8 +372,9 @@ func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, c
 	limits := transport.LimitsFromConfig(a.cfg.Limits, a.cfg.StreamLimit)
 	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: ctx, limits: limits}
 	p.touch()
-	route := proxy.Path(a.route(tag, host))
-	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port}, route)
+	routeName, resolvedIP := a.routeTarget(tag, host)
+	route := proxy.Path(routeName)
+	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port, ResolvedIP: resolvedIP}, route)
 	if err != nil {
 		return nil
 	}
@@ -526,7 +530,8 @@ func socksDatagram(target string, payload []byte) []byte {
 
 func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	defer conn.Close()
-	br := bufio.NewReader(conn)
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	br := bufio.NewReader(&httpHeaderLimitReader{Reader: conn, Max: 64 << 10})
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		a.logger.Info("HTTP request parse failed", "event", "proxy.http.parse_failed", "inbound", in.Tag, "error_kind", agentErrorKind(err))
@@ -534,7 +539,7 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	}
 	if in.User != "" {
 		u, p, ok := req.BasicAuth()
-		if !ok || u != in.User || p != in.Password {
+		if !ok || !constantTimeStringEqual(u, in.User) || !constantTimeStringEqual(p, in.Password) {
 			_, _ = conn.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\n\r\n"))
 			return
 		}
@@ -542,10 +547,18 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	// Proxy credentials are only for this local hop and must never cross the
 	// encrypted tunnel or reach the destination server.
 	req.Header.Del("Proxy-Authorization")
+	stripHopByHopHeaders(req.Header)
+	_ = conn.SetDeadline(time.Time{})
+	if len(req.RequestURI) > transport.MaxEndpointBytes || len(req.Host) > transport.MaxEndpointBytes || strings.ContainsAny(req.Host, "\x00\r\n") {
+		return
+	}
 	host, portText, err := net.SplitHostPort(req.Host)
 	if err != nil {
 		host = req.Host
 		portText = "80"
+		if req.Method == http.MethodConnect {
+			portText = "443"
+		}
 	}
 	portNum, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || portNum == 0 {
@@ -553,8 +566,8 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 		return
 	}
 	if req.Method == http.MethodConnect {
-		route := a.route(in.Tag, host)
-		remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum)}, proxy.Path(route))
+		route, resolvedIP := a.routeTarget(in.Tag, host)
+		remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIP: resolvedIP}, proxy.Path(route))
 		if err != nil {
 			a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
 			return
@@ -563,30 +576,89 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 		client := a.sniffClient(conn, br, in.Tag, "http_connect", uint16(portNum))
 		a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "connected", route, "")
-		relay.Bidirectional(client, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
-		return
-	}
-	var request bytes.Buffer
-	if err := req.Write(&request); err != nil {
+		relay.BidirectionalWithIdle(a.ctx, client, remote, time.Duration(a.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
 		return
 	}
 	var remote io.ReadWriteCloser
-	route := a.route(in.Tag, host)
-	remote, err = a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum)}, proxy.Path(route))
+	route, resolvedIP := a.routeTarget(in.Tag, host)
+	remote, err = a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIP: resolvedIP}, proxy.Path(route))
 	if err != nil {
 		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
 		return
 	}
 	defer remote.Close()
-	if _, err := remote.Write(request.Bytes()); err != nil {
+	if err := req.Write(remote); err != nil {
 		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "write_failed", route, agentErrorKind(err))
 		return
 	}
 	if flusher, ok := remote.(interface{ Flush() }); ok {
 		flusher.Flush()
 	}
-	relay.Bidirectional(&bufferedConn{Conn: conn, Reader: br}, remote, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
+	relay.BidirectionalWithIdle(a.ctx, &bufferedConn{Conn: conn, Reader: br}, remote, time.Duration(a.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { a.metrics.BytesIn.Add(n) }, Out: func(n uint64) { a.metrics.BytesOut.Add(n) }})
 	a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "finished", route, "")
+}
+
+const errHTTPHeadersTooLarge = "http request headers exceed 64KiB"
+
+type httpHeaderLimitReader struct {
+	io.Reader
+	Max  int
+	seen int
+	tail [3]byte
+	done bool
+}
+
+func (r *httpHeaderLimitReader) Read(p []byte) (int, error) {
+	if r.done {
+		return r.Reader.Read(p)
+	}
+	if r.Max <= 0 {
+		r.Max = 64 << 10
+	}
+	if remaining := r.Max - r.seen; remaining <= 0 {
+		return 0, errors.New(errHTTPHeadersTooLarge)
+	} else if len(p) > remaining {
+		p = p[:remaining]
+	}
+	n, err := r.Reader.Read(p)
+	if n == 0 {
+		return n, err
+	}
+	if r.seen+n > r.Max {
+		return n, errors.New(errHTTPHeadersTooLarge)
+	}
+	for _, value := range p[:n] {
+		if r.tail[0] == '\r' && r.tail[1] == '\n' && r.tail[2] == '\r' && value == '\n' {
+			r.done = true
+			break
+		}
+		r.tail[0], r.tail[1], r.tail[2] = r.tail[1], r.tail[2], value
+	}
+	r.seen += n
+	if !r.done && r.seen >= r.Max {
+		return n, errors.New(errHTTPHeadersTooLarge)
+	}
+	return n, err
+}
+
+func stripHopByHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				header.Del(name)
+			}
+		}
+	}
+	for _, name := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		header.Del(name)
+	}
+}
+
+func constantTimeStringEqual(a, b string) bool {
+	left := sha256.Sum256([]byte(a))
+	right := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(left[:], right[:]) == 1
 }
 
 type bufferedConn struct {

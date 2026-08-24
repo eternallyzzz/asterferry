@@ -29,7 +29,11 @@ func (o agentOutbound) OpenStream(ctx context.Context, target proxy.Target, path
 	if path == proxy.PathDirect {
 		return (&net.Dialer{Timeout: time.Duration(o.agent.cfg.Limits.DialTimeoutSec) * time.Second}).DialContext(ctx, target.Network, target.Address())
 	}
-	raw, err := o.agent.OpenProxy(ctx, target.Network, target.Host, target.Port)
+	host := target.Host
+	if target.ResolvedIP.IsValid() {
+		host = target.ResolvedIP.String()
+	}
+	raw, err := o.agent.OpenProxy(ctx, target.Network, host, target.Port)
 	if err != nil {
 		return nil, err
 	}
@@ -53,5 +57,9 @@ func (o agentOutbound) OpenDatagram(ctx context.Context, target proxy.Target, pa
 	if path == proxy.PathDirect {
 		return (&net.Dialer{Timeout: time.Duration(o.agent.cfg.Limits.DialTimeoutSec) * time.Second}).DialContext(ctx, target.Network, target.Address())
 	}
-	return o.agent.OpenProxy(ctx, target.Network, target.Host, target.Port)
+	host := target.Host
+	if target.ResolvedIP.IsValid() {
+		host = target.ResolvedIP.String()
+	}
+	return o.agent.OpenProxy(ctx, target.Network, host, target.Port)
 }

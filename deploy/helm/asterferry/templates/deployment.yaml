@@ -54,7 +54,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - {{ .Values.role | quote }}
-            - "-c"
+            - "--config"
             - "/etc/asterferry/config.yaml"
           {{- with .Values.env }}
           env:

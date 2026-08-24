@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -17,8 +18,14 @@ import (
 )
 
 const (
-	Version         byte = protocol.Version
-	DefaultMaxFrame      = 16 << 20
+	Version             byte = protocol.Version
+	DefaultMaxFrame          = 16 << 20
+	HandshakeMaxFrame        = 64 << 10
+	MaxCapabilities          = 16
+	MaxAgentIDBytes          = 128
+	MaxMappingNameBytes      = 128
+	MaxEndpointBytes         = 2048
+	MaxMappings              = 256
 
 	TypeHello byte = iota + 1
 	TypeChallenge
@@ -324,6 +331,9 @@ func VerifyChallenge(token, nonce, mac []byte, agentID string, capabilities []Ca
 }
 
 func ValidateCapabilities(capabilities []Capability) error {
+	if len(capabilities) > MaxCapabilities {
+		return fmt.Errorf("too many capabilities: %d", len(capabilities))
+	}
 	seen := make(map[Capability]struct{}, len(capabilities))
 	var previous Capability
 	for index, capability := range capabilities {
@@ -341,6 +351,88 @@ func ValidateCapabilities(capabilities []Capability) error {
 	}
 	return nil
 }
+
+func ValidateHello(value Hello) error {
+	if !validIdentifier(value.AgentID, MaxAgentIDBytes) {
+		return errors.New("invalid agent identity")
+	}
+	if err := ValidateCapabilities(value.Capabilities); err != nil {
+		return err
+	}
+	return ValidateLimits(value.Limits)
+}
+
+func ValidateChallenge(value Challenge) error {
+	if len(value.Nonce) != sha256.Size {
+		return errors.New("challenge nonce must be 32 bytes")
+	}
+	if err := ValidateCapabilities(value.Capabilities); err != nil {
+		return err
+	}
+	return ValidateLimits(value.Limits)
+}
+
+func ValidateAuth(value Auth) error {
+	if len(value.MAC) != sha256.Size {
+		return errors.New("authentication MAC must be 32 bytes")
+	}
+	return nil
+}
+
+func ValidateRegister(value Register) error {
+	if len(value.Mappings) > MaxMappings {
+		return fmt.Errorf("too many mappings: %d", len(value.Mappings))
+	}
+	for _, mapping := range value.Mappings {
+		if !validIdentifier(mapping.Name, MaxMappingNameBytes) || (mapping.Protocol != "tcp" && mapping.Protocol != "udp") || mapping.GatewayPort == 0 || !validProfile(mapping.Profile) {
+			return errors.New("invalid mapping registration")
+		}
+	}
+	return nil
+}
+
+func ValidateOpenProxy(value OpenProxy) error {
+	if value.Network != "tcp" && value.Network != "udp" {
+		return errors.New("invalid proxy network")
+	}
+	if value.Port == 0 || !validEndpointText(value.Address) || !validProfile(value.Profile) {
+		return errors.New("invalid proxy destination")
+	}
+	return nil
+}
+
+func ValidateOpenReverse(value OpenReverse) error {
+	if !validIdentifier(value.Name, MaxMappingNameBytes) || (value.Protocol != "tcp" && value.Protocol != "udp") || !validProfile(value.Profile) {
+		return errors.New("invalid reverse mapping")
+	}
+	return nil
+}
+
+func validEndpointText(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > MaxEndpointBytes || strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	return true
+}
+
+func validIdentifier(value string, max int) bool {
+	if value == "" || len(value) > max || !isASCIIAlphaNumeric(value[0]) {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		if !isASCIIAlphaNumeric(value[i]) && value[i] != '-' && value[i] != '_' && value[i] != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+}
+
+func validProfile(value string) bool { return value == "standard" || value == "balanced" }
 
 func normalizedCapabilities(capabilities []Capability) []Capability {
 	result := append([]Capability(nil), capabilities...)
@@ -598,6 +690,9 @@ func unmarshalPayload(typ byte, payload []byte, target any) error {
 		if err := proto.Unmarshal(payload, &value); err != nil {
 			return err
 		}
+		if len(value.Capabilities) > MaxCapabilities {
+			return errors.New("too many capabilities")
+		}
 		v, ok := target.(*Hello)
 		if !ok {
 			return errors.New("hello payload type mismatch")
@@ -607,6 +702,9 @@ func unmarshalPayload(typ byte, payload []byte, target any) error {
 		var value wirev4.Challenge
 		if err := proto.Unmarshal(payload, &value); err != nil {
 			return err
+		}
+		if len(value.Capabilities) > MaxCapabilities {
+			return errors.New("too many capabilities")
 		}
 		v, ok := target.(*Challenge)
 		if !ok {
@@ -880,6 +978,9 @@ func registrationValues(values []TunnelRegistration) []*wirev4.TunnelRegistratio
 }
 
 func registrationsFromValues(values []*wirev4.TunnelRegistration) ([]TunnelRegistration, error) {
+	if len(values) > MaxMappings {
+		return nil, errors.New("too many tunnel registrations")
+	}
 	result := make([]TunnelRegistration, 0, len(values))
 	for _, value := range values {
 		if value == nil {

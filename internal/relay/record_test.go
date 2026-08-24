@@ -70,3 +70,45 @@ func TestIdleWatchClosesAfterInactivity(t *testing.T) {
 	}
 	stop()
 }
+
+func TestRelayProfilesPaddingAndHalfClose(t *testing.T) {
+	for _, name := range []string{"", "unsupported"} {
+		if _, err := NewProfile(name, 1024, 0); err == nil {
+			t.Fatalf("profile %q should fail", name)
+		}
+	}
+	if _, err := NewProfile("standard", 8, 0); err == nil {
+		t.Fatal("record size without payload space should fail")
+	}
+	if _, err := NewProfile("balanced", 1024, -1); err == nil {
+		t.Fatal("negative padding should fail")
+	}
+	if _, err := NewProfile("balanced", 1024, 1024); err == nil {
+		t.Fatal("padding larger than record should fail")
+	}
+	if PaddingLength("standard", 512, 10) != 0 || PaddingLength("balanced", 100, 0) != 0 || PaddingLength("balanced", 20000, 100) != 0 {
+		t.Fatal("padding bounds were not enforced")
+	}
+	if got := PaddingLength("balanced", 100, 512); got < 0 || got > 512 {
+		t.Fatalf("padding length = %d", got)
+	}
+
+	underlying := &closeProbe{}
+	conn := NewConn(underlying, Profile{Name: "standard", MaxRecordBytes: 1024})
+	conn.CloseRead()
+	conn.CloseWrite()
+	if !underlying.readClosed || !underlying.writeClosed {
+		t.Fatal("relay half-close methods were not forwarded")
+	}
+}
+
+type closeProbe struct {
+	readClosed  bool
+	writeClosed bool
+}
+
+func (c *closeProbe) Read([]byte) (int, error)    { return 0, io.EOF }
+func (c *closeProbe) Write(p []byte) (int, error) { return len(p), nil }
+func (c *closeProbe) Close() error                { return nil }
+func (c *closeProbe) CloseRead()                  { c.readClosed = true }
+func (c *closeProbe) CloseWrite()                 { c.writeClosed = true }

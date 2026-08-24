@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -92,9 +93,13 @@ func BenchmarkAsterFerryProxy(b *testing.B) {
 func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *agent.Agent, int) {
 	t.Helper()
 	dir := t.TempDir()
-	certs := makeCertificates(t, dir)
+	certs := makeCertificates(t, dir, "bench")
 	tokenPath := filepath.Join(dir, "bench.token")
 	if err := os.WriteFile(tokenPath, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managementTokenPath := filepath.Join(dir, "management.token")
+	if err := os.WriteFile(managementTokenPath, []byte("management-token-0123456789abcdef"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	transportObfuscation := config.TransportObfuscationConfig{Mode: mode}
@@ -121,13 +126,13 @@ func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *
 			InitialStreamReceiveWindow: 1 << 20, InitialConnectionReceiveWindow: 8 << 20,
 			MaxStreamReadBuffer: 16 << 20, MaxConnReadBuffer: 64 << 20,
 		},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway)},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway), AuthTokenFile: managementTokenPath},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 128, MaxStreamsPerAgent: 64, MaxFrameBytes: 2 << 20, MaxRecordBytes: 16 << 10, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: profile, ReverseProfile: profile, MaxPaddingBytes: 2048, Transport: transportObfuscation},
 		Gateway: &config.GatewayConfig{
 			Listen: fmt.Sprintf("127.0.0.1:%d", quicPort),
 			TLS:    config.GatewayTLS{CertFile: certs.serverCert, KeyFile: certs.serverKey, ClientCAFile: certs.caCert},
-			Agents: []config.GatewayAgent{{ID: "bench", TokenFile: tokenPath, Reverse: config.ReverseACL{TCPPorts: []string{fmt.Sprint(publicPort)}}, Egress: config.EgressPolicy{Enabled: true, TCPPorts: []string{fmt.Sprint(echoPort)}, AllowCIDRs: []string{"127.0.0.0/8"}, MaxConnections: 128}}},
+			Agents: []config.GatewayAgent{{ID: "bench", TokenFile: tokenPath, Reverse: config.ReverseACL{TCPPorts: []string{fmt.Sprint(publicPort)}}, Egress: config.EgressPolicy{Enabled: true, TCPPorts: []string{fmt.Sprint(echoPort)}, AllowCIDRs: []string{"127.0.0.0/8"}, AllowSpecialCIDRs: []string{"127.0.0.0/8"}, MaxConnections: 128}}},
 		},
 	}
 	if err := gatewayCfg.Validate(); err != nil {
@@ -137,9 +142,6 @@ func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The benchmark target is deliberately local. Production validation keeps
-	// private destinations denied; this isolated fixture opts into loopback.
-	gatewayOpts.Agents[0].Egress.DenyPrivateNetworks = false
 	benchmarkLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	g, err := gateway.New(gatewayOpts, benchmarkLogger)
 	if err != nil {
@@ -157,7 +159,7 @@ func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *
 			InitialStreamReceiveWindow: 1 << 20, InitialConnectionReceiveWindow: 8 << 20,
 			MaxStreamReadBuffer: 16 << 20, MaxConnReadBuffer: 64 << 20,
 		},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent)},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent), AuthTokenFile: managementTokenPath},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 128, MaxStreamsPerAgent: 64, MaxFrameBytes: 2 << 20, MaxRecordBytes: 16 << 10, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: profile, ReverseProfile: profile, MaxPaddingBytes: 2048, Transport: transportObfuscation},
 		Agent: &config.AgentConfig{
@@ -227,9 +229,13 @@ func TestGatewayAgentCamouflageProxy(t *testing.T) {
 
 func TestGatewayAgentReverseTCP(t *testing.T) {
 	dir := t.TempDir()
-	certs := makeCertificates(t, dir)
+	certs := makeCertificates(t, dir, "edge-a")
 	tokenPath := filepath.Join(dir, "edge-a.token")
 	if err := os.WriteFile(tokenPath, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managementTokenPath := filepath.Join(dir, "management.token")
+	if err := os.WriteFile(managementTokenPath, []byte("management-token-0123456789abcdef"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	quicPort := freeUDPPort(t)
@@ -248,26 +254,23 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		Version:     config.ConfigVersion,
 		Role:        config.RoleGateway,
 		Transport:   config.TransportConfig{ALPN: alpn, MaxBidiRemoteStreams: 64},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway)},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway), AuthTokenFile: managementTokenPath},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 8, MaxStreamsPerAgent: 16, MaxFrameBytes: 1 << 20, MaxRecordBytes: 4096, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256, Transport: config.TransportObfuscationConfig{Mode: config.TransportObfuscationStandard}},
 		Gateway: &config.GatewayConfig{
 			Listen: fmt.Sprintf("127.0.0.1:%d", quicPort),
 			TLS:    config.GatewayTLS{CertFile: certs.serverCert, KeyFile: certs.serverKey, ClientCAFile: certs.caCert},
-			Agents: []config.GatewayAgent{{ID: "edge-a", TokenFile: tokenPath, Reverse: config.ReverseACL{TCPPorts: []string{fmt.Sprint(publicPort)}, UDPPorts: []string{fmt.Sprint(publicUDPPort)}}, Egress: config.EgressPolicy{Enabled: true, TCPPorts: []string{fmt.Sprint(echoPort)}, AllowCIDRs: []string{"127.0.0.0/8"}, MaxConnections: 4}}},
+			Agents: []config.GatewayAgent{{ID: "edge-a", TokenFile: tokenPath, Reverse: config.ReverseACL{TCPPorts: []string{fmt.Sprint(publicPort)}, UDPPorts: []string{fmt.Sprint(publicUDPPort)}}, Egress: config.EgressPolicy{Enabled: true, TCPPorts: []string{fmt.Sprint(echoPort)}, AllowCIDRs: []string{"127.0.0.0/8"}, AllowSpecialCIDRs: []string{"127.0.0.0/8"}, MaxConnections: 4}}},
 		},
 	}
 	if err := gatewayCfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	// The production validator forces private destinations to be denied. This
-	// test deliberately relaxes that policy only to use a local echo target.
-	gatewayCfg.Gateway.Agents[0].Egress.DenyPrivateNetworks = false
 	agentCfg := &config.Config{
 		Version:     config.ConfigVersion,
 		Role:        config.RoleAgent,
 		Transport:   config.TransportConfig{ALPN: alpn, MaxBidiRemoteStreams: 64},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent)},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent), AuthTokenFile: managementTokenPath},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 8, MaxStreamsPerAgent: 16, MaxFrameBytes: 1 << 20, MaxRecordBytes: 4096, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256, Transport: config.TransportObfuscationConfig{Mode: config.TransportObfuscationStandard}},
 		Agent: &config.AgentConfig{
@@ -383,7 +386,7 @@ type certificateFiles struct {
 	clientCert, clientKey         string
 }
 
-func makeCertificates(t testing.TB, dir string) certificateFiles {
+func makeCertificates(t testing.TB, dir, agentID string) certificateFiles {
 	t.Helper()
 	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -406,6 +409,11 @@ func makeCertificates(t testing.TB, dir string) certificateFiles {
 		tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: name}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 		if client {
 			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+			identity, parseErr := url.Parse("urn:asterferry:agent:" + agentID)
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			tmpl.URIs = []*url.URL{identity}
 		} else {
 			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 			tmpl.DNSNames = []string{"localhost"}

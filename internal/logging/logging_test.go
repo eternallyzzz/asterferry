@@ -2,7 +2,9 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -77,5 +79,78 @@ func TestDomainHashDoesNotContainDomain(t *testing.T) {
 	}
 	if hash != DomainHash(strings.ToUpper(domain)+".") {
 		t.Fatal("domain normalization should be stable")
+	}
+}
+
+func TestLoggingValidationAndHandlerComposition(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "warning", "error", ""} {
+		if _, err := parseLevel(level); err != nil {
+			t.Fatalf("level %q failed: %v", level, err)
+		}
+	}
+	if _, err := parseLevel("trace"); err == nil {
+		t.Fatal("unknown logging level should fail")
+	}
+	if _, _, err := New(config.LoggingOptions{Level: "info", Format: "xml"}, "agent", io.Discard); err == nil {
+		t.Fatal("unknown logging format should fail")
+	}
+	var out bytes.Buffer
+	logger, closeLog, err := New(config.LoggingOptions{Level: "info", Format: "text", Sampling: config.SamplingOptions{Enabled: false}}, "agent", &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.With("entity", "edge").WithGroup("proxy").Info("request", "event", "proxy.request")
+	if err := closeLog(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "proxy") || !strings.Contains(out.String(), "proxy.request") {
+		t.Fatalf("composed logger output = %q", out.String())
+	}
+}
+
+func TestSamplingHandlerEmitsPeriodicAndFinalSummaries(t *testing.T) {
+	var out bytes.Buffer
+	state := newSamplerState(config.SamplingOptions{
+		Enabled:            true,
+		RatePerSecond:      1,
+		Burst:              1,
+		SummaryIntervalSec: 1,
+		MaxKeys:            8,
+	})
+	h := &samplingHandler{next: slog.NewTextHandler(&out, nil), state: state}
+	now := time.Now()
+	first := slog.NewRecord(now, slog.LevelInfo, "first", 0)
+	first.AddAttrs(slog.String("event", "test.sample"))
+	second := slog.NewRecord(now, slog.LevelInfo, "second", 0)
+	second.AddAttrs(slog.String("event", "test.sample"))
+	later := slog.NewRecord(now.Add(2*time.Second), slog.LevelInfo, "later", 0)
+	later.AddAttrs(slog.String("event", "test.sample"))
+	if err := h.Handle(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Handle(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Handle(context.Background(), later); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "log records suppressed") || !strings.Contains(got, "suppressed_total=1") {
+		t.Fatalf("periodic suppression summary = %q", got)
+	}
+
+	var finalOut bytes.Buffer
+	finalState := newSamplerState(config.SamplingOptions{Enabled: true, RatePerSecond: 1, Burst: 1, SummaryIntervalSec: 60, MaxKeys: 8})
+	finalHandler := &samplingHandler{next: slog.NewTextHandler(&finalOut, nil), state: finalState}
+	if err := finalHandler.Handle(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalHandler.Handle(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalHandler.close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(finalOut.String(), "suppressed_total=1") {
+		t.Fatalf("final suppression summary = %q", finalOut.String())
 	}
 }

@@ -1,8 +1,9 @@
 # Docker deployment
 
-The image contains the same `asterferry gateway`, `asterferry agent`, and
-`asterferry validate` commands as a native installation. The image is built
-from a static Go 1.26.5 binary and runs as the non-root `asterferry` user.
+The image contains the same `asterferry gateway`, `asterferry agent`,
+`asterferry validate`, `asterferry doctor`, and `asterferry status` commands as
+a native installation. The image is built from a static Go 1.26.7 binary and
+runs as the non-root `asterferry` user.
 
 ## Build the image
 
@@ -34,6 +35,7 @@ deploy/docker/
       server.key
       agents-ca.crt
       edge-a.token
+      management.token
       obfs.key
       obfs.key.previous   # optional during key rotation
     agent/
@@ -41,13 +43,15 @@ deploy/docker/
       edge-a.crt
       edge-a.key
       edge-a.token
+      management.token
       obfs.key
       obfs.key.previous   # optional during key rotation
 ```
 
 Create the directories and copy the example configurations before starting.
-Change certificate, token, ALPN, and `obfuscation.transport.key_file` paths in
-the copied configuration to use `/etc/asterferry/secrets/...`. The Gateway and
+Change certificates (including the Agent URI SAN identity), tokens, ALPN, and
+`obfuscation.transport.key_file` paths in the copied configuration to use
+`/etc/asterferry/secrets/...`. The Gateway and
 Agent must share the same current `obfs.key`; keep the previous key in
 `obfs.key.previous` on both sides only while rotating. The Agent server address should be
 `gateway:4433` inside the Compose network.
@@ -58,6 +62,11 @@ docker compose config
 docker compose up -d --build
 docker compose ps
 ```
+
+For a native bundle, `asterferry init --dir ./local --profile dev` creates the
+same `config/` and `secrets/` split used by this Compose layout. Review the
+generated paths and bind addresses before using it in a container; development
+certificates are not production credentials.
 
 Both services use a 35-second Compose stop window for the default 30-second
 application drain. Set `shutdown.grace_period_seconds` in each configuration

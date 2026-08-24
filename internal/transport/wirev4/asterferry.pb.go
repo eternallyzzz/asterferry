@@ -3,6 +3,7 @@
 // 	protoc-gen-go v1.31.0
 // 	protoc        v4.24.2
 // source: asterferry/v4/asterferry.proto
+//lint:file-ignore SA1019 protoc-gen-go emits the compatibility Exporter until the generated code is refreshed.
 
 package wirev4
 

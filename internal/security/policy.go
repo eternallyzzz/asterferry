@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 
+	"asterferry/internal/addresspolicy"
 	"asterferry/internal/config"
 )
 
@@ -20,8 +22,8 @@ var ErrDenied = errors.New("egress destination denied")
 type EgressPolicy struct {
 	tcp            []config.PortRange
 	udp            []config.PortRange
-	allow          []*net.IPNet
-	denyPrivate    bool
+	allow          []netip.Prefix
+	allowSpecial   []netip.Prefix
 	maxConnections int64
 	semaphore      chan struct{}
 }
@@ -38,13 +40,24 @@ func NewEgressPolicy(raw config.EgressPolicy) (*EgressPolicy, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &EgressPolicy{tcp: tcp, udp: udp, denyPrivate: raw.DenyPrivateNetworks, maxConnections: raw.MaxConnections}
+	p := &EgressPolicy{tcp: tcp, udp: udp, maxConnections: raw.MaxConnections}
 	for _, value := range raw.AllowCIDRs {
-		_, network, err := net.ParseCIDR(value)
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
 		if err != nil {
 			return nil, fmt.Errorf("parse egress CIDR %q: %w", value, err)
 		}
-		p.allow = append(p.allow, network)
+		p.allow = append(p.allow, prefix.Masked())
+	}
+	for _, value := range raw.AllowSpecialCIDRs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil {
+			return nil, fmt.Errorf("parse egress special CIDR %q: %w", value, err)
+		}
+		prefix = prefix.Masked()
+		if !addresspolicy.IsSpecialPrefix(prefix) {
+			return nil, fmt.Errorf("egress special CIDR %q is not within a special-use range", value)
+		}
+		p.allowSpecial = append(p.allowSpecial, prefix)
 	}
 	if p.maxConnections > 0 {
 		p.semaphore = make(chan struct{}, p.maxConnections)
@@ -77,7 +90,8 @@ func (p *EgressPolicy) Allow(ctx context.Context, network, host string, port uin
 	if !allowedPort {
 		return "", fmt.Errorf("egress %s port %d is not allowed", network, port)
 	}
-	if strings.TrimSpace(host) == "" {
+	host = strings.TrimSpace(host)
+	if host == "" {
 		return "", ErrDenied
 	}
 	ipList := []net.IP{net.ParseIP(strings.TrimSpace(host))}
@@ -101,23 +115,42 @@ func (p *EgressPolicy) Allow(ctx context.Context, network, host string, port uin
 }
 
 func (p *EgressPolicy) allowedIP(ip net.IP) bool {
-	if p.denyPrivate && isPrivateOrLocal(ip) {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	if addresspolicy.IsSpecial(addr) && !addresspolicy.Contains(p.allowSpecial, addr) {
 		return false
 	}
 	if len(p.allow) == 0 {
 		return true
 	}
 	for _, network := range p.allow {
-		if network.Contains(ip) {
+		if network.Contains(addr) {
 			return true
 		}
 	}
 	return false
 }
 
-func isPrivateOrLocal(ip net.IP) bool {
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("100.100.100.200")) || ip.Equal(net.ParseIP("fd00:ec2::254"))
+// IsSpecialException reports whether an already policy-approved dial address
+// uses an explicitly configured special-use exception. It is used only for
+// audit logging; policy decisions remain inside Allow.
+func (p *EgressPolicy) IsSpecialException(address string) bool {
+	if p == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addresspolicy.IsSpecial(addr) && addresspolicy.Contains(p.allowSpecial, addr)
 }
 
 // Acquire reserves one egress connection. The returned function is

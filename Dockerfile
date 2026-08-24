@@ -1,9 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.7-alpine AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 
 WORKDIR /src
 
@@ -12,7 +15,7 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/asterferry ./cmd/asterferry
+	go build -trimpath -ldflags="-s -w -X asterferry/internal/buildinfo.Version=${VERSION} -X asterferry/internal/buildinfo.Commit=${COMMIT} -X asterferry/internal/buildinfo.BuildDate=${BUILD_DATE}" -o /out/asterferry ./cmd/asterferry
 
 FROM alpine:3.20
 
