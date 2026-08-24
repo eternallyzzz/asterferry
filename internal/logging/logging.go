@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"asterferry/internal/config"
+	"asterferry/internal/observability"
 )
 
 const (
@@ -21,7 +22,7 @@ const (
 // New builds the process logger. The returned close function emits the final
 // suppression summary; slog handlers write synchronously, so no background
 // queue needs to be drained.
-func New(cfg config.LoggingOptions, role string, out io.Writer) (*slog.Logger, func() error, error) {
+func New(cfg config.LoggingOptions, role string, out io.Writer, eventHubs ...*observability.EventHub) (*slog.Logger, func() error, error) {
 	if out == nil {
 		out = os.Stderr
 	}
@@ -44,7 +45,11 @@ func New(cfg config.LoggingOptions, role string, out io.Writer) (*slog.Logger, f
 		slog.String("service", serviceName),
 		slog.String("role", role),
 	}
-	h := &samplingHandler{next: next.WithAttrs(baseAttrs), state: state, attrs: baseAttrs}
+	var events *observability.EventHub
+	if len(eventHubs) > 0 {
+		events = eventHubs[0]
+	}
+	h := &samplingHandler{next: next.WithAttrs(baseAttrs), state: state, attrs: baseAttrs, events: events}
 	logger := slog.New(h)
 	return logger, h.close, nil
 }
@@ -167,9 +172,10 @@ func (s *samplerState) finalSummary() []slog.Attr {
 }
 
 type samplingHandler struct {
-	next  slog.Handler
-	state *samplerState
-	attrs []slog.Attr
+	next   slog.Handler
+	state  *samplerState
+	attrs  []slog.Attr
+	events *observability.EventHub
 }
 
 func (h *samplingHandler) close() error {
@@ -180,6 +186,7 @@ func (h *samplingHandler) close() error {
 	r := slog.NewRecord(time.Now(), slog.LevelInfo, "log records suppressed", 0)
 	r.AddAttrs(slog.String("event", "log.suppression_summary"))
 	r.AddAttrs(attrs...)
+	h.publish(r)
 	return h.next.Handle(context.Background(), r)
 }
 
@@ -196,17 +203,18 @@ func (h *samplingHandler) Handle(ctx context.Context, record slog.Record) error 
 	if !allowed {
 		return nil
 	}
+	h.publish(record)
 	return h.next.Handle(ctx, record)
 }
 
 func (h *samplingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	cloned := append([]slog.Attr(nil), h.attrs...)
 	cloned = append(cloned, attrs...)
-	return &samplingHandler{next: h.next.WithAttrs(attrs), state: h.state, attrs: cloned}
+	return &samplingHandler{next: h.next.WithAttrs(attrs), state: h.state, attrs: cloned, events: h.events}
 }
 
 func (h *samplingHandler) WithGroup(name string) slog.Handler {
-	return &samplingHandler{next: h.next.WithGroup(name), state: h.state, attrs: h.attrs}
+	return &samplingHandler{next: h.next.WithGroup(name), state: h.state, attrs: h.attrs, events: h.events}
 }
 
 func (h *samplingHandler) emitSummary(ctx context.Context, now time.Time, attrs []slog.Attr) error {
@@ -216,7 +224,14 @@ func (h *samplingHandler) emitSummary(ctx context.Context, now time.Time, attrs 
 	r := slog.NewRecord(now, slog.LevelInfo, "log records suppressed", 0)
 	r.AddAttrs(slog.String("event", "log.suppression_summary"))
 	r.AddAttrs(attrs...)
+	h.publish(r)
 	return h.next.Handle(ctx, r)
+}
+
+func (h *samplingHandler) publish(record slog.Record) {
+	if h != nil && h.events != nil {
+		h.events.Publish(record, h.attrs)
+	}
 }
 
 func sampleKey(base []slog.Attr, record slog.Record) string {

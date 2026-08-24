@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"asterferry/internal/lifecycle"
 )
 
 func TestWaitSignalsGracefulFirstSignal(t *testing.T) {
@@ -49,6 +51,26 @@ func TestWaitSignalsSecondSignalForcesClose(t *testing.T) {
 	}
 	if !forced.Load() {
 		t.Fatal("second signal must force close")
+	}
+}
+
+func TestWaitSignalsManagementRequestStartsGracefulShutdown(t *testing.T) {
+	signals := make(chan os.Signal, 1)
+	trigger := lifecycle.NewShutdownTrigger()
+	trigger.Request()
+	var called atomic.Bool
+	err := waitSignals(time.Second, func(ctx context.Context) error {
+		called.Store(true)
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("shutdown context must be bounded")
+		}
+		return nil
+	}, func() error {
+		t.Fatal("management request must not force close")
+		return nil
+	}, signals, trigger.C())
+	if err != nil || !called.Load() {
+		t.Fatalf("management shutdown result = %v called=%v", err, called.Load())
 	}
 }
 

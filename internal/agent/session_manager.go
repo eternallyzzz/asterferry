@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"asterferry/internal/lifecycle"
+	"asterferry/internal/observability"
 	"asterferry/internal/transport"
 )
 
@@ -20,13 +21,15 @@ type sessionManager struct {
 	connect sessionConnector
 	logger  *slog.Logger
 
-	mu        sync.RWMutex
-	session   *Session
-	ready     chan struct{}
-	connects  atomic.Int64
-	retryBase time.Duration
-	closeOnce sync.Once
-	draining  atomic.Bool
+	mu               sync.RWMutex
+	session          *Session
+	ready            chan struct{}
+	reconnect        chan struct{}
+	connects         atomic.Int64
+	reconnectPending atomic.Bool
+	retryBase        time.Duration
+	closeOnce        sync.Once
+	draining         atomic.Bool
 }
 
 func newSessionManager(parent context.Context, connect sessionConnector, logger *slog.Logger) *sessionManager {
@@ -37,7 +40,7 @@ func newSessionManager(parent context.Context, connect sessionConnector, logger 
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &sessionManager{ctx: ctx, cancel: cancel, connect: connect, logger: logger, ready: make(chan struct{})}
+	return &sessionManager{ctx: ctx, cancel: cancel, connect: connect, logger: logger, ready: make(chan struct{}), reconnect: make(chan struct{}, 1)}
 }
 
 func (m *sessionManager) Start() {
@@ -66,6 +69,9 @@ func (m *sessionManager) connectLoop() {
 				_ = transport.CloseSession(conn)
 				return
 			}
+			if m.clearReconnectRequest() {
+				m.logger.Info("dashboard reconnect completed", "event", "management.action.completed", "action", "reconnect", "security_audit", true)
+			}
 			if waitErr := sess.Wait(); waitErr != nil && m.ctx.Err() == nil {
 				m.logger.Info("QUIC session ended", "event", "agent.session.ended", "error_kind", lifecycle.ErrorKind(waitErr), "session_id", sess.sessionID, "node_id", sess.agent.nodeID)
 			}
@@ -88,6 +94,15 @@ func (m *sessionManager) connectLoop() {
 				<-timer.C
 			}
 			return
+		case <-m.reconnect:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			m.clearReconnectRequest()
+			backoff = m.retryDelay()
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
@@ -175,6 +190,47 @@ func (m *sessionManager) Reconnects() int64 {
 		return 0
 	}
 	return m.connects.Load()
+}
+
+// RequestReconnect closes the current session and wakes a pending retry. The
+// request is intentionally coalesced so a dashboard button cannot create a
+// reconnect storm.
+func (m *sessionManager) RequestReconnect() error {
+	if m == nil || m.ctx.Err() != nil || m.draining.Load() {
+		return observability.ErrActionUnavailable
+	}
+	m.mu.RLock()
+	sess := m.session
+	m.mu.RUnlock()
+	if sess != nil {
+		if !m.reconnectPending.CompareAndSwap(false, true) {
+			return observability.ErrActionBusy
+		}
+		sess.Close()
+		return nil
+	}
+	if !m.reconnectPending.CompareAndSwap(false, true) {
+		return observability.ErrActionBusy
+	}
+	select {
+	case m.reconnect <- struct{}{}:
+		return nil
+	default:
+		m.reconnectPending.Store(false)
+		return observability.ErrActionBusy
+	}
+}
+
+func (m *sessionManager) clearReconnectRequest() bool {
+	if m == nil {
+		return false
+	}
+	wasPending := m.reconnectPending.Swap(false)
+	select {
+	case <-m.reconnect:
+	default:
+	}
+	return wasPending
 }
 
 func (m *sessionManager) Close() error {

@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
+	"asterferry/internal/observability"
 	"asterferry/internal/transport"
 )
 
@@ -13,6 +15,7 @@ import (
 // session handling. The current implementation always binds locally.
 type mappingDirectory interface {
 	Count() int
+	Snapshot() []observability.GatewayMappingSnapshot
 	Register(*Session, []transport.TunnelRegistration) transport.RegisterResult
 	BeginDrain()
 	RemoveSession(*Session)
@@ -38,6 +41,41 @@ func (m *mappingManager) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.items)
+}
+
+func (m *mappingManager) Snapshot() []observability.GatewayMappingSnapshot {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	result := make([]observability.GatewayMappingSnapshot, 0, len(m.items))
+	for _, item := range m.items {
+		if item == nil || item.session == nil {
+			continue
+		}
+		state := "active"
+		if item.draining.Load() {
+			state = "draining"
+		} else if item.ctx.Err() != nil {
+			state = "closed"
+		}
+		result = append(result, observability.GatewayMappingSnapshot{
+			Name:        item.spec.Name,
+			AgentID:     item.session.agentID,
+			Protocol:    item.spec.Protocol,
+			GatewayPort: item.spec.GatewayPort,
+			Profile:     item.spec.Profile,
+			State:       state,
+		})
+	}
+	m.mu.RUnlock()
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].AgentID != result[j].AgentID {
+			return result[i].AgentID < result[j].AgentID
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result
 }
 
 func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistration) transport.RegisterResult {

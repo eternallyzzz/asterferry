@@ -17,7 +17,9 @@ import (
 	"asterferry/internal/config"
 	"asterferry/internal/diagnostics"
 	"asterferry/internal/gateway"
+	"asterferry/internal/lifecycle"
 	"asterferry/internal/logging"
+	"asterferry/internal/observability"
 	"github.com/spf13/cobra"
 )
 
@@ -236,12 +238,14 @@ func newGatewayCommand() *cobra.Command {
 			if err != nil {
 				return runtimeConfigError(err, path)
 			}
-			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr())
+			events := observability.NewEventHub(0)
+			trigger := lifecycle.NewShutdownTrigger()
+			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr(), events)
 			if err != nil {
 				return err
 			}
 			defer closeLog()
-			s, err := gateway.New(opts, logger)
+			s, err := gateway.NewWithOptions(opts, gateway.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger})
 			if err != nil {
 				return err
 			}
@@ -249,7 +253,7 @@ func newGatewayCommand() *cobra.Command {
 				return err
 			}
 			logGatewayStarted(logger, path, opts)
-			return wait(opts.Shutdown.GracePeriod, s.Shutdown, s.Close)
+			return wait(opts.Shutdown.GracePeriod, s.Shutdown, s.Close, trigger.C())
 		},
 	}
 	addConfigFlag(cmd, &path)
@@ -274,12 +278,14 @@ func newAgentCommand() *cobra.Command {
 			if err != nil {
 				return runtimeConfigError(err, path)
 			}
-			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr())
+			events := observability.NewEventHub(0)
+			trigger := lifecycle.NewShutdownTrigger()
+			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr(), events)
 			if err != nil {
 				return err
 			}
 			defer closeLog()
-			a, err := agent.New(opts, logger)
+			a, err := agent.NewWithOptions(opts, agent.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger})
 			if err != nil {
 				return err
 			}
@@ -287,7 +293,7 @@ func newAgentCommand() *cobra.Command {
 				return err
 			}
 			logAgentStarted(logger, path, opts)
-			return wait(opts.Shutdown.GracePeriod, a.Shutdown, a.Close)
+			return wait(opts.Shutdown.GracePeriod, a.Shutdown, a.Close, trigger.C())
 		},
 	}
 	addConfigFlag(cmd, &path)

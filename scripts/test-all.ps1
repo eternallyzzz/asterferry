@@ -114,6 +114,8 @@ function Build-WslTestBinaries {
 try {
     Require-Command "go"
     Require-Command "gofmt"
+    Require-Command "node"
+    Require-Command "npm"
     Require-Command "wsl.exe"
     Require-Command "docker"
     Require-Command "helm"
@@ -121,6 +123,10 @@ try {
     $goVersion = (& go version).Trim()
     if ($goVersion -notlike "*$expectedGoVersion*") {
         throw "Expected Go $expectedGoVersion, got: $goVersion"
+    }
+    $nodeVersion = (& node --version).Trim()
+    if ($nodeVersion -notlike "v24.*") {
+        throw "Expected Node v24.x, got: $nodeVersion"
     }
     $cgoEnabled = (& go env CGO_ENABLED).Trim()
     if (-not $SkipRace -and $cgoEnabled -ne "1") {
@@ -149,11 +155,18 @@ try {
         goos = (& go env GOOS).Trim()
         goarch = (& go env GOARCH).Trim()
         gomaxprocs = (& go env GOMAXPROCS).Trim()
+        node = $nodeVersion
         wsl_distro = $WslDistro
         full_bench = [bool]$FullBench
         skip_race = [bool]$SkipRace
     }
     $metadata | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $outputDir "metadata.json")
+
+    Invoke-Logged "Dashboard npm dependencies" "npm" @("--prefix", "web/dashboard", "ci")
+    Invoke-Logged "Dashboard type check" "npm" @("--prefix", "web/dashboard", "run", "lint")
+    Invoke-Logged "Dashboard unit tests" "npm" @("--prefix", "web/dashboard", "test")
+    Invoke-Logged "Dashboard production build" "npm" @("--prefix", "web/dashboard", "run", "build")
+    Invoke-Logged "Dashboard generated assets check" "git" @("diff", "--exit-code", "--", "internal/dashboard/dist")
 
     Invoke-Logged "Windows go vet" "go" @("vet", "./...")
     Invoke-Logged "Windows full tests" "go" @("test", "-count=1", "./...")

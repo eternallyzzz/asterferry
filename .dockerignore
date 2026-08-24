@@ -2,6 +2,9 @@
 .github
 .idea
 .vscode
+node_modules/
+**/node_modules/
+web/dashboard/node_modules/
 *.exe
 *.log
 *.err

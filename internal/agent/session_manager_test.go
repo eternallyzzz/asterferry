@@ -105,6 +105,31 @@ func TestSessionManagerReconnectsAfterSessionLoss(t *testing.T) {
 	}
 }
 
+func TestSessionManagerRequestReconnectCoalescesAndClosesSession(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := newSessionManager(context.Background(), nil, logger)
+	fake := newManagerFakeSession(context.Background())
+	sessionCtx, cancel := context.WithCancel(fake.Context())
+	sess := &Session{agent: &Agent{logger: logger}, conn: fake, ctx: sessionCtx, cancel: cancel}
+	if !m.set(sess) {
+		t.Fatal("session should be accepted")
+	}
+	if err := m.RequestReconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RequestReconnect(); err == nil {
+		t.Fatal("second reconnect request should be coalesced")
+	}
+	select {
+	case <-fake.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("reconnect did not close current session")
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type managerFakeSession struct {
 	ctx       context.Context
 	cancel    context.CancelFunc

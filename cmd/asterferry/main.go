@@ -31,21 +31,28 @@ func exitCode(err error) int {
 	return 1
 }
 
-func wait(grace time.Duration, shutdown func(context.Context) error, closeFn func() error) error {
+func wait(grace time.Duration, shutdown func(context.Context) error, closeFn func() error, requests ...<-chan struct{}) error {
 	if grace <= 0 {
 		grace = 30 * time.Second
 	}
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	return waitSignals(grace, shutdown, closeFn, signals)
+	return waitSignals(grace, shutdown, closeFn, signals, requests...)
 }
 
-func waitSignals(grace time.Duration, shutdown func(context.Context) error, closeFn func() error, signals <-chan os.Signal) error {
+func waitSignals(grace time.Duration, shutdown func(context.Context) error, closeFn func() error, signals <-chan os.Signal, requests ...<-chan struct{}) error {
 	if grace <= 0 {
 		grace = 30 * time.Second
 	}
-	<-signals
+	var requested <-chan struct{}
+	if len(requests) > 0 {
+		requested = requests[0]
+	}
+	select {
+	case <-signals:
+	case <-requested:
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()

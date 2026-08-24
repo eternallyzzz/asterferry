@@ -10,6 +10,7 @@ on:
       - "deploy/helm/**"
       - "go.mod"
       - "go.sum"
+      - "web/dashboard/**"
       - "cmd/**"
       - "internal/**"
   push:
@@ -31,6 +32,19 @@ jobs:
         with:
           go-version: "1.26.7"
           cache: true
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+      - name: Verify Dashboard dependencies and build
+        run: |
+          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard run lint
+          npm --prefix web/dashboard test
+          npm --prefix web/dashboard run build
+          git diff --exit-code -- internal/dashboard/dist
       - name: Run tests
         run: go test ./...
       - name: Run race tests

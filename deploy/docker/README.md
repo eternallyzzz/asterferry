@@ -99,3 +99,11 @@ mounted read-only and are never copied into the image.
 
 The Compose healthchecks call the loopback-only management endpoints. They do
 not publish management ports to the host.
+
+The image also contains the embedded Dashboard at `/dashboard/` on each
+service's loopback management listener. The default Compose file does not
+publish those listeners. Use `docker compose exec gateway asterferry status
+--config /etc/asterferry/config.yaml` for a container-side check, or place an
+authenticated local-only reverse proxy beside the service if a browser view
+is required. Do not change the application management bind address to a
+public interface.

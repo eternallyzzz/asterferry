@@ -38,6 +38,18 @@
    should allow only the QUIC UDP port and explicitly configured reverse
    TCP/UDP ports. Keep the 9090/9091 management endpoints on loopback.
 
+   The embedded Dashboard is available at `http://127.0.0.1:9090/dashboard/`
+   for Gateway or `http://127.0.0.1:9091/dashboard/` for Agent. For remote
+   administration, use an SSH port forward rather than changing the
+   management listener to a public address:
+
+   ```sh
+   ssh -N -L 9090:127.0.0.1:9090 operator@example-host
+   ```
+
+   Enter the matching management token in the browser. It is held in memory
+   only; Dashboard event history is intentionally not persisted.
+
 5. Rotate certificates or configuration using a validate-then-restart process.
    Agents reconnect automatically with exponential backoff. On the first
    `SIGTERM`/`SIGINT`, the service marks itself unready, rejects new traffic,

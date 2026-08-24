@@ -45,6 +45,34 @@ Every command has focused help. `asterferry completion powershell` (or
 `bash`/`zsh`) generates shell completion scripts, and `version` reports the
 build and protocol versions without loading a configuration file.
 
+## Dashboard
+
+Running roles serve an embedded operations dashboard from their existing
+loopback-only management listener:
+
+```text
+Gateway: http://127.0.0.1:9090/dashboard/
+Agent:   http://127.0.0.1:9091/dashboard/
+```
+
+Enter the matching `management.token` in the page. The token is sent only as
+a Bearer header, is held in browser memory, and is never put in a URL or
+stored on disk. The page shows live status, traffic trends, QUIC diagnostics,
+Agent/mapping inventory, and structured runtime events. It can request an
+asynchronous graceful stop; the Agent page also has an explicit reconnect
+action.
+
+For a remote host, keep the management listener on loopback and use an
+administrative port forward, for example:
+
+```sh
+ssh -N -L 9090:127.0.0.1:9090 operator@example-host
+```
+
+The dashboard does not expose management ports publicly, provide SSO, or
+persist event history. Use the existing JSON logs or an external log system
+for long-term audit retention.
+
 ## Traffic model
 
 ```text

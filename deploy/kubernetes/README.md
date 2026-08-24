@@ -64,6 +64,13 @@ After rollout, use the Kubernetes readiness probe for availability and query
 `asterferry status --config ...` from an administrative context when the
 loopback management endpoint is reachable.
 
+Each role also serves the embedded Dashboard from its loopback management
+listener. When the pod runtime permits an administrative port-forward, use
+`kubectl port-forward` to the role's management port and open `/dashboard/`;
+otherwise keep using the CLI or an internal authenticated proxy. The chart
+does not publish management ports through a Service, and the Dashboard token
+is entered in memory rather than placed in a URL.
+
 ## Install Gateway
 
 The default Gateway Service is a `LoadBalancer` and publishes QUIC UDP `4433`

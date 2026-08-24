@@ -2,5 +2,6 @@
 *.log
 *.err
 tmp/
+node_modules/
 .idea/
 .vscode/

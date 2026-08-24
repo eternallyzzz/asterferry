@@ -114,14 +114,27 @@ type StatusProvider interface {
 	IsReady() bool
 }
 
-func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte) (*Server, error) {
+type ServerOptions struct {
+	Events    *EventHub
+	Actions   ActionProvider
+	Dashboard http.Handler
+}
+
+func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte, options ...ServerOptions) (*Server, error) {
 	if len(authToken) < 32 {
 		return nil, errors.New("management authentication token must contain at least 32 bytes")
 	}
 	if metrics == nil {
 		metrics = &Metrics{}
 	}
+	var serverOptions ServerOptions
+	if len(options) > 0 {
+		serverOptions = options[0]
+	}
 	mux := http.NewServeMux()
+	if serverOptions.Dashboard != nil {
+		mux.Handle("/dashboard/", http.StripPrefix("/dashboard", serverOptions.Dashboard))
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
@@ -149,6 +162,7 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 	mux.Handle("/metrics", protected(func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) }))
 	mux.Handle("/v1/status", protected(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
 		if provider == nil {
 			_, _ = w.Write([]byte("{}\n"))
 			return
@@ -160,6 +174,22 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 		}
 		_, _ = w.Write(b)
 	}))
+	mux.Handle("/v1/dashboard", protected(func(w http.ResponseWriter, _ *http.Request) {
+		serveDashboardSnapshot(w, provider, metrics)
+	}))
+	if serverOptions.Events != nil {
+		mux.Handle("/v1/events", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveEvents(w, r, serverOptions.Events)
+		}))
+	}
+	if serverOptions.Actions != nil {
+		mux.Handle("/v1/actions/shutdown", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveAction(w, r, serverOptions.Actions, "shutdown")
+		}))
+		mux.Handle("/v1/actions/reconnect", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveAction(w, r, serverOptions.Actions, "reconnect")
+		}))
+	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err

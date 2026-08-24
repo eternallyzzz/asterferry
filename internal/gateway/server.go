@@ -7,12 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"asterferry/internal/cluster"
 	"asterferry/internal/config"
+	"asterferry/internal/dashboard"
 	"asterferry/internal/lifecycle"
 	"asterferry/internal/observability"
 	"asterferry/internal/relay"
@@ -21,15 +23,17 @@ import (
 )
 
 type Gateway struct {
-	cfg     *config.GatewayOptions
-	nodeID  string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	ep      transport.Listener
-	logger  *slog.Logger
-	metrics *observability.Metrics
-	mgmt    *observability.Server
-	life    *lifecycle.Gate
+	cfg             *config.GatewayOptions
+	nodeID          string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	ep              transport.Listener
+	logger          *slog.Logger
+	metrics         *observability.Metrics
+	mgmt            *observability.Server
+	life            *lifecycle.Gate
+	events          *observability.EventHub
+	shutdownTrigger *lifecycle.ShutdownTrigger
 
 	sessions  sessionDirectory
 	mappings  mappingDirectory
@@ -75,7 +79,21 @@ type status struct {
 	TransportObfuscationKeyHash string `json:"transport_obfuscation_key_fingerprint"`
 }
 
+type RuntimeOptions struct {
+	Logger          *slog.Logger
+	Events          *observability.EventHub
+	ShutdownTrigger *lifecycle.ShutdownTrigger
+}
+
 func New(cfg *config.GatewayOptions, loggerOpt ...*slog.Logger) (*Gateway, error) {
+	var runtime RuntimeOptions
+	if len(loggerOpt) > 0 {
+		runtime.Logger = loggerOpt[0]
+	}
+	return NewWithOptions(cfg, runtime)
+}
+
+func NewWithOptions(cfg *config.GatewayOptions, runtime RuntimeOptions) (*Gateway, error) {
 	if cfg == nil {
 		return nil, errors.New("gateway requires gateway configuration")
 	}
@@ -84,12 +102,12 @@ func New(cfg *config.GatewayOptions, loggerOpt ...*slog.Logger) (*Gateway, error
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	logger := slog.Default()
-	if len(loggerOpt) > 0 && loggerOpt[0] != nil {
-		logger = loggerOpt[0]
+	logger := runtime.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 	owners := cluster.NewLocalOwnerStore()
-	s := &Gateway{cfg: cfg, nodeID: nodeID, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, life: lifecycle.NewGate(), owners: owners, sessions: newSessionRegistry(nodeID, owners), acl: map[string]*credential{}, admission: newHandshakeAdmission(cfg.Limits.MaxPendingHandshakes)}
+	s := &Gateway{cfg: cfg, nodeID: nodeID, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, life: lifecycle.NewGate(), owners: owners, sessions: newSessionRegistry(nodeID, owners), acl: map[string]*credential{}, admission: newHandshakeAdmission(cfg.Limits.MaxPendingHandshakes), events: runtime.Events, shutdownTrigger: runtime.ShutdownTrigger}
 	s.mappings = newMappingManager(s)
 	s.egress = newEgressProxy(s)
 	for _, agent := range cfg.Agents {
@@ -111,7 +129,11 @@ func (s *Gateway) Start() error {
 		return err
 	}
 	s.ep = ep
-	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s, s.cfg.Management.AuthToken)
+	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s, s.cfg.Management.AuthToken, observability.ServerOptions{
+		Events:    s.events,
+		Actions:   s,
+		Dashboard: dashboard.Handler(),
+	})
 	if err != nil {
 		_ = ep.Close()
 		return err
@@ -183,6 +205,9 @@ func (s *Gateway) Shutdown(ctx context.Context) error {
 	if started {
 		s.metrics.RecordShutdown(forced)
 	}
+	if s.shutdownTrigger != nil && s.shutdownTrigger.Requested() {
+		s.logger.Info("dashboard shutdown completed", "event", "management.action.completed", "action", "shutdown", "security_audit", true)
+	}
 	closeErr := s.Close()
 	if closeErr != nil {
 		return closeErr
@@ -206,6 +231,92 @@ func (s *Gateway) Status() any {
 		TransportObfuscationMode:    s.cfg.TransportObfuscation.Mode,
 		TransportObfuscationKeyHash: keyHash,
 	}
+}
+
+func (s *Gateway) Dashboard() observability.DashboardSnapshot {
+	if s == nil || s.cfg == nil {
+		return observability.DashboardSnapshot{SchemaVersion: observability.DashboardSchemaVersion, Role: config.RoleGateway}
+	}
+	state := "stopped"
+	ready := false
+	if s.life != nil {
+		state = s.life.State().String()
+		ready = s.IsReady()
+	}
+	mappings := []observability.GatewayMappingSnapshot(nil)
+	if s.mappings != nil {
+		mappings = s.mappings.Snapshot()
+	}
+	mappingCounts := make(map[string]int)
+	for _, mapping := range mappings {
+		mappingCounts[mapping.AgentID]++
+	}
+	agents := make([]observability.GatewayAgentSnapshot, 0)
+	if s.sessions != nil {
+		sessions := s.sessions.Snapshot()
+		sort.Slice(sessions, func(i, j int) bool { return sessions[i].agentID < sessions[j].agentID })
+		for _, session := range sessions {
+			if session == nil {
+				continue
+			}
+			connected := session.ctx == nil || session.ctx.Err() == nil
+			agents = append(agents, observability.GatewayAgentSnapshot{
+				AgentID:      session.agentID,
+				SessionID:    session.sessionID,
+				NodeID:       s.nodeID,
+				Connected:    connected,
+				MappingCount: mappingCounts[session.agentID],
+			})
+		}
+	}
+	keyFingerprint := ""
+	if len(s.cfg.TransportObfuscation.CurrentKey) > 0 {
+		keyFingerprint = config.TokenFingerprint(s.cfg.TransportObfuscation.CurrentKey)
+	}
+	return observability.DashboardSnapshot{
+		SchemaVersion: observability.DashboardSchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
+		Role:          config.RoleGateway,
+		State:         state,
+		Ready:         ready,
+		NodeID:        s.nodeID,
+		Transport: observability.DashboardTransportSnapshot{
+			Protocol:        config.ConfigVersion,
+			ObfuscationMode: s.cfg.TransportObfuscation.Mode,
+			KeyFingerprint:  keyFingerprint,
+		},
+		Gateway: &observability.GatewayDashboardSnapshot{Agents: agents, Mappings: mappings},
+	}
+}
+
+func (s *Gateway) RequestShutdown() error {
+	if err := s.CanShutdown(); err != nil {
+		return err
+	}
+	s.TriggerShutdown()
+	return nil
+}
+
+func (s *Gateway) CanShutdown() error {
+	if s == nil || s.life == nil || !s.life.IsRunning() || s.shutdownTrigger == nil {
+		return observability.ErrActionUnavailable
+	}
+	if s.shutdownTrigger.Requested() {
+		return observability.ErrActionBusy
+	}
+	return nil
+}
+
+func (s *Gateway) TriggerShutdown() {
+	if s == nil || s.shutdownTrigger == nil {
+		return
+	}
+	s.logger.Warn("dashboard requested shutdown", "event", "management.action.requested", "action", "shutdown", "security_audit", true)
+	_ = s.shutdownTrigger.Request()
+}
+
+func (s *Gateway) RequestReconnect() error {
+	return observability.ErrActionUnsupported
 }
 
 func (s *Gateway) acceptLoop() {

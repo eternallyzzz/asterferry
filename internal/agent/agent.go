@@ -13,6 +13,7 @@ import (
 
 	"asterferry/internal/cluster"
 	"asterferry/internal/config"
+	"asterferry/internal/dashboard"
 	"asterferry/internal/lifecycle"
 	"asterferry/internal/observability"
 	"asterferry/internal/proxy"
@@ -22,17 +23,19 @@ import (
 )
 
 type Agent struct {
-	cfg      *config.AgentOptions
-	nodeID   string
-	router   *routing.Router
-	ctx      context.Context
-	cancel   context.CancelFunc
-	metrics  *observability.Metrics
-	mgmt     *observability.Server
-	logger   *slog.Logger
-	outbound proxy.Outbound
-	proxy    *ProxyEngine
-	life     *lifecycle.Gate
+	cfg             *config.AgentOptions
+	nodeID          string
+	router          *routing.Router
+	ctx             context.Context
+	cancel          context.CancelFunc
+	metrics         *observability.Metrics
+	mgmt            *observability.Server
+	logger          *slog.Logger
+	outbound        proxy.Outbound
+	proxy           *ProxyEngine
+	life            *lifecycle.Gate
+	events          *observability.EventHub
+	shutdownTrigger *lifecycle.ShutdownTrigger
 
 	sessions  *sessionManager
 	mappings  map[string]config.Tunnel
@@ -67,7 +70,21 @@ type status struct {
 	TransportObfuscationKeyHash string `json:"transport_obfuscation_key_fingerprint"`
 }
 
+type RuntimeOptions struct {
+	Logger          *slog.Logger
+	Events          *observability.EventHub
+	ShutdownTrigger *lifecycle.ShutdownTrigger
+}
+
 func New(cfg *config.AgentOptions, loggerOpt ...*slog.Logger) (*Agent, error) {
+	var runtime RuntimeOptions
+	if len(loggerOpt) > 0 {
+		runtime.Logger = loggerOpt[0]
+	}
+	return NewWithOptions(cfg, runtime)
+}
+
+func NewWithOptions(cfg *config.AgentOptions, runtime RuntimeOptions) (*Agent, error) {
 	if cfg == nil {
 		return nil, errors.New("agent requires agent configuration")
 	}
@@ -83,20 +100,22 @@ func New(cfg *config.AgentOptions, loggerOpt ...*slog.Logger) (*Agent, error) {
 		return nil, fmt.Errorf("load routing database: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	logger := slog.Default()
-	if len(loggerOpt) > 0 && loggerOpt[0] != nil {
-		logger = loggerOpt[0]
+	logger := runtime.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 	a := &Agent{
-		cfg:      cfg,
-		nodeID:   nodeID,
-		router:   r,
-		ctx:      ctx,
-		cancel:   cancel,
-		metrics:  &observability.Metrics{},
-		logger:   logger,
-		life:     lifecycle.NewGate(),
-		mappings: map[string]config.Tunnel{},
+		cfg:             cfg,
+		nodeID:          nodeID,
+		router:          r,
+		ctx:             ctx,
+		cancel:          cancel,
+		metrics:         &observability.Metrics{},
+		logger:          logger,
+		life:            lifecycle.NewGate(),
+		events:          runtime.Events,
+		shutdownTrigger: runtime.ShutdownTrigger,
+		mappings:        map[string]config.Tunnel{},
 	}
 	a.outbound = agentOutbound{agent: a}
 	a.sessions = newSessionManager(ctx, a.connectOnce, logger)
@@ -117,7 +136,11 @@ func (a *Agent) Start() error {
 	if err := a.proxy.Start(a.ctx); err != nil {
 		return err
 	}
-	mgmt, err := observability.Start(a.cfg.Management.Listen, a.metrics, a, a.cfg.Management.AuthToken)
+	mgmt, err := observability.Start(a.cfg.Management.Listen, a.metrics, a, a.cfg.Management.AuthToken, observability.ServerOptions{
+		Events:    a.events,
+		Actions:   a,
+		Dashboard: dashboard.Handler(),
+	})
 	if err != nil {
 		_ = a.proxy.Close()
 		return err
@@ -184,6 +207,9 @@ func (a *Agent) Shutdown(ctx context.Context) error {
 	if started {
 		a.metrics.RecordShutdown(forced)
 	}
+	if a.shutdownTrigger != nil && a.shutdownTrigger.Requested() {
+		a.logger.Info("dashboard shutdown completed", "event", "management.action.completed", "action", "shutdown", "security_audit", true)
+	}
 	closeErr := a.Close()
 	if closeErr != nil {
 		return closeErr
@@ -225,6 +251,88 @@ func (a *Agent) Status() any {
 		TransportObfuscationMode:    a.cfg.TransportObfuscation.Mode,
 		TransportObfuscationKeyHash: keyHash,
 	}
+}
+
+func (a *Agent) Dashboard() observability.DashboardSnapshot {
+	if a == nil || a.cfg == nil {
+		return observability.DashboardSnapshot{SchemaVersion: observability.DashboardSchemaVersion, Role: config.RoleAgent}
+	}
+	state := "stopped"
+	ready := false
+	if a.life != nil {
+		state = a.life.State().String()
+		ready = a.IsReady()
+	}
+	inbounds := make([]observability.AgentInboundSnapshot, 0, len(a.cfg.Agent.Proxy.Inbounds))
+	for _, inbound := range a.cfg.Agent.Proxy.Inbounds {
+		inbounds = append(inbounds, observability.AgentInboundSnapshot{Tag: inbound.Tag, Protocol: inbound.Protocol, Listen: inbound.Listen})
+	}
+	reverse := make([]observability.AgentReverseSnapshot, 0, len(a.cfg.Agent.Reverse))
+	for _, tunnel := range a.cfg.Agent.Reverse {
+		reverse = append(reverse, observability.AgentReverseSnapshot{Name: tunnel.Name, Protocol: tunnel.Protocol, GatewayPort: tunnel.GatewayPort, Local: tunnel.Local})
+	}
+	keyFingerprint := ""
+	if len(a.cfg.TransportObfuscation.CurrentKey) > 0 {
+		keyFingerprint = config.TokenFingerprint(a.cfg.TransportObfuscation.CurrentKey)
+	}
+	return observability.DashboardSnapshot{
+		SchemaVersion: observability.DashboardSchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
+		Role:          config.RoleAgent,
+		State:         state,
+		Ready:         ready,
+		NodeID:        a.nodeID,
+		Transport: observability.DashboardTransportSnapshot{
+			Protocol:        config.ConfigVersion,
+			ObfuscationMode: a.cfg.TransportObfuscation.Mode,
+			KeyFingerprint:  keyFingerprint,
+		},
+		Agent: &observability.AgentDashboardSnapshot{
+			AgentID:         a.cfg.Agent.ID,
+			Connected:       a.IsReady(),
+			SessionID:       a.currentSessionID(),
+			Reconnects:      a.sessions.Reconnects(),
+			Inbounds:        inbounds,
+			ReverseMappings: reverse,
+		},
+	}
+}
+
+func (a *Agent) RequestShutdown() error {
+	if err := a.CanShutdown(); err != nil {
+		return err
+	}
+	a.TriggerShutdown()
+	return nil
+}
+
+func (a *Agent) CanShutdown() error {
+	if a == nil || a.life == nil || !a.life.IsRunning() || a.shutdownTrigger == nil {
+		return observability.ErrActionUnavailable
+	}
+	if a.shutdownTrigger.Requested() {
+		return observability.ErrActionBusy
+	}
+	return nil
+}
+
+func (a *Agent) TriggerShutdown() {
+	if a == nil || a.shutdownTrigger == nil {
+		return
+	}
+	a.logger.Warn("dashboard requested shutdown", "event", "management.action.requested", "action", "shutdown", "security_audit", true)
+	_ = a.shutdownTrigger.Request()
+}
+
+func (a *Agent) RequestReconnect() error {
+	if a == nil || a.life == nil || !a.life.IsRunning() || a.sessions == nil {
+		return observability.ErrActionUnavailable
+	}
+	if err := a.sessions.RequestReconnect(); err != nil {
+		return err
+	}
+	a.logger.Warn("dashboard requested reconnect", "event", "management.action.requested", "action", "reconnect", "agent_id", a.cfg.Agent.ID, "security_audit", true)
+	return nil
 }
 
 func (a *Agent) currentSessionID() string {
