@@ -140,6 +140,7 @@ func (a *Agent) Start() error {
 		Events:    a.events,
 		Actions:   a,
 		Dashboard: dashboard.Handler(),
+		Logger:    a.logger,
 	})
 	if err != nil {
 		_ = a.proxy.Close()

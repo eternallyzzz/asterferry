@@ -3,6 +3,7 @@ package observability
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -54,9 +55,75 @@ func TestManagementServerEndpoints(t *testing.T) {
 	}
 
 	provider.value = func() {}
-	status, _ = getManagement(t, server.listener.Addr().String(), "/v1/status")
-	if status != http.StatusInternalServerError {
-		t.Fatalf("unmarshalable status returned %d", status)
+	status, body = getManagement(t, server.listener.Addr().String(), "/v1/status")
+	if status != http.StatusInternalServerError || !strings.Contains(body, "status_unavailable") || strings.Contains(body, "unsupported type") {
+		t.Fatalf("unmarshalable status response = %d %q", status, body)
+	}
+}
+
+func TestManagementAuthFailureLimitAndAudit(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	metrics := &Metrics{}
+	server, err := Start("127.0.0.1:0", metrics, nil, []byte(testManagementToken), ServerOptions{Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client := &http.Client{Timeout: time.Second}
+	url := "http://" + server.listener.Addr().String() + "/v1/status"
+	for attempt := 0; attempt < managementAuthFailureLimit; attempt++ {
+		request, requestErr := http.NewRequest(http.MethodGet, url, nil)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("Authorization", "Bearer deliberately-invalid-management-token")
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("invalid attempt %d returned %d", attempt+1, response.StatusCode)
+		}
+	}
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer deliberately-invalid-management-token")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") == "" {
+		t.Fatalf("rate-limited response = %d retry-after=%q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	if response.Header.Get("X-Content-Type-Options") != "nosniff" || response.Header.Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("management security headers missing: %#v", response.Header)
+	}
+	if metrics.ManagementAuthFailures.Load() != managementAuthFailureLimit || metrics.ManagementAuthRateLimited.Load() != 1 {
+		t.Fatalf("management auth metrics = failures %d limited %d", metrics.ManagementAuthFailures.Load(), metrics.ManagementAuthRateLimited.Load())
+	}
+	if !strings.Contains(logs.String(), "management.auth.rejected") || !strings.Contains(logs.String(), "management.auth.rate_limited") {
+		t.Fatalf("management audit events missing: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "deliberately-invalid-management-token") {
+		t.Fatalf("management token leaked into logs: %s", logs.String())
+	}
+	validRequest, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validRequest.Header.Set("Authorization", "Bearer "+testManagementToken)
+	validResponse, err := client.Do(validRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = validResponse.Body.Close()
+	if validResponse.StatusCode != http.StatusOK {
+		t.Fatalf("valid token should clear the cooldown, got %d", validResponse.StatusCode)
 	}
 }
 

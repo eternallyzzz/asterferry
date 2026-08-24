@@ -212,6 +212,9 @@ Agent session; existing QUIC streams cannot be migrated between nodes.
 - Logs do not record tokens, private keys, proxy payloads, cookies, credentials,
   or plaintext destinations by default.
 
+Container probes use `asterferry healthcheck --url ...`; the production image
+does not include a shell or general-purpose network tools.
+
 ### Runtime log overrides
 
 Environment variables are applied after YAML and take precedence. Invalid

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,5 +208,38 @@ func TestRuntimeConfigErrorIncludesDoctorHint(t *testing.T) {
 	err := runtimeConfigError(fmt.Errorf("missing token"), "agent.yaml")
 	if !strings.Contains(err.Error(), "asterferry doctor --config \"agent.yaml\"") {
 		t.Fatalf("missing doctor hint: %v", err)
+	}
+}
+
+func TestHealthcheckCommand(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.WriteHeader(http.StatusNoContent)
+		case "/redirect":
+			http.Redirect(w, r, "/ok", http.StatusTemporaryRedirect)
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+
+	var output bytes.Buffer
+	if err := runHealthcheck(&output, server.URL+"/ok", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "ok\n" {
+		t.Fatalf("healthcheck output = %q", output.String())
+	}
+	if err := runHealthcheck(&bytes.Buffer{}, server.URL+"/unready", time.Second); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("unready healthcheck error = %v", err)
+	}
+	if err := runHealthcheck(&bytes.Buffer{}, server.URL+"/redirect", time.Second); err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("redirect healthcheck error = %v", err)
+	}
+	for _, value := range []string{"", "127.0.0.1:9090/healthz", "ftp://127.0.0.1/healthz", "http://user:pass@127.0.0.1/healthz"} {
+		if healthcheckURLIsSafe(value) {
+			t.Fatalf("unsafe healthcheck URL accepted: %q", value)
+		}
 	}
 }

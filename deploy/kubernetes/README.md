@@ -174,8 +174,9 @@ helm upgrade --install asterferry-gateway ./deploy/helm/asterferry \
 The chart runs as UID/GID 10001, drops all capabilities, disables privilege
 escalation, uses a read-only root filesystem, disables ServiceAccount token
 automounting, and uses the RuntimeDefault seccomp profile. Management endpoints
-remain loopback-only; probes execute `wget` inside the container against
-`/healthz` and `/readyz`. On the first termination signal, AsterFerry marks
+remain loopback-only; probes execute the embedded `asterferry healthcheck`
+command inside the tool-free container against `/healthz` and `/readyz`. On
+the first termination signal, AsterFerry marks
 `/readyz` unavailable while keeping `/healthz` healthy, stops new admissions,
 and drains existing streams for `shutdown.grace_period_seconds` (30 seconds by
 default). The chart's 35-second `terminationGracePeriodSeconds` leaves a small

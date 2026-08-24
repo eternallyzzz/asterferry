@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-alpine AS dashboard-build
+FROM docker.io/library/node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS dashboard-build
 
 WORKDIR /src
 
@@ -10,7 +10,7 @@ RUN npm --prefix web/dashboard ci
 COPY web/dashboard ./web/dashboard
 RUN npm --prefix web/dashboard run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26.7-alpine AS build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.7-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -28,13 +28,7 @@ COPY --from=dashboard-build /src/internal/dashboard/dist ./internal/dashboard/di
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 	go build -trimpath -ldflags="-s -w -X asterferry/internal/buildinfo.Version=${VERSION} -X asterferry/internal/buildinfo.Commit=${COMMIT} -X asterferry/internal/buildinfo.BuildDate=${BUILD_DATE}" -o /out/asterferry ./cmd/asterferry
 
-FROM alpine:3.20
-
-RUN apk add --no-cache ca-certificates wget \
-    && addgroup -S -g 10001 asterferry \
-    && adduser -S -D -H -u 10001 -G asterferry asterferry \
-    && mkdir -p /etc/asterferry/secrets \
-    && chown -R asterferry:asterferry /etc/asterferry
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 COPY --from=build /out/asterferry /usr/local/bin/asterferry
 

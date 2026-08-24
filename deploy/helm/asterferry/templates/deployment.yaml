@@ -78,10 +78,9 @@ spec:
           readinessProbe:
             exec:
               command:
-                - wget
-                - -q
-                - -O
-                - "-"
+                - /usr/local/bin/asterferry
+                - healthcheck
+                - --url
                 - http://127.0.0.1:{{ include "asterferry.managementPort" . | trim }}/readyz
             initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.periodSeconds }}
@@ -90,10 +89,9 @@ spec:
           livenessProbe:
             exec:
               command:
-                - wget
-                - -q
-                - -O
-                - "-"
+                - /usr/local/bin/asterferry
+                - healthcheck
+                - --url
                 - http://127.0.0.1:{{ include "asterferry.managementPort" . | trim }}/healthz
             initialDelaySeconds: {{ .Values.probes.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.periodSeconds }}

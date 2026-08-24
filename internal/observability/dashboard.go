@@ -74,20 +74,26 @@ type AgentReverseSnapshot struct {
 }
 
 type MetricsSnapshot struct {
-	Connections                 int64               `json:"connections"`
-	ActiveStreams               int64               `json:"active_streams"`
-	Draining                    bool                `json:"draining"`
-	Shutdowns                   uint64              `json:"shutdowns_total"`
-	ForcedShutdowns             uint64              `json:"forced_shutdowns_total"`
-	BytesIn                     uint64              `json:"bytes_in_total"`
-	BytesOut                    uint64              `json:"bytes_out_total"`
-	AuthFailures                uint64              `json:"auth_failures_total"`
-	MappingFailures             uint64              `json:"mapping_failures_total"`
-	ObfuscationAccepted         uint64              `json:"obfuscation_packets_accepted_total"`
-	ObfuscationRejected         uint64              `json:"obfuscation_packets_rejected_total"`
-	ObfuscationPreviousKey      uint64              `json:"obfuscation_previous_key_total"`
-	ObfuscationFragmentsDropped uint64              `json:"obfuscation_fragments_dropped_total"`
-	QUIC                        QUICMetricsSnapshot `json:"quic"`
+	Connections                    int64               `json:"connections"`
+	ActiveStreams                  int64               `json:"active_streams"`
+	Draining                       bool                `json:"draining"`
+	Shutdowns                      uint64              `json:"shutdowns_total"`
+	ForcedShutdowns                uint64              `json:"forced_shutdowns_total"`
+	BytesIn                        uint64              `json:"bytes_in_total"`
+	BytesOut                       uint64              `json:"bytes_out_total"`
+	AuthFailures                   uint64              `json:"auth_failures_total"`
+	ManagementAuthFailures         uint64              `json:"management_auth_failures_total"`
+	ManagementAuthRateLimited      uint64              `json:"management_auth_rate_limited_total"`
+	ManagementActionsAccepted      uint64              `json:"management_actions_accepted_total"`
+	ManagementActionsRejected      uint64              `json:"management_actions_rejected_total"`
+	ManagementEventStreamsRejected uint64              `json:"management_event_stream_rejections_total"`
+	ManagementEventSubscribers     int64               `json:"management_event_subscribers"`
+	MappingFailures                uint64              `json:"mapping_failures_total"`
+	ObfuscationAccepted            uint64              `json:"obfuscation_packets_accepted_total"`
+	ObfuscationRejected            uint64              `json:"obfuscation_packets_rejected_total"`
+	ObfuscationPreviousKey         uint64              `json:"obfuscation_previous_key_total"`
+	ObfuscationFragmentsDropped    uint64              `json:"obfuscation_fragments_dropped_total"`
+	QUIC                           QUICMetricsSnapshot `json:"quic"`
 }
 
 type QUICMetricsSnapshot struct {
@@ -107,19 +113,25 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		return MetricsSnapshot{}
 	}
 	return MetricsSnapshot{
-		Connections:                 m.Connections.Load(),
-		ActiveStreams:               m.ActiveStreams.Load(),
-		Draining:                    m.Draining.Load(),
-		Shutdowns:                   m.Shutdowns.Load(),
-		ForcedShutdowns:             m.ForcedShutdowns.Load(),
-		BytesIn:                     m.BytesIn.Load(),
-		BytesOut:                    m.BytesOut.Load(),
-		AuthFailures:                m.AuthFailures.Load(),
-		MappingFailures:             m.MappingFailures.Load(),
-		ObfuscationAccepted:         m.ObfuscationAccepted.Load(),
-		ObfuscationRejected:         m.ObfuscationRejected.Load(),
-		ObfuscationPreviousKey:      m.ObfuscationPreviousKey.Load(),
-		ObfuscationFragmentsDropped: m.ObfuscationFragmentsDropped.Load(),
+		Connections:                    m.Connections.Load(),
+		ActiveStreams:                  m.ActiveStreams.Load(),
+		Draining:                       m.Draining.Load(),
+		Shutdowns:                      m.Shutdowns.Load(),
+		ForcedShutdowns:                m.ForcedShutdowns.Load(),
+		BytesIn:                        m.BytesIn.Load(),
+		BytesOut:                       m.BytesOut.Load(),
+		AuthFailures:                   m.AuthFailures.Load(),
+		ManagementAuthFailures:         m.ManagementAuthFailures.Load(),
+		ManagementAuthRateLimited:      m.ManagementAuthRateLimited.Load(),
+		ManagementActionsAccepted:      m.ManagementActionsAccepted.Load(),
+		ManagementActionsRejected:      m.ManagementActionsRejected.Load(),
+		ManagementEventStreamsRejected: m.ManagementEventStreamsRejected.Load(),
+		ManagementEventSubscribers:     m.ManagementEventSubscribers.Load(),
+		MappingFailures:                m.MappingFailures.Load(),
+		ObfuscationAccepted:            m.ObfuscationAccepted.Load(),
+		ObfuscationRejected:            m.ObfuscationRejected.Load(),
+		ObfuscationPreviousKey:         m.ObfuscationPreviousKey.Load(),
+		ObfuscationFragmentsDropped:    m.ObfuscationFragmentsDropped.Load(),
 		QUIC: QUICMetricsSnapshot{
 			RTTMicros:       m.QUICRTTMicros.Load(),
 			BytesSent:       m.QUICBytesSent.Load(),

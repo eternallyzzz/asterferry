@@ -68,6 +68,7 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 		newValidateCommand(),
 		newDoctorCommand(),
 		newStatusCommand(),
+		newHealthcheckCommand(),
 		newGatewayCommand(),
 		newAgentCommand(),
 	)
@@ -217,6 +218,28 @@ func newStatusCommand() *cobra.Command {
 	addConfigFlag(cmd, &path)
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "write the status as formatted JSON")
 	cmd.Flags().DurationVar(&timeout, "timeout", 3*time.Second, "HTTP request timeout")
+	return cmd
+}
+
+func newHealthcheckCommand() *cobra.Command {
+	var (
+		target  string
+		timeout time.Duration
+	)
+	cmd := &cobra.Command{
+		Use:   "healthcheck",
+		Short: "check an HTTP health endpoint without a configuration file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !healthcheckURLIsSafe(target) {
+				return &codedError{code: 2, err: errors.New("--url must be an absolute http or https URL")}
+			}
+			return runHealthcheck(cmd.OutOrStdout(), target, timeout)
+		},
+	}
+	cmd.Flags().StringVar(&target, "url", "", "health endpoint URL")
+	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Second, "HTTP request timeout")
+	_ = cmd.MarkFlagRequired("url")
 	return cmd
 }
 

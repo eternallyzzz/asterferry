@@ -97,6 +97,10 @@ Both services use a read-only root filesystem, drop all Linux capabilities, and
 disable privilege escalation. Certificates, private keys, and tokens are
 mounted read-only and are never copied into the image.
 
+The final image is a digest-pinned distroless runtime with no shell, wget, or
+package manager. Compose healthchecks invoke the embedded
+`asterferry healthcheck` command directly.
+
 The Compose healthchecks call the loopback-only management endpoints. They do
 not publish management ports to the host.
 

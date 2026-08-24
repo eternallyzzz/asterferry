@@ -9,6 +9,12 @@ export interface MetricsSnapshot {
   bytes_in_total: number;
   bytes_out_total: number;
   auth_failures_total: number;
+  management_auth_failures_total: number;
+  management_auth_rate_limited_total: number;
+  management_actions_accepted_total: number;
+  management_actions_rejected_total: number;
+  management_event_stream_rejections_total: number;
+  management_event_subscribers: number;
   mapping_failures_total: number;
   obfuscation_packets_accepted_total: number;
   obfuscation_packets_rejected_total: number;

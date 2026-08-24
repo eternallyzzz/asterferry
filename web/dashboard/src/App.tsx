@@ -247,6 +247,8 @@ function DashboardView(props: { snapshot: DashboardSnapshot; trend: TrendState; 
         <MetricCard label="Throughput out" value={formatRate(outputRate)} detail={formatBytes(metrics.bytes_out_total) + " total"} />
         <MetricCard label={snapshot.role === "gateway" ? "Reverse mappings" : "Reverse registrations"} value={String(mappings)} detail={snapshot.role === "gateway" ? "public listeners" : "configured tunnels"} />
         <MetricCard label="QUIC RTT" value={formatDuration(metrics.quic.rtt_microseconds / 1000)} detail={metrics.quic.packets_lost + " packets lost"} tone={metrics.quic.packets_lost > 0 ? "warn" : "good"} />
+        <MetricCard label="Management auth" value={String(metrics.management_auth_failures_total)} detail={metrics.management_auth_rate_limited_total + " rate-limited"} tone={metrics.management_auth_failures_total > 0 || metrics.management_auth_rate_limited_total > 0 ? "warn" : "good"} />
+        <MetricCard label="Management actions" value={String(metrics.management_actions_accepted_total)} detail={metrics.management_actions_rejected_total + " rejected · " + metrics.management_event_subscribers + " SSE"} tone={metrics.management_actions_rejected_total > 0 ? "warn" : "good"} />
       </section>
 
       <section className="chart-grid">

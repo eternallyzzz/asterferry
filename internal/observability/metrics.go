@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -42,6 +43,13 @@ type Metrics struct {
 	QUICPacketsLost     atomic.Uint64
 	QUICGSO             atomic.Bool
 	QUICStatsSamples    atomic.Uint64
+
+	ManagementAuthFailures         atomic.Uint64
+	ManagementAuthRateLimited      atomic.Uint64
+	ManagementActionsAccepted      atomic.Uint64
+	ManagementActionsRejected      atomic.Uint64
+	ManagementEventStreamsRejected atomic.Uint64
+	ManagementEventSubscribers     atomic.Int64
 }
 
 func (m *Metrics) BeginDrain() {
@@ -118,6 +126,7 @@ type ServerOptions struct {
 	Events    *EventHub
 	Actions   ActionProvider
 	Dashboard http.Handler
+	Logger    *slog.Logger
 }
 
 func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte, options ...ServerOptions) (*Server, error) {
@@ -131,6 +140,7 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 	if len(options) > 0 {
 		serverOptions = options[0]
 	}
+	auth := newAuthGuard(time.Now)
 	mux := http.NewServeMux()
 	if serverOptions.Dashboard != nil {
 		mux.Handle("/dashboard/", http.StripPrefix("/dashboard", serverOptions.Dashboard))
@@ -150,13 +160,30 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 	})
 	protected := func(next http.HandlerFunc) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !authorized(r, authToken) {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="asterferry-management"`)
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte("unauthorized\n"))
+			valid := authorized(r, authToken)
+			if valid {
+				auth.reset()
+				next(w, r)
 				return
 			}
-			next(w, r)
+			if blocked, retryAfter := auth.blocked(); blocked {
+				metrics.ManagementAuthRateLimited.Add(1)
+				auditManagement(serverOptions.Logger, "management authentication rate limited", "management.auth.rate_limited", "error_kind", "rate_limited")
+				writeRateLimited(w, retryAfter)
+				return
+			}
+			limited, retryAfter := auth.recordFailure()
+			if limited {
+				metrics.ManagementAuthRateLimited.Add(1)
+				auditManagement(serverOptions.Logger, "management authentication rate limited", "management.auth.rate_limited", "error_kind", "rate_limited")
+				writeRateLimited(w, retryAfter)
+				return
+			}
+			metrics.ManagementAuthFailures.Add(1)
+			auditManagement(serverOptions.Logger, "management authentication rejected", "management.auth.rejected", "error_kind", "invalid_credentials")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="asterferry-management"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("unauthorized\n"))
 		})
 	}
 	mux.Handle("/metrics", protected(func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) }))
@@ -169,25 +196,26 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 		}
 		b, err := json.Marshal(provider.Status())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			logManagementError(serverOptions.Logger, "management status serialization failed", "management.status.serialize_failed")
+			writeActionError(w, http.StatusInternalServerError, "status_unavailable", "status is temporarily unavailable")
 			return
 		}
 		_, _ = w.Write(b)
 	}))
 	mux.Handle("/v1/dashboard", protected(func(w http.ResponseWriter, _ *http.Request) {
-		serveDashboardSnapshot(w, provider, metrics)
+		serveDashboardSnapshot(w, provider, metrics, serverOptions.Logger)
 	}))
 	if serverOptions.Events != nil {
 		mux.Handle("/v1/events", protected(func(w http.ResponseWriter, r *http.Request) {
-			serveEvents(w, r, serverOptions.Events)
+			serveEvents(w, r, serverOptions.Events, metrics, serverOptions.Logger)
 		}))
 	}
 	if serverOptions.Actions != nil {
 		mux.Handle("/v1/actions/shutdown", protected(func(w http.ResponseWriter, r *http.Request) {
-			serveAction(w, r, serverOptions.Actions, "shutdown")
+			serveAction(w, r, serverOptions.Actions, "shutdown", metrics, serverOptions.Logger)
 		}))
 		mux.Handle("/v1/actions/reconnect", protected(func(w http.ResponseWriter, r *http.Request) {
-			serveAction(w, r, serverOptions.Actions, "reconnect")
+			serveAction(w, r, serverOptions.Actions, "reconnect", metrics, serverOptions.Logger)
 		}))
 	}
 	ln, err := net.Listen("tcp", listen)
@@ -196,16 +224,30 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 	}
 	hs := &http.Server{
 		Addr:              listen,
-		Handler:           mux,
+		Handler:           withManagementHeaders(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    64 << 10,
+		// SSE is intentionally long-lived. serveEvents applies a rolling
+		// deadline per event/heartbeat so slow dead clients are still bounded.
+		WriteTimeout:   0,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 64 << 10,
 	}
 	s := &Server{httpServer: hs, listener: ln, Metrics: metrics}
 	go func() { _ = hs.Serve(ln) }()
 	return s, nil
+}
+
+func withManagementHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func authorized(r *http.Request, token []byte) bool {
@@ -264,6 +306,12 @@ func writeMetrics(w http.ResponseWriter, m *Metrics) {
 	f("asterferry_bytes_in_total", m.BytesIn.Load())
 	f("asterferry_bytes_out_total", m.BytesOut.Load())
 	f("asterferry_auth_failures_total", m.AuthFailures.Load())
+	f("asterferry_management_auth_failures_total", m.ManagementAuthFailures.Load())
+	f("asterferry_management_auth_rate_limited_total", m.ManagementAuthRateLimited.Load())
+	f("asterferry_management_actions_accepted_total", m.ManagementActionsAccepted.Load())
+	f("asterferry_management_actions_rejected_total", m.ManagementActionsRejected.Load())
+	f("asterferry_management_event_stream_rejections_total", m.ManagementEventStreamsRejected.Load())
+	f("asterferry_management_event_subscribers", m.ManagementEventSubscribers.Load())
 	f("asterferry_mapping_failures_total", m.MappingFailures.Load())
 	f("asterferry_obfuscation_packets_accepted_total", m.ObfuscationAccepted.Load())
 	f("asterferry_obfuscation_packets_rejected_total", m.ObfuscationRejected.Load())

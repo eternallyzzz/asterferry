@@ -77,7 +77,8 @@ func TestManagementDashboardActionsAndSSE(t *testing.T) {
 	provider := &dashboardTestProvider{ready: true}
 	actions := &dashboardTestActions{}
 	hub := NewEventHub(1)
-	server, err := Start("127.0.0.1:0", &Metrics{}, provider, []byte(testManagementToken), ServerOptions{
+	metrics := &Metrics{}
+	server, err := Start("127.0.0.1:0", metrics, provider, []byte(testManagementToken), ServerOptions{
 		Events:    hub,
 		Actions:   actions,
 		Dashboard: dashboard.Handler(),
@@ -132,6 +133,9 @@ func TestManagementDashboardActionsAndSSE(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusAccepted || actions.reconnect.Load() != 1 {
 		t.Fatalf("reconnect response=%d calls=%d", response.StatusCode, actions.reconnect.Load())
+	}
+	if metrics.ManagementActionsAccepted.Load() != 2 {
+		t.Fatalf("accepted management actions = %d", metrics.ManagementActionsAccepted.Load())
 	}
 
 	record := slog.NewRecord(time.Now(), slog.LevelInfo, "event", 0)
@@ -198,6 +202,9 @@ func TestActionErrorsRemainStable(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusNotImplemented {
 		t.Fatalf("unsupported action status = %d", response.StatusCode)
+	}
+	if server.Metrics.ManagementActionsRejected.Load() != 1 {
+		t.Fatalf("rejected management actions = %d", server.Metrics.ManagementActionsRejected.Load())
 	}
 	_ = actions
 }

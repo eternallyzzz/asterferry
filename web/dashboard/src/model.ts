@@ -39,7 +39,7 @@ export function appendPoint(points: MetricPoint[], point: MetricPoint, limit = 6
 }
 
 export function snapshotErrorTotal(metrics: MetricsSnapshot): number {
-  return metrics.auth_failures_total + metrics.mapping_failures_total + metrics.obfuscation_packets_rejected_total;
+  return metrics.auth_failures_total + metrics.management_auth_failures_total + metrics.management_auth_rate_limited_total + metrics.mapping_failures_total + metrics.obfuscation_packets_rejected_total;
 }
 
 export function statusLabel(snapshot: { ready: boolean; state: string }): string {

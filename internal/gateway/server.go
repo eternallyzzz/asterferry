@@ -133,6 +133,7 @@ func (s *Gateway) Start() error {
 		Events:    s.events,
 		Actions:   s,
 		Dashboard: dashboard.Handler(),
+		Logger:    s.logger,
 	})
 	if err != nil {
 		_ = ep.Close()

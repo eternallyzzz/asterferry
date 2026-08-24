@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 )
 
-func serveDashboardSnapshot(w http.ResponseWriter, provider StatusProvider, metrics *Metrics) {
+const sseWriteDeadline = 30 * time.Second
+
+func serveDashboardSnapshot(w http.ResponseWriter, provider StatusProvider, metrics *Metrics, logger *slog.Logger) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	dashboard, ok := provider.(DashboardProvider)
@@ -26,11 +29,11 @@ func serveDashboardSnapshot(w http.ResponseWriter, provider StatusProvider, metr
 	}
 	snapshot.Metrics = metrics.Snapshot()
 	if err := json.NewEncoder(w).Encode(snapshot); err != nil {
-		return
+		logManagementError(logger, "management dashboard serialization failed", "management.dashboard.serialize_failed")
 	}
 }
 
-func serveEvents(w http.ResponseWriter, r *http.Request, hub *EventHub) {
+func serveEvents(w http.ResponseWriter, r *http.Request, hub *EventHub, metrics *Metrics, logger *slog.Logger) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -41,16 +44,24 @@ func serveEvents(w http.ResponseWriter, r *http.Request, hub *EventHub) {
 		writeActionError(w, http.StatusBadRequest, "invalid_last_event_id", "Last-Event-ID must be an unsigned integer")
 		return
 	}
-	stream, err := hub.Open(lastID)
-	if err != nil {
-		writeActionError(w, http.StatusTooManyRequests, "event_stream_busy", "event stream subscriber limit reached")
-		return
-	}
-	defer stream.Close()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeActionError(w, http.StatusNotImplemented, "streaming_unavailable", "streaming responses are unavailable")
 		return
+	}
+	stream, err := hub.Open(lastID)
+	if err != nil {
+		if metrics != nil {
+			metrics.ManagementEventStreamsRejected.Add(1)
+		}
+		auditManagement(logger, "management event stream rejected", "management.events.rejected", "error_kind", "subscriber_limit")
+		writeActionError(w, http.StatusTooManyRequests, "event_stream_busy", "event stream subscriber limit reached")
+		return
+	}
+	defer stream.Close()
+	if metrics != nil {
+		metrics.ManagementEventSubscribers.Add(1)
+		defer metrics.ManagementEventSubscribers.Add(-1)
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
@@ -63,15 +74,18 @@ func serveEvents(w http.ResponseWriter, r *http.Request, hub *EventHub) {
 	}
 	for _, event := range stream.Replay {
 		if expected > 0 && event.ID > expected {
+			refreshSSEDeadline(w)
 			if err := writeEventGap(w, expected, event.ID-1); err != nil {
 				return
 			}
 		}
+		refreshSSEDeadline(w)
 		if err := writeSSE(w, "log", event); err != nil {
 			return
 		}
 		expected = event.ID + 1
 	}
+	refreshSSEDeadline(w)
 	flusher.Flush()
 
 	ticker := time.NewTicker(15 * time.Second)
@@ -83,16 +97,19 @@ func serveEvents(w http.ResponseWriter, r *http.Request, hub *EventHub) {
 				return
 			}
 			if expected > 0 && event.ID > expected {
+				refreshSSEDeadline(w)
 				if err := writeEventGap(w, expected, event.ID-1); err != nil {
 					return
 				}
 			}
+			refreshSSEDeadline(w)
 			if err := writeSSE(w, "log", event); err != nil {
 				return
 			}
 			expected = event.ID + 1
 			flusher.Flush()
 		case <-ticker.C:
+			refreshSSEDeadline(w)
 			if _, err := fmt.Fprint(w, ": keep-alive\n\n"); err != nil {
 				return
 			}
@@ -103,23 +120,27 @@ func serveEvents(w http.ResponseWriter, r *http.Request, hub *EventHub) {
 	}
 }
 
-func serveAction(w http.ResponseWriter, r *http.Request, provider ActionProvider, name string) {
+func serveAction(w http.ResponseWriter, r *http.Request, provider ActionProvider, name string, metrics *Metrics, logger *slog.Logger) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		recordActionRejected(metrics, logger, name, "method_not_allowed")
 		return
 	}
 	if provider == nil {
+		recordActionRejected(metrics, logger, name, "action_unavailable")
 		writeActionError(w, http.StatusNotImplemented, "action_unavailable", "action is unavailable")
 		return
 	}
 	if name == "shutdown" {
 		if deferred, ok := provider.(DeferredShutdownProvider); ok {
 			if err := deferred.CanShutdown(); err != nil {
-				writeActionFailure(w, err)
+				code := writeActionFailure(w, err)
+				recordActionRejected(metrics, logger, name, code)
 				return
 			}
 			writeAcceptedAction(w, name)
+			recordActionAccepted(metrics)
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
@@ -132,13 +153,15 @@ func serveAction(w http.ResponseWriter, r *http.Request, provider ActionProvider
 		action = provider.RequestShutdown
 	}
 	if err := action(); err != nil {
-		writeActionFailure(w, err)
+		code := writeActionFailure(w, err)
+		recordActionRejected(metrics, logger, name, code)
 		return
 	}
+	recordActionAccepted(metrics)
 	writeAcceptedAction(w, name)
 }
 
-func writeActionFailure(w http.ResponseWriter, err error) {
+func writeActionFailure(w http.ResponseWriter, err error) string {
 	status := http.StatusConflict
 	code := "action_unavailable"
 	message := "action is unavailable"
@@ -149,6 +172,20 @@ func writeActionFailure(w http.ResponseWriter, err error) {
 		code, message = "action_busy", "action is already in progress"
 	}
 	writeActionError(w, status, code, message)
+	return code
+}
+
+func recordActionAccepted(metrics *Metrics) {
+	if metrics != nil {
+		metrics.ManagementActionsAccepted.Add(1)
+	}
+}
+
+func recordActionRejected(metrics *Metrics, logger *slog.Logger, name, reason string) {
+	if metrics != nil {
+		metrics.ManagementActionsRejected.Add(1)
+	}
+	auditManagement(logger, "management action rejected", "management.action.rejected", "action", name, "error_kind", reason)
 }
 
 func writeAcceptedAction(w http.ResponseWriter, name string) {
@@ -167,6 +204,10 @@ func parseLastEventID(value string) (uint64, error) {
 		return 0, nil
 	}
 	return strconv.ParseUint(value, 10, 64)
+}
+
+func refreshSSEDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(sseWriteDeadline))
 }
 
 func writeSSE(w http.ResponseWriter, eventName string, event Event) error {
@@ -196,4 +237,30 @@ func writeActionError(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]string{"code": code, "message": message},
 	})
+}
+
+func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int64((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	writeActionError(w, http.StatusTooManyRequests, "management_rate_limited", "management authentication is temporarily rate limited")
+}
+
+func auditManagement(logger *slog.Logger, message, event string, attrs ...any) {
+	if logger == nil {
+		return
+	}
+	args := make([]any, 0, len(attrs)+4)
+	args = append(args, "event", event, "security_audit", true)
+	args = append(args, attrs...)
+	logger.Warn(message, args...)
+}
+
+func logManagementError(logger *slog.Logger, message, event string) {
+	if logger == nil {
+		return
+	}
+	logger.Error(message, "event", event, "error_kind", "serialization")
 }

@@ -119,6 +119,8 @@ try {
     Require-Command "wsl.exe"
     Require-Command "docker"
     Require-Command "helm"
+    Require-Command "staticcheck"
+    Require-Command "govulncheck"
 
     $goVersion = (& go version).Trim()
     if ($goVersion -notlike "*$expectedGoVersion*") {
@@ -166,9 +168,13 @@ try {
     Invoke-Logged "Dashboard type check" "npm" @("--prefix", "web/dashboard", "run", "lint")
     Invoke-Logged "Dashboard unit tests" "npm" @("--prefix", "web/dashboard", "test")
     Invoke-Logged "Dashboard production build" "npm" @("--prefix", "web/dashboard", "run", "build")
+    Invoke-Logged "Dashboard dependency audit" "npm" @("--prefix", "web/dashboard", "audit", "--registry=https://registry.npmjs.org", "--omit=dev", "--audit-level=high")
     Invoke-Logged "Dashboard generated assets check" "git" @("diff", "--exit-code", "--", "internal/dashboard/dist")
 
+    Invoke-Logged "Go module verification" "go" @("mod", "verify")
     Invoke-Logged "Windows go vet" "go" @("vet", "./...")
+    Invoke-Logged "Windows staticcheck" "staticcheck" @("./...")
+    Invoke-Logged "Windows vulnerability check" "govulncheck" @("./...")
     Invoke-Logged "Windows full tests" "go" @("test", "-count=1", "./...")
     $uxDir = Join-Path $outputDir "ux-bundle"
     if (Test-Path -LiteralPath $uxDir) {
