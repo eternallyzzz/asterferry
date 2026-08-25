@@ -158,6 +158,36 @@ func TestWaitSignalsForceCloseHasBoundedWait(t *testing.T) {
 	}
 }
 
+func TestWaitSignalsForceCloseDoesNotWaitForeverForClose(t *testing.T) {
+	oldWait := forcedShutdownWait
+	forcedShutdownWait = 20 * time.Millisecond
+	t.Cleanup(func() { forcedShutdownWait = oldWait })
+	signals := make(chan os.Signal, 2)
+	signals <- os.Interrupt
+	signals <- os.Interrupt
+	shutdownRelease := make(chan struct{})
+	closeRelease := make(chan struct{})
+	started := make(chan struct{}, 1)
+	err := waitSignals(context.Background(), time.Second, func(context.Context) error {
+		<-shutdownRelease
+		return nil
+	}, func() error {
+		started <- struct{}{}
+		<-closeRelease
+		return nil
+	}, signals)
+	close(shutdownRelease)
+	close(closeRelease)
+	select {
+	case <-started:
+	default:
+		t.Fatal("forced close was not invoked")
+	}
+	if !errors.Is(err, ErrForcedShutdownTimeout) {
+		t.Fatalf("close timeout error = %v", err)
+	}
+}
+
 func TestWaitSignalsManagementRequestStartsGracefulShutdown(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	trigger := lifecycle.NewShutdownTrigger()

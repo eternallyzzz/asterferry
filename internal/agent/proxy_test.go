@@ -281,7 +281,7 @@ func TestHandleHTTPForwardsRequestAndStripsProxyCredentials(t *testing.T) {
 		a.handleHTTP(server, config.Inbound{Tag: "http"})
 		close(done)
 	}()
-	request := "GET http://127.0.0.1:8080/path HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\nConnection: close\r\n\r\n"
+	request := "GET http://127.0.0.1:8080/path HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\nConnection: close\r\n\r\n"
 	writeProxyBytes(t, client, []byte(request))
 	response := readProxyBytes(t, client, len("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
 	if string(response) != "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" {

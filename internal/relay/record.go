@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"asterferry/internal/protocol"
+	"asterferry/internal/random"
+	"asterferry/internal/transport"
 )
 
 const (
@@ -166,7 +168,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 		if len(c.writeBuffer) == 0 {
 			return written, errors.New("relay record batch has no payload capacity")
 		}
-		if err := writeAll(c.underlying, c.writeBuffer); err != nil {
+		if err := transport.WriteAll(c.underlying, c.writeBuffer); err != nil {
 			return batchStart, err
 		}
 	}
@@ -264,11 +266,11 @@ func (c *Conn) paddingLen(payloadLen int) int {
 			continue
 		}
 		available := int64(bucket) - base
-		var random [2]byte
-		if err := c.randomBytes(random[:]); err != nil {
+		value, err := random.Uint16n(uint32(available + 1))
+		if err != nil {
 			return int(available)
 		}
-		return int(int64(binary.BigEndian.Uint16(random[:])) % (available + 1))
+		return int(value)
 	}
 	return 0
 }
@@ -310,11 +312,11 @@ func PaddingLength(profile string, headerBytes, maxPadding int64) int {
 			continue
 		}
 		available := int64(bucket) - base
-		var b [2]byte
-		if _, err := rand.Read(b[:]); err != nil {
+		value, err := random.Uint16n(uint32(available + 1))
+		if err != nil {
 			return int(available)
 		}
-		return int(int64(binary.BigEndian.Uint16(b[:])) % (available + 1))
+		return int(value)
 	}
 	return 0
 }
@@ -346,20 +348,4 @@ func (c *Conn) CloseWrite() {
 		return
 	}
 	_ = c.underlying.Close()
-}
-
-func writeAll(w io.Writer, p []byte) error {
-	for len(p) > 0 {
-		n, err := w.Write(p)
-		if n > 0 {
-			p = p[n:]
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
 }

@@ -37,6 +37,33 @@ func TestFrameRoundTripAndBounds(t *testing.T) {
 	}
 }
 
+func TestLimitsFallbackAndFrameErrorHelpers(t *testing.T) {
+	limits := (Limits{MaxFrameBytes: 2048, MaxRecordBytes: 1024}).WithFallback(Limits{MaxFrameBytes: 4096, MaxRecordBytes: 2048, MaxUDPBytes: 512, MaxStreams: 4})
+	if limits.MaxFrameBytes != 2048 || limits.MaxRecordBytes != 1024 || limits.MaxUDPBytes != 512 || limits.MaxStreams != 4 {
+		t.Fatalf("limits fallback = %#v", limits)
+	}
+	if got := limits.EffectivePadding(4096); got != 1012 {
+		t.Fatalf("effective padding = %d, want 1012", got)
+	}
+	var wire bytes.Buffer
+	if err := WriteOpenError(&wire, 1, ErrorPolicyDenied, "denied", false, 1024); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := ReadFrame(&wire, 1024); err != nil || frame.Type != TypeOpenError {
+		t.Fatalf("open error frame = %#v, %v", frame, err)
+	}
+	wire.Reset()
+	if err := WriteProtocolError(&wire, 2, ErrorInternal, "internal", true, 1024); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := ReadFrame(&wire, 1024); err != nil || frame.Type != TypeError {
+		t.Fatalf("protocol error frame = %#v, %v", frame, err)
+	}
+	if got := MustMessageFrame(TypePing, 3, nil); got.Type != TypePing || got.RequestID != 3 {
+		t.Fatalf("must frame = %#v", got)
+	}
+}
+
 func TestV5FrameHeaderAndPayloadAreStrict(t *testing.T) {
 	var wire bytes.Buffer
 	if err := WriteFrame(&wire, Frame{Type: TypeData, RequestID: 9, Payload: []byte("x")}, 1024); err != nil {

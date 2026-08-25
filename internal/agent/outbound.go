@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"asterferry/internal/dial"
 	"asterferry/internal/proxy"
 	"asterferry/internal/relay"
 	"asterferry/internal/transport"
@@ -62,78 +63,22 @@ func dialTarget(ctx context.Context, target proxy.Target, timeout time.Duration)
 	if len(addresses) == 0 {
 		return (&net.Dialer{Timeout: timeout}).DialContext(ctx, target.Network, target.Address())
 	}
-	if target.Network != "tcp" || len(addresses) == 1 {
-		var first error
-		for _, address := range addresses {
-			conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, target.Network, net.JoinHostPort(address, fmt.Sprint(target.Port)))
-			if err == nil {
-				return conn, nil
-			}
-			if first == nil {
-				first = err
-			}
-		}
-		return nil, first
+	fullAddresses := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		fullAddresses = append(fullAddresses, net.JoinHostPort(address, fmt.Sprint(target.Port)))
 	}
-	return happyEyeballsDial(ctx, addresses, target.Port, timeout)
-}
-
-func happyEyeballsDial(ctx context.Context, addresses []string, port uint16, timeout time.Duration) (net.Conn, error) {
-	if len(addresses) == 0 {
-		return nil, errors.New("no destination addresses")
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	type result struct {
-		conn net.Conn
-		err  error
-	}
-	results := make(chan result)
-	for i, address := range addresses {
-		go func(index int, address string) {
-			if index > 0 {
-				timer := time.NewTimer(time.Duration(index) * 200 * time.Millisecond)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-ctx.Done():
-					return
-				}
-			}
-			conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", net.JoinHostPort(address, fmt.Sprint(port)))
-			if err == nil {
-				select {
-				case results <- result{conn: conn}:
-				case <-ctx.Done():
-					_ = conn.Close()
-				}
-				return
-			}
-			select {
-			case results <- result{err: err}:
-			case <-ctx.Done():
-			}
-		}(i, address)
+	if target.Network == "tcp" {
+		return dial.TCP(ctx, fullAddresses, timeout)
 	}
 	var first error
-	for range addresses {
-		select {
-		case result := <-results:
-			if result.err == nil {
-				cancel()
-				return result.conn, nil
-			}
-			if first == nil {
-				first = result.err
-			}
-		case <-ctx.Done():
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
+	for _, address := range fullAddresses {
+		conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, target.Network, address)
+		if err == nil {
+			return conn, nil
 		}
-	}
-	if first == nil {
-		first = errors.New("all destination addresses failed")
+		if first == nil {
+			first = err
+		}
 	}
 	return nil, first
 }

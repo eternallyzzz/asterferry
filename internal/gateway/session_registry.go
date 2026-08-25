@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"asterferry/internal/cluster"
@@ -15,7 +16,7 @@ type sessionDirectory interface {
 	Remove(*Session)
 	Snapshot() []*Session
 	Count() int
-	CloseAll()
+	CloseAll() error
 }
 
 type sessionRegistry struct {
@@ -99,8 +100,12 @@ func (r *sessionRegistry) Count() int {
 	return len(r.sessions)
 }
 
-func (r *sessionRegistry) CloseAll() {
+func (r *sessionRegistry) CloseAll() error {
+	var errs []error
 	for _, sess := range r.Snapshot() {
-		sess.Close()
+		if err := sess.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	return errors.Join(errs...)
 }

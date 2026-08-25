@@ -11,6 +11,7 @@ import (
 
 	"asterferry/internal/cluster"
 	"asterferry/internal/config"
+	"asterferry/internal/lifecycle"
 	"asterferry/internal/relay"
 	"asterferry/internal/transport"
 )
@@ -19,6 +20,7 @@ type Mapping struct {
 	server     *Gateway
 	session    *Session
 	owner      cluster.Owner
+	specMu     sync.RWMutex
 	spec       transport.TunnelRegistration
 	key        string
 	ctx        context.Context
@@ -27,6 +29,8 @@ type Mapping struct {
 	udp        *net.UDPConn
 	once       sync.Once
 	acceptOnce sync.Once
+	acceptErr  error
+	closeErr   error
 	draining   atomic.Bool
 }
 
@@ -60,8 +64,27 @@ func newMapping(server *Gateway, session *Session, spec transport.TunnelRegistra
 	return m, nil
 }
 
+func (m *Mapping) specSnapshot() transport.TunnelRegistration {
+	if m == nil {
+		return transport.TunnelRegistration{}
+	}
+	m.specMu.RLock()
+	spec := m.spec
+	m.specMu.RUnlock()
+	return spec
+}
+
+func (m *Mapping) updateSpec(spec transport.TunnelRegistration) {
+	if m == nil {
+		return
+	}
+	m.specMu.Lock()
+	m.spec = spec
+	m.specMu.Unlock()
+}
+
 func (m *Mapping) Run() {
-	if m.spec.Protocol == "tcp" {
+	if m.specSnapshot().Protocol == "tcp" {
 		m.runTCP()
 		return
 	}
@@ -71,12 +94,18 @@ func (m *Mapping) Run() {
 // BeginDrain closes only the public listener. Existing TCP connections and
 // UDP associations retain the mapping context until the final close.
 func (m *Mapping) BeginDrain() {
-	if m == nil || m.draining.Swap(true) {
+	if m == nil {
+		return
+	}
+	if m.draining.Swap(true) {
+		// A concurrent first caller may still be inside acceptOnce; wait for it
+		// so Close can safely read the recorded listener error.
+		m.acceptOnce.Do(func() {})
 		return
 	}
 	m.acceptOnce.Do(func() {
 		if m.tcp != nil {
-			_ = m.tcp.Close()
+			m.acceptErr = m.tcp.Close()
 		}
 	})
 }
@@ -92,16 +121,17 @@ func (m *Mapping) Ownership() cluster.Owner {
 }
 
 func (m *Mapping) Close() error {
-	var err error
 	m.once.Do(func() {
-		m.server.logger.Info("mapping closing", "event", "gateway.mapping.closing", "mapping", m.spec.Name)
+		m.server.logger.Info("mapping closing", "event", "gateway.mapping.closing", "mapping", m.specSnapshot().Name)
 		m.BeginDrain()
 		m.cancel()
+		errs := []error{m.acceptErr}
 		if m.udp != nil {
-			err = m.udp.Close()
+			errs = append(errs, m.udp.Close())
 		}
+		m.closeErr = errors.Join(errs...)
 	})
-	return err
+	return m.closeErr
 }
 
 func (m *Mapping) runTCP() {
@@ -140,26 +170,27 @@ func (m *Mapping) runTCP() {
 
 func (m *Mapping) handleTCP(local net.Conn) {
 	defer local.Close()
+	spec := m.specSnapshot()
 	stream, err := m.session.openStream(m.ctx)
 	if err != nil {
-		m.server.logger.Info("reverse stream open failed", "event", "gateway.reverse.open_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
+		m.server.logger.Info("reverse stream open failed", "event", "gateway.reverse.open_failed", "mapping", spec.Name, "error_kind", lifecycle.ErrorKind(err))
 		m.server.metrics.MappingFailures.Add(1)
 		return
 	}
 	defer stream.Close()
 	requestID := uint64(1)
-	open, _ := transport.MessageFrame(transport.TypeOpenReverse, requestID, transport.OpenReverse{Name: m.spec.Name, Protocol: "tcp", Profile: m.spec.Profile})
-	if err := writeFrame(stream, open, m.session.maxFrame()); err != nil {
-		m.server.logger.Info("reverse open write failed", "event", "gateway.reverse.open_write_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
+	open := transport.MustMessageFrame(transport.TypeOpenReverse, requestID, transport.OpenReverse{Name: spec.Name, Protocol: "tcp", Profile: spec.Profile})
+	if err := transport.WriteFrame(stream, open, m.session.maxFrame()); err != nil {
+		m.server.logger.Info("reverse open write failed", "event", "gateway.reverse.open_write_failed", "mapping", spec.Name, "error_kind", lifecycle.ErrorKind(err))
 		return
 	}
-	if !m.waitOpenOK(stream, requestID) {
-		m.server.logger.Info("reverse open rejected", "event", "gateway.reverse.rejected", "mapping", m.spec.Name)
+	if !m.waitOpenOK(stream, requestID, spec.Name) {
+		m.server.logger.Info("reverse open rejected", "event", "gateway.reverse.rejected", "mapping", spec.Name)
 		return
 	}
 	m.server.metrics.ActiveStreams.Add(1)
 	defer m.server.metrics.ActiveStreams.Add(-1)
-	profile, err := m.session.relayProfile(m.spec.Profile)
+	profile, err := m.session.relayProfile(spec.Profile)
 	if err != nil {
 		return
 	}
@@ -167,7 +198,7 @@ func (m *Mapping) handleTCP(local net.Conn) {
 	relay.BidirectionalWithIdle(m.ctx, local, remote, time.Duration(m.server.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { m.server.metrics.BytesIn.Add(n) }, Out: func(n uint64) { m.server.metrics.BytesOut.Add(n) }})
 }
 
-func (m *Mapping) waitOpenOK(stream transport.Stream, requestID uint64) bool {
+func (m *Mapping) waitOpenOK(stream transport.Stream, requestID uint64, mappingName string) bool {
 	handshakeCtx, cancelHandshake := context.WithTimeout(m.ctx, time.Duration(m.server.cfg.Transport.HandshakeTimeoutSec)*time.Second)
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	f, err := transport.ReadFrame(stream, transport.HandshakeMaxFrame)
@@ -175,7 +206,7 @@ func (m *Mapping) waitOpenOK(stream transport.Stream, requestID uint64) bool {
 	stopStreamContext()
 	_ = transport.SetStreamContext(stream, m.ctx)
 	if err != nil {
-		m.server.logger.Info("reverse status read failed", "event", "gateway.reverse.status_failed", "mapping", m.spec.Name, "error_kind", errorKind(err))
+		m.server.logger.Info("reverse status read failed", "event", "gateway.reverse.status_failed", "mapping", mappingName, "error_kind", lifecycle.ErrorKind(err))
 		return false
 	}
 	if f.Type != transport.TypeOpenOK || f.RequestID != requestID {
@@ -191,6 +222,8 @@ func (m *Mapping) waitOpenOK(stream transport.Stream, requestID uint64) bool {
 type udpAssociation struct {
 	stream  transport.Stream
 	addr    *net.UDPAddr
+	name    string
+	profile string
 	last    time.Time
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -296,8 +329,12 @@ func (m *Mapping) runUDP() {
 				}
 				mu.Unlock()
 				a.mu.Lock()
-				f, _ := transport.MessageFrame(transport.TypeData, 0, transport.NewData(buf[:n], m.spec.Profile, m.session.maxPadding()))
-				err = writeFrame(a.stream, f, m.session.maxFrame())
+				f, frameErr := transport.MessageFrame(transport.TypeData, 0, transport.NewData(buf[:n], a.profile, m.session.maxPadding()))
+				if frameErr != nil {
+					err = frameErr
+				} else {
+					err = transport.WriteFrame(a.stream, f, m.session.maxFrame())
+				}
 				a.mu.Unlock()
 				if err != nil {
 					mu.Lock()
@@ -319,6 +356,7 @@ func (m *Mapping) runUDP() {
 }
 
 func (m *Mapping) openUDPAssociation(addr *net.UDPAddr, release func()) *udpAssociation {
+	spec := m.specSnapshot()
 	stream, err := m.session.openStream(m.ctx)
 	if err != nil {
 		if release != nil {
@@ -327,10 +365,10 @@ func (m *Mapping) openUDPAssociation(addr *net.UDPAddr, release func()) *udpAsso
 		return nil
 	}
 	_, cancel := context.WithCancel(m.ctx)
-	association := &udpAssociation{stream: stream, addr: addr, last: time.Now(), cancel: cancel, release: release}
+	association := &udpAssociation{stream: stream, addr: addr, name: spec.Name, profile: spec.Profile, last: time.Now(), cancel: cancel, release: release}
 	requestID := uint64(1)
-	open, _ := transport.MessageFrame(transport.TypeOpenReverse, requestID, transport.OpenReverse{Name: m.spec.Name, Protocol: "udp", Profile: m.spec.Profile})
-	if err := writeFrame(stream, open, m.session.maxFrame()); err != nil || !m.waitOpenOK(stream, requestID) {
+	open := transport.MustMessageFrame(transport.TypeOpenReverse, requestID, transport.OpenReverse{Name: spec.Name, Protocol: "udp", Profile: spec.Profile})
+	if err := transport.WriteFrame(stream, open, m.session.maxFrame()); err != nil || !m.waitOpenOK(stream, requestID, spec.Name) {
 		closeUDPAssociation(association)
 		return nil
 	}

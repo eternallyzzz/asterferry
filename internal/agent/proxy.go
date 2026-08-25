@@ -20,6 +20,7 @@ import (
 	"asterferry/internal/logging"
 
 	"asterferry/internal/config"
+	"asterferry/internal/lifecycle"
 	"asterferry/internal/proxy"
 	"asterferry/internal/relay"
 	"asterferry/internal/transport"
@@ -189,7 +190,7 @@ func (a *Agent) handleSOCKSConnect(conn net.Conn, br *bufio.Reader, tag, host st
 	route, resolvedIPs := a.routeTarget(tag, host)
 	remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: port, ResolvedIPs: resolvedIPs}, proxy.Path(route))
 	if err != nil {
-		a.logProxyEvent(tag, "socks5", host, port, route, "open_failed", route, agentErrorKind(err))
+		a.logProxyEvent(tag, "socks5", host, port, route, "open_failed", route, lifecycle.ErrorKind(err))
 		socksReply(conn, 5, nil, 0)
 		return
 	}
@@ -360,6 +361,7 @@ type udpPath struct {
 	limits     transport.Limits
 	ctx        context.Context
 	cancel     context.CancelFunc
+	closeOnce  sync.Once
 }
 
 func (p *udpPath) touch() {
@@ -369,19 +371,25 @@ func (p *udpPath) touch() {
 }
 
 func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, client *net.UDPConn, source *net.UDPAddr) *udpPath {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pathCtx, cancel := context.WithCancel(ctx)
 	limits := transport.LimitsFromConfig(a.cfg.Limits, a.cfg.StreamLimit)
-	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: ctx, limits: limits}
+	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: pathCtx, cancel: cancel, limits: limits}
 	p.touch()
 	routeName, resolvedIPs := a.routeTarget(tag, host)
 	route := proxy.Path(routeName)
-	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port, ResolvedIPs: resolvedIPs}, route)
+	remote, err := a.outbound.OpenDatagram(pathCtx, proxy.Target{Network: "udp", Host: host, Port: port, ResolvedIPs: resolvedIPs}, route)
 	if err != nil {
+		cancel()
 		return nil
 	}
 	if route == proxy.PathDirect {
 		udpConn, ok := remote.(net.Conn)
 		if !ok {
 			_ = remote.Close()
+			cancel()
 			return nil
 		}
 		p.conn = udpConn
@@ -396,44 +404,39 @@ func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, c
 }
 
 func (p *udpPath) maxFrame() int64 {
-	if p != nil && p.limits.MaxFrameBytes > 0 {
-		return p.limits.MaxFrameBytes
+	if p == nil || p.agent == nil {
+		return transport.DefaultMaxFrame
 	}
-	if p != nil && p.agent != nil {
-		return p.agent.cfg.Limits.MaxFrameBytes
+	limits := p.limits.WithFallback(transport.LimitsFromConfig(p.agent.cfg.Limits, p.agent.cfg.StreamLimit))
+	if limits.MaxFrameBytes <= 0 {
+		return transport.DefaultMaxFrame
 	}
-	return transport.DefaultMaxFrame
+	return limits.MaxFrameBytes
 }
 
 func (p *udpPath) maxUDP() int64 {
-	if p != nil && p.limits.MaxUDPBytes > 0 {
-		return p.limits.MaxUDPBytes
+	if p == nil || p.agent == nil {
+		return 0
 	}
-	if p != nil && p.agent != nil {
-		return p.agent.cfg.Limits.MaxUDPBytes
-	}
-	return 0
+	return p.limits.WithFallback(transport.LimitsFromConfig(p.agent.cfg.Limits, p.agent.cfg.StreamLimit)).MaxUDPBytes
 }
 
 func (p *udpPath) maxPadding() int64 {
 	if p == nil || p.agent == nil {
 		return 0
 	}
-	padding := p.agent.cfg.Obfuscation.MaxPaddingBytes
-	if max := p.limits.MaxRecordBytes - 12; max >= 0 && padding > max {
-		padding = max
-	}
-	return padding
+	limits := p.limits.WithFallback(transport.LimitsFromConfig(p.agent.cfg.Limits, p.agent.cfg.StreamLimit))
+	return limits.EffectivePadding(p.agent.cfg.Obfuscation.MaxPaddingBytes)
 }
 
 func (p *udpPath) write(payload []byte) error {
 	p.touch()
 	if p.remote {
-		f, err := transport.MessageFrame(transport.TypeData, 0, transport.NewData(payload, p.agent.profile(p.agent.cfg.Obfuscation.ProxyProfile), p.maxPadding()))
+		f, err := transport.MessageFrame(transport.TypeData, 0, transport.NewData(payload, p.agent.cfg.Obfuscation.ProxyProfile, p.maxPadding()))
 		if err != nil {
 			return err
 		}
-		return writeFrame(p.stream, f, p.maxFrame())
+		return transport.WriteFrame(p.stream, f, p.maxFrame())
 	}
 	_, err := p.conn.Write(payload)
 	return err
@@ -486,15 +489,20 @@ func (p *udpPath) readResponses() {
 }
 
 func (p *udpPath) close() {
-	if p.cancel != nil {
-		p.cancel()
+	if p == nil {
+		return
 	}
-	if p.stream != nil {
-		_ = p.stream.Close()
-	}
-	if p.conn != nil {
-		_ = p.conn.Close()
-	}
+	p.closeOnce.Do(func() {
+		if p.cancel != nil {
+			p.cancel()
+		}
+		if p.stream != nil {
+			_ = p.stream.Close()
+		}
+		if p.conn != nil {
+			_ = p.conn.Close()
+		}
+	})
 }
 
 func socksDatagram(target string, payload []byte) []byte {
@@ -534,7 +542,7 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	br := bufio.NewReader(&httpHeaderLimitReader{Reader: conn, Max: 64 << 10})
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		a.logger.Info("HTTP request parse failed", "event", "proxy.http.parse_failed", "inbound", in.Tag, "error_kind", agentErrorKind(err))
+		a.logger.Info("HTTP request parse failed", "event", "proxy.http.parse_failed", "inbound", in.Tag, "error_kind", lifecycle.ErrorKind(err))
 		return
 	}
 	if in.User != "" {
@@ -549,16 +557,29 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	req.Header.Del("Proxy-Authorization")
 	stripHopByHopHeaders(req.Header)
 	_ = conn.SetDeadline(time.Time{})
-	if len(req.RequestURI) > transport.MaxEndpointBytes || len(req.Host) > transport.MaxEndpointBytes || strings.ContainsAny(req.Host, "\x00\r\n") {
+	authority := req.Host
+	if req.Method != http.MethodConnect && req.URL != nil && req.URL.Host != "" {
+		authority = req.URL.Host
+	}
+	if req.URL != nil && req.URL.User != nil {
 		return
 	}
-	host, portText, err := net.SplitHostPort(req.Host)
+	if authority == "" || len(req.RequestURI) > transport.MaxEndpointBytes || len(authority) > transport.MaxEndpointBytes || strings.ContainsAny(authority, "\x00\r\n") || strings.Contains(authority, "@") {
+		return
+	}
+	host, portText, err := net.SplitHostPort(authority)
 	if err != nil {
-		host = req.Host
+		host = authority
+		if strings.Contains(host, ":") {
+			return
+		}
 		portText = "80"
 		if req.Method == http.MethodConnect {
 			portText = "443"
 		}
+	}
+	if host == "" {
+		return
 	}
 	portNum, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || portNum == 0 {
@@ -569,7 +590,7 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 		route, resolvedIPs := a.routeTarget(in.Tag, host)
 		remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIPs: resolvedIPs}, proxy.Path(route))
 		if err != nil {
-			a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
+			a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "open_failed", route, lifecycle.ErrorKind(err))
 			return
 		}
 		defer remote.Close()
@@ -583,12 +604,12 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 	route, resolvedIPs := a.routeTarget(in.Tag, host)
 	remote, err = a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIPs: resolvedIPs}, proxy.Path(route))
 	if err != nil {
-		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
+		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "open_failed", route, lifecycle.ErrorKind(err))
 		return
 	}
 	defer remote.Close()
 	if err := req.Write(remote); err != nil {
-		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "write_failed", route, agentErrorKind(err))
+		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "write_failed", route, lifecycle.ErrorKind(err))
 		return
 	}
 	if flusher, ok := remote.(interface{ Flush() }); ok {

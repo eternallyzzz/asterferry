@@ -47,7 +47,6 @@ func waitGatewayCall(t *testing.T, done <-chan struct{}) {
 
 func TestGatewayEgressUDPProxyRoundTrip(t *testing.T) {
 	g := configuredGatewayForHelpers()
-	g.egress = newEgressProxy(g)
 	target, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +71,7 @@ func TestGatewayEgressUDPProxyRoundTrip(t *testing.T) {
 	defer sess.cancel()
 	done := make(chan struct{})
 	go func() {
-		g.egress.UDP(sess, stream, []string{target.LocalAddr().String()}, 9, config.ProfileStandard)
+		g.proxyUDP(sess, stream, []string{target.LocalAddr().String()}, 9, config.ProfileStandard)
 		close(done)
 	}()
 
@@ -112,7 +111,6 @@ func TestGatewayEgressUDPProxyRoundTrip(t *testing.T) {
 
 func TestGatewayEgressUDPProxyRejectsInvalidTarget(t *testing.T) {
 	g := configuredGatewayForHelpers()
-	g.egress = newEgressProxy(g)
 	streamConn, peer := net.Pipe()
 	stream := newGatewayPipeStream(streamConn)
 	defer peer.Close()
@@ -122,7 +120,7 @@ func TestGatewayEgressUDPProxyRejectsInvalidTarget(t *testing.T) {
 	defer sess.cancel()
 	done := make(chan struct{})
 	go func() {
-		g.egress.UDP(sess, stream, []string{"127.0.0.1:not-a-port:1"}, 12, config.ProfileStandard)
+		g.proxyUDP(sess, stream, []string{"127.0.0.1:not-a-port:1"}, 12, config.ProfileStandard)
 		close(done)
 	}()
 	f, err := transport.ReadFrame(peer, sess.maxFrame())
@@ -134,7 +132,6 @@ func TestGatewayEgressUDPProxyRejectsInvalidTarget(t *testing.T) {
 
 func TestGatewayEgressUDPProxyRejectsBadDataFrame(t *testing.T) {
 	g := configuredGatewayForHelpers()
-	g.egress = newEgressProxy(g)
 	target, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +146,7 @@ func TestGatewayEgressUDPProxyRejectsBadDataFrame(t *testing.T) {
 	defer sess.cancel()
 	done := make(chan struct{})
 	go func() {
-		g.egress.UDP(sess, stream, []string{target.LocalAddr().String()}, 13, config.ProfileStandard)
+		g.proxyUDP(sess, stream, []string{target.LocalAddr().String()}, 13, config.ProfileStandard)
 		close(done)
 	}()
 	if _, err := transport.ReadFrame(peer, sess.maxFrame()); err != nil {
@@ -173,8 +170,7 @@ func (failingGatewayStream) Cancel()                     {}
 
 func TestGatewayEgressUDPProxyOpenWriteFailure(t *testing.T) {
 	g := configuredGatewayForHelpers()
-	g.egress = newEgressProxy(g)
 	sess := gatewayHelperSession(g, transport.CapabilityEgressProxy)
 	defer sess.cancel()
-	g.egress.UDP(sess, failingGatewayStream{}, []string{"127.0.0.1:1"}, 14, config.ProfileStandard)
+	g.proxyUDP(sess, failingGatewayStream{}, []string{"127.0.0.1:1"}, 14, config.ProfileStandard)
 }

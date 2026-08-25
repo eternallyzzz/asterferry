@@ -10,6 +10,7 @@ import (
 
 	"asterferry/internal/cluster"
 	"asterferry/internal/config"
+	"asterferry/internal/lifecycle"
 	"asterferry/internal/transport"
 )
 
@@ -79,7 +80,7 @@ func TestGatewayHelpersAndSessionAdmission(t *testing.T) {
 	if mappingKey("tcp", config.DefaultReverseGatewayBind, 443) != "tcp:127.0.0.1:443" {
 		t.Fatal("mapping key format changed")
 	}
-	if errorKind(context.Canceled) != "canceled" || errorKind(errors.New("boom")) == "" {
+	if lifecycle.ErrorKind(context.Canceled) != "canceled" || lifecycle.ErrorKind(errors.New("boom")) == "" {
 		t.Fatal("gateway error kind classification failed")
 	}
 
@@ -111,13 +112,17 @@ func TestGatewayHelpersAndSessionAdmission(t *testing.T) {
 	sess.cancel()
 
 	var frame bytes.Buffer
-	sendOpenError(&frame, 3, transport.ErrorPolicyDenied, "denied", false, 4096)
+	if err := transport.WriteOpenError(&frame, 3, transport.ErrorPolicyDenied, "denied", false, 4096); err != nil {
+		t.Fatal(err)
+	}
 	decoded, err := transport.ReadFrame(&frame, 4096)
 	if err != nil || decoded.Type != transport.TypeOpenError {
 		t.Fatalf("open error frame = %#v, err=%v", decoded, err)
 	}
 	frame.Reset()
-	sendProtocolError(&frame, 4, transport.ErrorInternal, "internal", true, 4096)
+	if err := transport.WriteProtocolError(&frame, 4, transport.ErrorInternal, "internal", true, 4096); err != nil {
+		t.Fatal(err)
+	}
 	decoded, err = transport.ReadFrame(&frame, 4096)
 	if err != nil || decoded.Type != transport.TypeError {
 		t.Fatalf("protocol error frame = %#v, err=%v", decoded, err)
@@ -177,6 +182,96 @@ func TestMappingManagerRejectsInvalidRegistration(t *testing.T) {
 			manager.CloseAll()
 		})
 	}
+}
+
+func TestMappingManagerRegisterIsAtomic(t *testing.T) {
+	t.Run("bind failure preserves live mappings", func(t *testing.T) {
+		g := configuredGatewayForHelpers()
+		manager := g.mappings.(*mappingManager)
+		sess := gatewayHelperSession(g, transport.CapabilityReverseTCP, transport.CapabilityRelayBalanced)
+		oldPort := freeGatewayTCPPort(t)
+		oldSpec := transport.TunnelRegistration{Name: "old", Protocol: "tcp", GatewayPort: uint16(oldPort), Profile: config.ProfileStandard}
+		if result := manager.Register(sess, []transport.TunnelRegistration{oldSpec}); result.Error != nil {
+			t.Fatal(result.Error)
+		}
+		key := mappingKey("tcp", config.DefaultReverseGatewayBind, uint16(oldPort))
+		old := manager.items[key]
+		if old == nil {
+			t.Fatal("initial mapping was not installed")
+		}
+		occupied, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer occupied.Close()
+		occupiedPort := occupied.Addr().(*net.TCPAddr).Port
+		result := manager.Register(sess, []transport.TunnelRegistration{
+			oldSpec,
+			{Name: "new", Protocol: "tcp", GatewayPort: uint16(occupiedPort), Profile: config.ProfileStandard},
+		})
+		if result.Error == nil {
+			t.Fatal("registration with an occupied port succeeded")
+		}
+		if manager.Count() != 1 || manager.items[key] != old || old.ctx.Err() != nil {
+			t.Fatalf("live mapping changed after failed registration: count=%d item=%p old=%p ctx=%v", manager.Count(), manager.items[key], old, old.ctx.Err())
+		}
+		probe, err := net.DialTimeout("tcp", old.tcp.Addr().String(), time.Second)
+		if err != nil {
+			t.Fatalf("old listener was closed after failed registration: %v", err)
+		}
+		_ = probe.Close()
+		_ = manager.CloseAll()
+		sess.cancel()
+	})
+
+	t.Run("metadata update reuses listener", func(t *testing.T) {
+		g := configuredGatewayForHelpers()
+		manager := g.mappings.(*mappingManager)
+		sess := gatewayHelperSession(g, transport.CapabilityReverseTCP, transport.CapabilityRelayBalanced)
+		port := freeGatewayTCPPort(t)
+		if result := manager.Register(sess, []transport.TunnelRegistration{{Name: "old", Protocol: "tcp", GatewayPort: uint16(port), Profile: config.ProfileStandard}}); result.Error != nil {
+			t.Fatal(result.Error)
+		}
+		key := mappingKey("tcp", config.DefaultReverseGatewayBind, uint16(port))
+		old := manager.items[key]
+		listener := old.tcp
+		result := manager.Register(sess, []transport.TunnelRegistration{{Name: "new", Protocol: "tcp", GatewayPort: uint16(port), Profile: config.ProfileBalanced}})
+		if result.Error != nil {
+			t.Fatal(result.Error)
+		}
+		current := manager.items[key]
+		spec := current.specSnapshot()
+		if current != old || current.tcp != listener || spec.Name != "new" || spec.Profile != config.ProfileBalanced {
+			t.Fatalf("metadata update recreated or failed to update mapping: current=%p old=%p listener=%p/%p spec=%#v", current, old, current.tcp, listener, spec)
+		}
+		_ = manager.CloseAll()
+		sess.cancel()
+	})
+
+	t.Run("obsolete mappings are removed after commit", func(t *testing.T) {
+		g := configuredGatewayForHelpers()
+		manager := g.mappings.(*mappingManager)
+		sess := gatewayHelperSession(g, transport.CapabilityReverseTCP)
+		firstPort := freeGatewayTCPPort(t)
+		secondPort := freeGatewayTCPPort(t)
+		specs := []transport.TunnelRegistration{
+			{Name: "first", Protocol: "tcp", GatewayPort: uint16(firstPort), Profile: config.ProfileStandard},
+			{Name: "second", Protocol: "tcp", GatewayPort: uint16(secondPort), Profile: config.ProfileStandard},
+		}
+		if result := manager.Register(sess, specs); result.Error != nil {
+			t.Fatal(result.Error)
+		}
+		secondKey := mappingKey("tcp", config.DefaultReverseGatewayBind, uint16(secondPort))
+		second := manager.items[secondKey]
+		if result := manager.Register(sess, specs[:1]); result.Error != nil {
+			t.Fatal(result.Error)
+		}
+		if manager.Count() != 1 || manager.items[secondKey] != nil || second.ctx.Err() == nil {
+			t.Fatalf("obsolete mapping survived commit: count=%d item=%p ctx=%v", manager.Count(), manager.items[secondKey], second.ctx.Err())
+		}
+		_ = manager.CloseAll()
+		sess.cancel()
+	})
 }
 
 func freeGatewayTCPPort(t *testing.T) int {

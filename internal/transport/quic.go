@@ -505,11 +505,6 @@ func CloseSession(session Session) error {
 	return session.Close()
 }
 
-// CloseConn is retained as a compatibility alias for older internal callers.
-func CloseConn(conn Session) error {
-	return CloseSession(conn)
-}
-
 func WaitConn(ctx context.Context, conn Session) error {
 	if conn == nil {
 		return errors.New("connection is nil")

@@ -29,6 +29,7 @@ type sessionManager struct {
 	reconnectPending atomic.Bool
 	retryBase        time.Duration
 	closeOnce        sync.Once
+	closeErr         error
 	draining         atomic.Bool
 }
 
@@ -245,8 +246,8 @@ func (m *sessionManager) Close() error {
 		m.ready = make(chan struct{})
 		m.mu.Unlock()
 		if sess != nil {
-			sess.Close()
+			m.closeErr = sess.Close()
 		}
 	})
-	return nil
+	return m.closeErr
 }

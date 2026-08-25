@@ -60,7 +60,7 @@ func BenchmarkQUICStream(b *testing.B) {
 								for i := 0; i < b.N; i++ {
 									switch direction {
 									case "upload":
-										if err := writeAll(stream, payload); err != nil {
+										if err := WriteAll(stream, payload); err != nil {
 											errs <- err
 											return
 										}
@@ -70,7 +70,7 @@ func BenchmarkQUICStream(b *testing.B) {
 											return
 										}
 									default:
-										if err := writeAll(stream, payload); err != nil {
+										if err := WriteAll(stream, payload); err != nil {
 											errs <- err
 											return
 										}
@@ -154,7 +154,7 @@ func startBenchmarkQUIC(t testing.TB, streams int, mode, direction string, paylo
 					_, _ = io.Copy(io.Discard, stream)
 				case "download":
 					for {
-						if err := writeAll(stream, payload); err != nil {
+						if err := WriteAll(stream, payload); err != nil {
 							return
 						}
 					}

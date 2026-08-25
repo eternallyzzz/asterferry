@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"asterferry/internal/config"
+	"asterferry/internal/lifecycle"
 	"asterferry/internal/transport"
 )
 
@@ -121,7 +122,7 @@ func TestAgentHelpersAndStatus(t *testing.T) {
 	if profile := a.relayProfileWithLimits(config.ProfileBalanced, transportLimits(1024)); profile.MaxPadding > 1016 {
 		t.Fatalf("relay padding exceeded record limit: %#v", profile)
 	}
-	if agentErrorKind(context.Canceled) != "canceled" {
+	if lifecycle.ErrorKind(context.Canceled) != "canceled" {
 		t.Fatal("agent error kind did not preserve lifecycle classification")
 	}
 	if a.currentSessionID() != "" || a.IsReady() {

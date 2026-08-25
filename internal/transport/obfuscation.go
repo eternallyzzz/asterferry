@@ -15,6 +15,7 @@ import (
 
 	"asterferry/internal/config"
 	"asterferry/internal/protocol"
+	"asterferry/internal/random"
 )
 
 const (
@@ -316,11 +317,11 @@ func (c *obfuscationPacketConn) fragmentBody(id uint16, index, total byte, paylo
 	maxPadding := maxInt(0, maxWire-base)
 	padding := minPadding
 	if maxPadding > minPadding {
-		var randomBytes [2]byte
-		if err := c.randomBytes(randomBytes[:]); err != nil {
+		value, err := random.Uint16n(uint32(maxPadding - minPadding + 1))
+		if err != nil {
 			return nil, err
 		}
-		padding += int(binary.BigEndian.Uint16(randomBytes[:])) % (maxPadding - minPadding + 1)
+		padding += int(value)
 	}
 	body := c.writeBuffer(&c.writeBody, fragmentHeaderBytes+len(payload)+padding)
 	body[0] = obfuscationVersion

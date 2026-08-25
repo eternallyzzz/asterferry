@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"asterferry/internal/protocol"
+	"asterferry/internal/random"
 )
 
 const (
@@ -145,10 +146,10 @@ func WriteFrame(w io.Writer, f Frame, max int64) error {
 	// Bytes 2..3 are reserved flags and must remain zero.
 	binary.BigEndian.PutUint32(header[4:8], uint32(len(f.Payload)))
 	binary.BigEndian.PutUint64(header[8:16], f.RequestID)
-	if err := writeAll(w, header[:]); err != nil {
+	if err := WriteAll(w, header[:]); err != nil {
 		return err
 	}
-	return writeAll(w, f.Payload)
+	return WriteAll(w, f.Payload)
 }
 
 // ReadFrame reads and validates a v6 control envelope before allocating its
@@ -287,11 +288,11 @@ func NewData(payload []byte, profile string, maxPadding int64) Data {
 			continue
 		}
 		available := bucket - base
-		var b [2]byte
-		if _, err := rand.Read(b[:]); err != nil {
+		paddingValue, err := random.Uint16n(uint32(available + 1))
+		if err != nil {
 			return data
 		}
-		paddingLen := int(binary.BigEndian.Uint16(b[:])) % int(available+1)
+		paddingLen := int(paddingValue)
 		if paddingLen > 0 {
 			data.Padding = make([]byte, paddingLen)
 			_, _ = rand.Read(data.Padding)
@@ -1305,20 +1306,4 @@ func asProtocolError(v any) (*ProtocolError, bool) {
 		return x, x != nil
 	}
 	return nil, false
-}
-
-func writeAll(w io.Writer, p []byte) error {
-	for len(p) > 0 {
-		n, err := w.Write(p)
-		if n > 0 {
-			p = p[n:]
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
 }

@@ -174,7 +174,10 @@ func waitSignals(ctx context.Context, grace time.Duration, shutdown func(context
 	case err := <-done:
 		return intentionalShutdownError(err)
 	case <-signals:
-		forceErr := closeFn()
+		forceErr, closeFinished := waitClose(closeFn, forcedShutdownWait)
+		if !closeFinished {
+			return ErrForcedShutdownTimeout
+		}
 		shutdownErr, finished := waitShutdown(done, forcedShutdownWait)
 		if !finished {
 			if forceErr != nil {
@@ -187,7 +190,10 @@ func waitSignals(ctx context.Context, grace time.Duration, shutdown func(context
 		}
 		return intentionalShutdownError(shutdownErr)
 	case <-ctx.Done():
-		forceErr := closeFn()
+		forceErr, closeFinished := waitClose(closeFn, forcedShutdownWait)
+		if !closeFinished {
+			return ErrForcedShutdownTimeout
+		}
 		shutdownErr, finished := waitShutdown(done, forcedShutdownWait)
 		if !finished {
 			if forceErr != nil {
@@ -203,6 +209,15 @@ func waitSignals(ctx context.Context, grace time.Duration, shutdown func(context
 		}
 		return ctx.Err()
 	}
+}
+
+func waitClose(closeFn func() error, timeout time.Duration) (error, bool) {
+	if closeFn == nil {
+		return nil, true
+	}
+	done := make(chan error, 1)
+	go func() { done <- closeFn() }()
+	return waitShutdown(done, timeout)
 }
 
 func waitShutdown(done <-chan error, timeout time.Duration) (error, bool) {

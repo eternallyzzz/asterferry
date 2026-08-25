@@ -92,7 +92,7 @@ func TestQUICListenerAndSessionCloseCallbacks(t *testing.T) {
 	}
 }
 
-func TestTransportBufferConfigurationAndCloseAlias(t *testing.T) {
+func TestTransportBufferConfigurationAndClose(t *testing.T) {
 	if err := configureUDPBuffers(nil, config.TransportConfig{}); err == nil {
 		t.Fatal("nil UDP socket should fail buffer configuration")
 	}
@@ -106,11 +106,11 @@ func TestTransportBufferConfigurationAndCloseAlias(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := CloseConn(nil); err != nil {
+	if err := CloseSession(nil); err != nil {
 		t.Fatal(err)
 	}
 	session := statsSession{}
-	if err := CloseConn(session); err != nil {
+	if err := CloseSession(session); err != nil {
 		t.Fatal(err)
 	}
 }
