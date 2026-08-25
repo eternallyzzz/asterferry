@@ -139,9 +139,29 @@ type TLSServerOptions struct {
 	KeyFile  string
 }
 
+type AuthScope uint8
+
+const (
+	ScopeNone AuthScope = iota
+	ScopeViewer
+	ScopeAdmin
+)
+
+// AuthTokens contains the credentials accepted by the management plane. An
+// admin token also satisfies viewer requests; a viewer token never satisfies
+// mutating requests.
+type AuthTokens struct {
+	Admin  []byte
+	Viewer []byte
+}
+
 func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte, options ...ServerOptions) (*Server, error) {
-	if len(authToken) < 32 {
-		return nil, errors.New("management authentication token must contain at least 32 bytes")
+	return StartWithTokens(listen, metrics, provider, AuthTokens{Admin: authToken, Viewer: authToken}, options...)
+}
+
+func StartWithTokens(listen string, metrics *Metrics, provider StatusProvider, tokens AuthTokens, options ...ServerOptions) (*Server, error) {
+	if len(tokens.Admin) < 32 || len(tokens.Viewer) < 32 {
+		return nil, errors.New("management authentication tokens must each contain at least 32 bytes")
 	}
 	if metrics == nil {
 		metrics = &Metrics{}
@@ -171,12 +191,18 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
-	protected := func(next http.HandlerFunc) http.Handler {
+	protected := func(required AuthScope, next http.HandlerFunc) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			valid := authorized(r, authToken)
-			if valid {
+			scope := authorizationScope(r, tokens)
+			if scope == ScopeAdmin || (scope == ScopeViewer && required == ScopeViewer) {
 				auth.reset()
 				next(w, r)
+				return
+			}
+			if scope != ScopeNone {
+				auth.reset()
+				w.Header().Set("WWW-Authenticate", `Bearer realm="asterferry-management", scope="admin"`)
+				writeActionError(w, http.StatusForbidden, "insufficient_scope", "management token lacks the required scope")
 				return
 			}
 			if blocked, retryAfter := auth.blocked(); blocked {
@@ -200,21 +226,21 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 		})
 	}
 	if serverOptions.Config != nil {
-		mux.Handle("/v1/config", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/config", protected(ScopeViewer, func(w http.ResponseWriter, r *http.Request) {
 			serveConfigSnapshot(w, r, serverOptions.Config)
 		}))
-		mux.Handle("/v1/config/validate", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/config/validate", protected(ScopeViewer, func(w http.ResponseWriter, r *http.Request) {
 			serveConfigValidate(w, r, serverOptions.Config, serverOptions.Logger)
 		}))
-		mux.Handle("/v1/config/apply", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/config/apply", protected(ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 			serveConfigApply(w, r, serverOptions.Config, serverOptions.Restart, serverOptions.Logger)
 		}))
-		mux.Handle("/v1/config/rollback", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/config/rollback", protected(ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 			serveConfigRollback(w, r, serverOptions.Config, serverOptions.Restart, serverOptions.Logger)
 		}))
 	}
-	mux.Handle("/metrics", protected(func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) }))
-	mux.Handle("/v1/status", protected(func(w http.ResponseWriter, _ *http.Request) {
+	mux.Handle("/metrics", protected(ScopeViewer, func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) }))
+	mux.Handle("/v1/status", protected(ScopeViewer, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		if provider == nil {
@@ -229,19 +255,19 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 		}
 		_, _ = w.Write(b)
 	}))
-	mux.Handle("/v1/dashboard", protected(func(w http.ResponseWriter, _ *http.Request) {
+	mux.Handle("/v1/dashboard", protected(ScopeViewer, func(w http.ResponseWriter, _ *http.Request) {
 		serveDashboardSnapshot(w, provider, metrics, serverOptions.Logger)
 	}))
 	if serverOptions.Events != nil {
-		mux.Handle("/v1/events", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/events", protected(ScopeViewer, func(w http.ResponseWriter, r *http.Request) {
 			serveEvents(w, r, serverOptions.Events, metrics, serverOptions.Logger)
 		}))
 	}
 	if serverOptions.Actions != nil {
-		mux.Handle("/v1/actions/shutdown", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/actions/shutdown", protected(ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 			serveAction(w, r, serverOptions.Actions, "shutdown", metrics, serverOptions.Logger)
 		}))
-		mux.Handle("/v1/actions/reconnect", protected(func(w http.ResponseWriter, r *http.Request) {
+		mux.Handle("/v1/actions/reconnect", protected(ScopeAdmin, func(w http.ResponseWriter, r *http.Request) {
 			serveAction(w, r, serverOptions.Actions, "reconnect", metrics, serverOptions.Logger)
 		}))
 	}
@@ -304,21 +330,28 @@ func withManagementHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func authorized(r *http.Request, token []byte) bool {
+func authorizationScope(r *http.Request, tokens AuthTokens) AuthScope {
 	if r == nil {
-		return false
+		return ScopeNone
 	}
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	if len(value) < len("Bearer ")+1 || !strings.EqualFold(value[:len("Bearer ")], "Bearer ") {
-		return false
+		return ScopeNone
 	}
 	presented := strings.TrimSpace(value[len("Bearer "):])
 	if presented == "" {
-		return false
+		return ScopeNone
 	}
-	wantHash := sha256.Sum256(token)
 	gotHash := sha256.Sum256([]byte(presented))
-	return subtleConstantTimeCompare(gotHash[:], wantHash[:])
+	adminHash := sha256.Sum256(tokens.Admin)
+	if subtleConstantTimeCompare(gotHash[:], adminHash[:]) {
+		return ScopeAdmin
+	}
+	viewerHash := sha256.Sum256(tokens.Viewer)
+	if subtleConstantTimeCompare(gotHash[:], viewerHash[:]) {
+		return ScopeViewer
+	}
+	return ScopeNone
 }
 
 // Kept as a tiny wrapper to make the authentication decision easy to test

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { APIError, consumeEventStream, requestAction } from "./api";
+import { APIError, consumeEventStream, fetchConfig, validateConfig } from "./api";
 
 describe("dashboard API", () => {
   beforeEach(() => {
@@ -31,15 +31,31 @@ describe("dashboard API", () => {
     expect(headers.get("Last-Event-ID")).toBe("7");
   });
 
-  it("surfaces structured action errors without leaking response objects", async () => {
+  it("surfaces structured validation errors without leaking response objects", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ error: { code: "action_busy", message: "action is already in progress" } }),
       { status: 409, headers: { "content-type": "application/json" } },
     )));
-    await expect(requestAction("secret-token", "reconnect")).rejects.toMatchObject({
+    await expect(validateConfig("secret-token", { base_revision: "abc", config: { role: "agent" } })).rejects.toMatchObject({
       status: 409,
       code: "action_busy",
       message: "action is already in progress",
     } satisfies Partial<APIError>);
+  });
+
+  it("loads and validates redacted configuration documents", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => new Response(
+      JSON.stringify({ schema_version: 1, role: "agent", revision: "abc", writable: true, backup_available: false, yaml: "role: agent", values: { role: "agent" } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const snapshot = await fetchConfig("secret-token");
+    expect(snapshot.role).toBe("agent");
+    await validateConfig("secret-token", { base_revision: "abc", config: { role: "agent" } });
+    const request = fetchMock.mock.calls[1][1] as RequestInit;
+    const headers = request.headers as Headers;
+    expect(headers.get("Authorization")).toBe("Bearer secret-token");
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(String(request.body)).toContain("base_revision");
   });
 });

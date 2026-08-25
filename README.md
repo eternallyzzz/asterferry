@@ -24,19 +24,17 @@ For a local Gateway-Agent test pair, let the CLI generate the configuration,
 tokens, obfuscation key, and self-signed certificates:
 
 ```powershell
-asterferry init --dir ./asterferry --profile dev
-asterferry doctor --config ./asterferry/config/gateway.yaml
-asterferry doctor --config ./asterferry/config/agent.yaml
+asterferry init ./asterferry --profile dev
+asterferry doctor ./asterferry
 ```
 
 Start the two roles in separate terminals:
 
 ```powershell
-asterferry gateway --config ./asterferry/config/gateway.yaml
-asterferry agent --config ./asterferry/config/agent.yaml
+asterferry up ./asterferry
 ```
 
-Use `asterferry status --config ...` to inspect a running role. The generated
+Use `asterferry status ./asterferry` to inspect both running roles. The generated
 `dev` certificates are for local testing only. For production, use
 `asterferry init --profile prod`, submit the generated CSRs to the deployment
 PKI, install the CA/certificates, and run `doctor` before starting.
@@ -56,17 +54,16 @@ Gateway: http://127.0.0.1:9090/dashboard/
 Agent:   http://127.0.0.1:9091/dashboard/
 ```
 
-Enter the matching `management.token` in the page. The token is sent only as
+Enter the generated viewer token in the page. The token is sent only as
 a Bearer header, is held in browser memory, and is never put in a URL or
 stored on disk. The page shows live status, traffic trends, QUIC diagnostics,
-Agent/mapping inventory, and structured runtime events. It can request an
-asynchronous graceful stop; the Agent page also has an explicit reconnect
-action. The protected configuration API validates and previews non-secret role
-configuration, then atomically saves it and requests a supervisor restart. A
-browser-based configuration page is deferred; use the protected management API
-or CLI for administration.
+Agent/mapping inventory, and structured runtime events. It is intentionally
+read-only: the Dashboard can validate and preview a redacted configuration
+draft, while configuration writes and runtime actions require the Admin token
+through the CLI or protected management API.
 
-The embedded page is controlled by `management.web.enabled` (default `true`).
+The embedded page is controlled by `management.web.enabled` (default `true` for
+legacy/manual configurations; generated production bundles set it to `false`).
 The management listener remains available when the page is disabled. It binds
 to loopback and uses HTTP by default. A non-loopback `management.listen`
 requires `management.tls.cert_file` and `management.tls.key_file`; configure a
@@ -183,7 +180,8 @@ Copyable templates are available in [examples/README.md](examples/README.md),
 [examples/gateway.yaml](examples/gateway.yaml), and
 [examples/agent.yaml](examples/agent.yaml). Before production deployment,
 replace the certificates (the Agent client certificate URI SAN must be
-`urn:asterferry:agent:<agent-id>`), client CA, Agent token, management token,
+`urn:asterferry:agent:<agent-id>`), client CA, Agent token, management
+Admin/Viewer tokens,
 deployment-specific ALPN, and all sample addresses.
 
 Container deployment guides are available for
@@ -214,9 +212,9 @@ Agent session; existing QUIC streams cannot be migrated between nodes.
 ## Security boundaries
 
 - Production deployments require a Gateway server certificate, Agent client
-  certificates with URI SAN identity binding, a per-Agent token, and an
-  independent management Bearer token. Health probes are anonymous; metrics
-  and status require the management token.
+  certificates with URI SAN identity binding, a per-Agent token, and separate
+  management Admin/Viewer Bearer tokens. Health probes are anonymous; metrics
+  and status require the Viewer token.
 - Gateway egress proxying applies per-Agent, protocol, port, and destination-IP
   ACLs. Special-use, private, loopback, link-local, metadata, and reserved
   addresses are denied by default; use narrow `allow_special_cidrs` entries

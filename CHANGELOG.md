@@ -10,8 +10,15 @@ The first product release of the v5 transport stack.
   limit negotiation.
 - Provides Gateway and Agent roles, SOCKS5/HTTP proxying, TCP/UDP reverse
   mappings, policy-controlled egress, and graceful draining.
-- Includes the embedded authenticated operations dashboard, runtime metrics,
-  structured events, and management actions.
+- Includes an authenticated operations dashboard, runtime metrics, structured
+  events, and scoped Admin/Viewer management credentials. The dashboard is
+  read-only; configuration writes and runtime actions use the Admin CLI/API.
+- Adds portable two-role bundles with `init`, `doctor`, `status`, `up`, `down`,
+  `config`, and legacy-bundle migration workflows. The local supervisor
+  restarts only the role that requests configuration reload with exit code 75.
+- Keeps Docker Compose aligned with the same Bundle layout and provides
+  minimal generated configurations with production Dashboard serving disabled
+  by default.
 - Publishes static non-root distroless container images for Linux amd64 and
   arm64, plus native Linux amd64/arm64 and Windows amd64 CLI packages.
 - Uses immutable release metadata, SHA256 checksums, SBOMs, and build

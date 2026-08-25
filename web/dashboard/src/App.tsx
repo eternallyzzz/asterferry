@@ -3,7 +3,6 @@ import {
   APIError,
   consumeEventStream,
   fetchSnapshot,
-  requestAction,
   type DashboardEvent,
   type DashboardSnapshot,
 } from "./api";
@@ -17,10 +16,9 @@ import {
   statusLabel,
   type MetricPoint,
 } from "./model";
+import ConfigurationView from "./ConfigurationView";
 
 type Theme = "dark" | "light";
-type ActionName = "shutdown" | "reconnect";
-
 interface TrendState {
   input: MetricPoint[];
   output: MetricPoint[];
@@ -36,7 +34,7 @@ export default function App() {
   const [trend, setTrend] = useState<TrendState>(emptyTrend);
   const [error, setError] = useState("");
   const [streamState, setStreamState] = useState("offline");
-  const [action, setAction] = useState<ActionName | null>(null);
+  const [showConfig, setShowConfig] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = window.localStorage.getItem("asterferry.dashboard.theme");
     return saved === "light" ? "light" : "dark";
@@ -84,7 +82,7 @@ export default function App() {
       } catch (caught) {
         if (!active) return;
         if (caught instanceof APIError && caught.status === 401) {
-          setError("Token rejected. Enter the management token again.");
+          setError("Token rejected. Enter the viewer token again.");
           setToken("");
           return;
         }
@@ -125,7 +123,7 @@ export default function App() {
         } catch (caught) {
           if (!active || controller.signal.aborted) return;
           if (caught instanceof APIError && caught.status === 401) {
-            setError("Token rejected. Enter the management token again.");
+            setError("Token rejected. Enter the viewer token again.");
             setToken("");
             return;
           }
@@ -145,20 +143,6 @@ export default function App() {
     };
   }, [token]);
 
-  const runAction = async (name: ActionName) => {
-    const label = name === "shutdown" ? "gracefully stop this AsterFerry process" : "force the Agent to reconnect";
-    if (!window.confirm("Confirm: " + label + "?")) return;
-    setAction(name);
-    try {
-      await requestAction(token, name);
-      setError(name === "shutdown" ? "Shutdown requested. The process will drain and exit." : "Reconnect requested.");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Action failed.");
-    } finally {
-      setAction(null);
-    }
-  };
-
   if (!token) {
     return <TokenGate onSubmit={setToken} error={error} theme={theme} onTheme={() => setTheme(theme === "dark" ? "light" : "dark")} />;
   }
@@ -171,13 +155,14 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <span className={"stream-dot " + streamState} title={"Event stream: " + streamState} />
+          <button className="quiet-button" onClick={() => setShowConfig(true)}>Configuration</button>
           <button className="quiet-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? "Light mode" : "Dark mode"}</button>
           <button className="quiet-button" onClick={() => setToken("")}>Lock</button>
         </div>
       </header>
       {error && <div className="notice error">{error}</div>}
-      {snapshot ? (
-        <DashboardView snapshot={snapshot} trend={trend} events={events} action={action} onAction={runAction} />
+      {showConfig ? <ConfigurationView token={token} onClose={() => setShowConfig(false)} /> : snapshot ? (
+        <DashboardView snapshot={snapshot} trend={trend} events={events} />
       ) : (
         <div className="loading-card"><span className="spinner" /> Loading runtime snapshot…</div>
       )}
@@ -197,10 +182,10 @@ function TokenGate(props: { onSubmit: (value: string) => void; error: string; th
         <div className="brand-mark">AF</div>
         <p className="eyebrow">ASTERFERRY / PRIVATE MANAGEMENT</p>
         <h1>Open the command center</h1>
-        <p className="muted">The dashboard stays on the local management listener. Your Bearer token is held in memory and is never placed in the URL or saved on disk.</p>
+        <p className="muted">The dashboard stays on the local management listener. The viewer Bearer token is held in memory and is never placed in the URL or saved on disk.</p>
         <form onSubmit={submit}>
-          <label htmlFor="token">Management token</label>
-          <input id="token" type="password" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Paste the token from management.token" />
+          <label htmlFor="token">Viewer token</label>
+          <input id="token" type="password" autoFocus value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Paste the viewer token from secrets/" />
           <button className="primary-button" type="submit">Unlock dashboard</button>
         </form>
         {props.error && <p className="form-error">{props.error}</p>}
@@ -210,7 +195,7 @@ function TokenGate(props: { onSubmit: (value: string) => void; error: string; th
   );
 }
 
-function DashboardView(props: { snapshot: DashboardSnapshot; trend: TrendState; events: DashboardEvent[]; action: ActionName | null; onAction: (name: ActionName) => void }) {
+function DashboardView(props: { snapshot: DashboardSnapshot; trend: TrendState; events: DashboardEvent[] }) {
   const { snapshot } = props;
   const metrics = snapshot.metrics;
   const agents = snapshot.gateway?.agents.length ?? 0;
@@ -218,8 +203,6 @@ function DashboardView(props: { snapshot: DashboardSnapshot; trend: TrendState; 
   const inputRate = latest(props.trend.input);
   const outputRate = latest(props.trend.output);
   const errorRate = latest(props.trend.errors);
-  const canReconnect = snapshot.role === "agent" && snapshot.state === "running";
-  const canShutdown = snapshot.state === "running";
 
   return (
     <>
@@ -228,10 +211,7 @@ function DashboardView(props: { snapshot: DashboardSnapshot; trend: TrendState; 
           <div className="status-line"><span className={"status-light " + (snapshot.ready ? "good" : "warn")} /><span>{statusLabel(snapshot)}</span></div>
           <h2>{snapshot.role === "gateway" ? "Gateway" : "Agent"} runtime</h2>
           <p className="muted">Node <code>{snapshot.node_id || "local"}</code> · Protocol v{snapshot.transport.protocol} · {snapshot.transport.obfuscation_mode}</p>
-          <div className="hero-actions">
-            {canReconnect && <button className="secondary-button" disabled={props.action !== null} onClick={() => props.onAction("reconnect")}>{props.action === "reconnect" ? "Reconnecting…" : "Reconnect Agent"}</button>}
-            <button className="danger-button" disabled={!canShutdown || props.action !== null} onClick={() => props.onAction("shutdown")}>{props.action === "shutdown" ? "Stopping…" : "Graceful stop"}</button>
-          </div>
+          <p className="muted hero-hint">Runtime actions require the Admin token. Use <code>asterferry down</code> or the protected API.</p>
         </div>
         <div className="hero-meta">
           <Meta label="State" value={snapshot.state} />

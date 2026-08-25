@@ -141,7 +141,7 @@ func (a *Agent) Start() error {
 	if err := a.proxy.Start(a.ctx); err != nil {
 		return err
 	}
-	mgmt, err := observability.Start(a.cfg.Management.Listen, a.metrics, a, a.cfg.Management.AuthToken, observability.ServerOptions{
+	mgmt, err := observability.StartWithTokens(a.cfg.Management.Listen, a.metrics, a, observability.AuthTokens{Admin: a.cfg.Management.AdminToken, Viewer: a.cfg.Management.ViewerToken}, observability.ServerOptions{
 		Events:  a.events,
 		Actions: a,
 		Dashboard: func() http.Handler {

@@ -133,7 +133,7 @@ func (s *Gateway) Start() error {
 		return err
 	}
 	s.ep = ep
-	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s, s.cfg.Management.AuthToken, observability.ServerOptions{
+	mgmt, err := observability.StartWithTokens(s.cfg.Management.Listen, s.metrics, s, observability.AuthTokens{Admin: s.cfg.Management.AdminToken, Viewer: s.cfg.Management.ViewerToken}, observability.ServerOptions{
 		Events:  s.events,
 		Actions: s,
 		Dashboard: func() http.Handler {

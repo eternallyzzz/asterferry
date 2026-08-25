@@ -147,6 +147,9 @@ func TestQueryStatusHumanAndJSON(t *testing.T) {
 	if err := os.WriteFile(c.Management.AuthTokenFile, []byte(testStatusToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(c.Management.Auth.ViewerTokenFile, []byte(testStatusToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	c.Management.Listen = listener.Addr().String()
 	data, err := yaml.Marshal(c)
 	if err != nil {
@@ -183,6 +186,9 @@ func TestQueryStatusUnauthorized(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(c.Management.AuthTokenFile, []byte(testStatusToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.Management.Auth.ViewerTokenFile, []byte(testStatusToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

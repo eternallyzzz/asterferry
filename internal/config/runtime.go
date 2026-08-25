@@ -222,16 +222,33 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 }
 
 func resolveManagement(raw ManagementConfig) (ManagementConfig, error) {
-	token, err := ReadToken(raw.AuthTokenFile)
+	adminPath := raw.Auth.AdminTokenFile
+	if adminPath == "" {
+		adminPath = raw.AuthTokenFile
+	}
+	viewerPath := raw.Auth.ViewerTokenFile
+	if viewerPath == "" {
+		viewerPath = adminPath
+	}
+	adminToken, err := ReadToken(adminPath)
 	if err != nil {
-		return ManagementConfig{}, fmt.Errorf("management authentication token: %w", err)
+		return ManagementConfig{}, fmt.Errorf("management admin token: %w", err)
+	}
+	viewerToken := adminToken
+	if viewerPath != adminPath {
+		viewerToken, err = ReadToken(viewerPath)
+		if err != nil {
+			return ManagementConfig{}, fmt.Errorf("management viewer token: %w", err)
+		}
 	}
 	if raw.TLS.CertFile != "" {
 		if _, err := tls.LoadX509KeyPair(raw.TLS.CertFile, raw.TLS.KeyFile); err != nil {
 			return ManagementConfig{}, fmt.Errorf("management TLS certificate: %w", err)
 		}
 	}
-	raw.AuthToken = append([]byte(nil), token...)
+	raw.AuthToken = append([]byte(nil), adminToken...)
+	raw.AdminToken = append([]byte(nil), adminToken...)
+	raw.ViewerToken = append([]byte(nil), viewerToken...)
 	return raw, nil
 }
 

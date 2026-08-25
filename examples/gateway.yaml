@@ -22,9 +22,11 @@ transport:
 
 management:
   listen: "127.0.0.1:9090"
-  auth_token_file: "/etc/asterferry/management.token"
+  auth:
+    admin_token_file: "/etc/asterferry/management-admin.token"
+    viewer_token_file: "/etc/asterferry/management-viewer.token"
   web:
-    enabled: true
+    enabled: false
   # Non-loopback management.listen requires both TLS files.
   # tls:
   #   cert_file: "/etc/asterferry/management.crt"

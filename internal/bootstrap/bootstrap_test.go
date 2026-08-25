@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"asterferry/internal/config"
@@ -101,6 +102,34 @@ func TestGenerateProductionBundleCreatesCSRsWithoutCertificates(t *testing.T) {
 	}
 	if _, err := config.Load(result.GatewayConfig); err != nil {
 		t.Fatalf("production config should remain structurally valid: %v", err)
+	}
+}
+
+func TestGenerateWritesMinimalRoleConfigs(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "minimal")
+	result, err := Generate(Options{Dir: root, Profile: ProfileProd, GatewayHost: "gateway.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := os.ReadFile(result.GatewayConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := os.ReadFile(result.AgentConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"gateway": gateway, "agent": agent} {
+		text := string(data)
+		if strings.Contains(text, "auth_token_file:") || strings.Contains(text, "initial_stream_receive_window_bytes:") {
+			t.Fatalf("%s config contains migration/zero-value fields:\n%s", name, text)
+		}
+		if strings.Contains(text, "expose_domain_at_debug:") || strings.Count(text, "enabled: false") != 1 {
+			t.Fatalf("%s config contains an unexpected default field:\n%s", name, text)
+		}
+	}
+	if !strings.Contains(string(gateway), "enabled: false") {
+		t.Fatal("production gateway config must explicitly disable the Dashboard")
 	}
 }
 

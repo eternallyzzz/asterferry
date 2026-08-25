@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,9 +178,13 @@ func generateBundle(root string, opts Options) (Result, []string, error) {
 	if err != nil {
 		return Result{}, nil, fmt.Errorf("generate agent token: %w", err)
 	}
-	managementToken, err := randomSecret()
+	managementAdminToken, err := randomSecret()
 	if err != nil {
-		return Result{}, nil, fmt.Errorf("generate management token: %w", err)
+		return Result{}, nil, fmt.Errorf("generate management admin token: %w", err)
+	}
+	managementViewerToken, err := randomSecret()
+	if err != nil {
+		return Result{}, nil, fmt.Errorf("generate management viewer token: %w", err)
 	}
 	obfuscationKey, err := randomSecret()
 	if err != nil {
@@ -204,8 +209,10 @@ func generateBundle(root string, opts Options) (Result, []string, error) {
 	}{
 		{"gateway", opts.AgentID + ".token", agentToken},
 		{"agent", opts.AgentID + ".token", agentToken},
-		{"gateway", "management.token", managementToken},
-		{"agent", "management.token", managementToken},
+		{"gateway", "management-admin.token", managementAdminToken},
+		{"agent", "management-admin.token", managementAdminToken},
+		{"gateway", "management-viewer.token", managementViewerToken},
+		{"agent", "management-viewer.token", managementViewerToken},
 		{"gateway", "obfs.key", obfuscationKey},
 		{"agent", "obfs.key", obfuscationKey},
 	} {
@@ -243,18 +250,18 @@ func generateBundle(root string, opts Options) (Result, []string, error) {
 
 	gatewayConfig := gatewayConfig(opts, string(alpn))
 	agentConfig := agentConfig(opts, string(alpn))
-	if err := gatewayConfig.Validate(); err != nil {
+	if err := validateGeneratedConfig(gatewayConfig); err != nil {
 		return Result{}, nil, fmt.Errorf("generate gateway configuration: %w", err)
 	}
-	if err := agentConfig.Validate(); err != nil {
+	if err := validateGeneratedConfig(agentConfig); err != nil {
 		return Result{}, nil, fmt.Errorf("generate agent configuration: %w", err)
 	}
 	portableConfigPaths(&gatewayConfig)
 	portableConfigPaths(&agentConfig)
-	if err := writeYAML(filepath.Join(root, "config", "gateway.yaml"), &gatewayConfig); err != nil {
+	if err := writeGeneratedYAML(filepath.Join(root, "config", "gateway.yaml"), &gatewayConfig); err != nil {
 		return Result{}, nil, fmt.Errorf("write gateway configuration: %w", err)
 	}
-	if err := writeYAML(filepath.Join(root, "config", "agent.yaml"), &agentConfig); err != nil {
+	if err := writeGeneratedYAML(filepath.Join(root, "config", "agent.yaml"), &agentConfig); err != nil {
 		return Result{}, nil, fmt.Errorf("write agent configuration: %w", err)
 	}
 	files = append(files, "config/gateway.yaml", "config/agent.yaml")
@@ -270,6 +277,103 @@ func generateBundle(root string, opts Options) (Result, []string, error) {
 	}, files, nil
 }
 
+func validateGeneratedConfig(c config.Config) error {
+	b, err := minimalYAML(&c)
+	if err != nil {
+		return err
+	}
+	_, err = config.LoadBytes(b, filepath.Join("config", c.Role+".yaml"))
+	return err
+}
+
+// minimalYAML removes zero-value fields from a generated configuration while
+// preserving explicit false values. Config is intentionally a full runtime
+// struct, so marshaling it directly would produce a large document full of
+// implementation defaults and empty sections. Keeping this transformation at
+// the generation boundary leaves the runtime schema strict without making
+// every config field optional in every other YAML consumer.
+func minimalYAML(value any) ([]byte, error) {
+	raw, err := yaml.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return nil, errors.New("generated configuration did not produce one YAML document")
+	}
+	if !pruneGeneratedYAML(document.Content[0]) {
+		return nil, errors.New("generated configuration became empty")
+	}
+	return yaml.Marshal(document.Content[0])
+}
+
+func pruneGeneratedYAML(node *yaml.Node) bool {
+	return pruneGeneratedYAMLAt(node, "")
+}
+
+func pruneGeneratedYAMLAt(node *yaml.Node, path string) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case yaml.DocumentNode:
+		return len(node.Content) == 1 && pruneGeneratedYAMLAt(node.Content[0], path)
+	case yaml.MappingNode:
+		kept := make([]*yaml.Node, 0, len(node.Content))
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			childPath := key.Value
+			if path != "" {
+				childPath = path + "." + childPath
+			}
+			if pruneGeneratedYAMLAt(value, childPath) {
+				kept = append(kept, key, value)
+			}
+		}
+		node.Content = kept
+		return len(kept) > 0
+	case yaml.SequenceNode:
+		kept := make([]*yaml.Node, 0, len(node.Content))
+		for _, value := range node.Content {
+			if pruneGeneratedYAMLAt(value, path) {
+				kept = append(kept, value)
+			}
+		}
+		node.Content = kept
+		return len(kept) > 0
+	case yaml.ScalarNode:
+		switch node.Tag {
+		case "!!null":
+			return false
+		case "!!str":
+			return node.Value != ""
+		case "!!int", "!!float":
+			return !zeroNumericScalar(node.Value)
+		case "!!bool":
+			return node.Value != "false" || path == "management.web.enabled"
+		default:
+			return node.Value != ""
+		}
+	default:
+		return true
+	}
+}
+
+func zeroNumericScalar(value string) bool {
+	normalized := strings.ReplaceAll(strings.TrimSpace(value), "_", "")
+	if normalized == "" {
+		return false
+	}
+	if number, err := strconv.ParseInt(normalized, 0, 64); err == nil {
+		return number == 0
+	}
+	number, err := strconv.ParseFloat(normalized, 64)
+	return err == nil && number == 0
+}
+
 func gatewayConfig(opts Options, alpn string) config.Config {
 	listenHost := "0.0.0.0"
 	if opts.Profile == ProfileDev {
@@ -279,34 +383,22 @@ func gatewayConfig(opts Options, alpn string) config.Config {
 		Version: protocol.Version,
 		Role:    config.RoleGateway,
 		Transport: config.TransportConfig{
-			ALPN:                 alpn,
-			MaxBidiRemoteStreams: 257,
-			HandshakeTimeoutSec:  10,
-			IdleTimeoutSec:       1800,
-			KeepAliveSec:         20,
+			ALPN: alpn,
 		},
-		Management: config.ManagementConfig{Listen: "127.0.0.1:9090", AuthTokenFile: "../secrets/gateway/management.token", Web: config.ManagementWebConfig{Enabled: boolPtr(true)}},
-		Shutdown:   config.ShutdownConfig{GracePeriodSec: 30},
-		Limits: config.Limits{
-			MaxFrameBytes:      16 << 20,
-			MaxRecordBytes:     64 << 10,
-			MaxWriteBatchBytes: 256 << 10,
-			MaxUDPBytes:        64 << 10,
+		Management: config.ManagementConfig{
+			Listen: "127.0.0.1:9090",
+			Auth: config.ManagementAuthConfig{
+				AdminTokenFile:  "../secrets/gateway/management-admin.token",
+				ViewerTokenFile: "../secrets/gateway/management-viewer.token",
+			},
+			Web: config.ManagementWebConfig{Enabled: boolPtr(opts.Profile == ProfileDev)},
 		},
 		Obfuscation: config.ObfuscationConfig{
-			ProxyProfile:    config.ProfileBalanced,
-			ReverseProfile:  config.ProfileStandard,
-			MaxPaddingBytes: 2048,
 			Transport: config.TransportObfuscationConfig{
-				Mode:               config.TransportObfuscationCamouflage,
-				KeyFile:            "../secrets/gateway/obfs.key",
-				HandshakeShaping:   boolPtr(true),
-				MinFragmentBytes:   512,
-				MaxFragmentBytes:   1200,
-				MaxWirePacketBytes: 1280,
+				KeyFile: "../secrets/gateway/obfs.key",
 			},
 		},
-		Logging: defaultLogging(),
+		Logging: config.LoggingConfig{Format: "text"},
 		Gateway: &config.GatewayConfig{
 			Listen: net.JoinHostPort(listenHost, fmt.Sprint(opts.GatewayPort)),
 			TLS: config.GatewayTLS{
@@ -329,34 +421,22 @@ func agentConfig(opts Options, alpn string) config.Config {
 		Version: protocol.Version,
 		Role:    config.RoleAgent,
 		Transport: config.TransportConfig{
-			ALPN:                 alpn,
-			MaxBidiRemoteStreams: 257,
-			HandshakeTimeoutSec:  10,
-			IdleTimeoutSec:       1800,
-			KeepAliveSec:         20,
+			ALPN: alpn,
 		},
-		Management: config.ManagementConfig{Listen: "127.0.0.1:9091", AuthTokenFile: "../secrets/agent/management.token", Web: config.ManagementWebConfig{Enabled: boolPtr(true)}},
-		Shutdown:   config.ShutdownConfig{GracePeriodSec: 30},
-		Limits: config.Limits{
-			MaxFrameBytes:      16 << 20,
-			MaxRecordBytes:     64 << 10,
-			MaxWriteBatchBytes: 256 << 10,
-			MaxUDPBytes:        64 << 10,
+		Management: config.ManagementConfig{
+			Listen: "127.0.0.1:9091",
+			Auth: config.ManagementAuthConfig{
+				AdminTokenFile:  "../secrets/agent/management-admin.token",
+				ViewerTokenFile: "../secrets/agent/management-viewer.token",
+			},
+			Web: config.ManagementWebConfig{Enabled: boolPtr(opts.Profile == ProfileDev)},
 		},
 		Obfuscation: config.ObfuscationConfig{
-			ProxyProfile:    config.ProfileBalanced,
-			ReverseProfile:  config.ProfileStandard,
-			MaxPaddingBytes: 2048,
 			Transport: config.TransportObfuscationConfig{
-				Mode:               config.TransportObfuscationCamouflage,
-				KeyFile:            "../secrets/agent/obfs.key",
-				HandshakeShaping:   boolPtr(true),
-				MinFragmentBytes:   512,
-				MaxFragmentBytes:   1200,
-				MaxWirePacketBytes: 1280,
+				KeyFile: "../secrets/agent/obfs.key",
 			},
 		},
-		Logging: defaultLogging(),
+		Logging: config.LoggingConfig{Format: "text"},
 		Agent: &config.AgentConfig{
 			ID:        opts.AgentID,
 			Server:    net.JoinHostPort(host, fmt.Sprint(opts.GatewayPort)),
@@ -379,21 +459,6 @@ func agentConfig(opts Options, alpn string) config.Config {
 				{Name: "web", Protocol: "tcp", Local: "127.0.0.1:8081", GatewayPort: 28080},
 				{Name: "dns", Protocol: "udp", Local: "127.0.0.1:53", GatewayPort: 21003},
 			},
-		},
-	}
-}
-
-func defaultLogging() config.LoggingConfig {
-	enabled := true
-	return config.LoggingConfig{
-		Level:  "info",
-		Format: "text",
-		Sampling: config.SamplingConfig{
-			Enabled:            &enabled,
-			RatePerSecond:      5,
-			Burst:              20,
-			SummaryIntervalSec: 60,
-			MaxKeys:            4096,
 		},
 	}
 }
@@ -556,8 +621,8 @@ func randomText(prefix string, hexChars int) ([]byte, error) {
 	return []byte(value[:len(prefix)+hexChars]), nil
 }
 
-func writeYAML(path string, value any) error {
-	b, err := yaml.Marshal(value)
+func writeGeneratedYAML(path string, value any) error {
+	b, err := minimalYAML(value)
 	if err != nil {
 		return err
 	}
@@ -569,6 +634,8 @@ func portableConfigPaths(c *config.Config) {
 		return
 	}
 	toSlash := func(path string) string { return filepath.ToSlash(path) }
+	c.Management.Auth.AdminTokenFile = toSlash(c.Management.Auth.AdminTokenFile)
+	c.Management.Auth.ViewerTokenFile = toSlash(c.Management.Auth.ViewerTokenFile)
 	c.Management.AuthTokenFile = toSlash(c.Management.AuthTokenFile)
 	c.Obfuscation.Transport.KeyFile = toSlash(c.Obfuscation.Transport.KeyFile)
 	c.Obfuscation.Transport.PreviousKeyFile = toSlash(c.Obfuscation.Transport.PreviousKeyFile)
@@ -738,22 +805,26 @@ Gateway endpoint: %s:%d
 
 %s
 
-Validate the configuration:
+Validate and inspect both roles:
 
-    asterferry validate --config config/gateway.yaml
-    asterferry validate --config config/agent.yaml
-    asterferry doctor --config config/gateway.yaml
-    asterferry doctor --config config/agent.yaml
+    asterferry doctor .
+    asterferry status .
 
-Start locally:
+Start locally in the foreground:
 
-    asterferry gateway --config config/gateway.yaml
-    asterferry agent --config config/agent.yaml
+    asterferry up .
+
+Or run in the background:
+
+    asterferry up . --detach
+    asterferry down .
 
 The Agent proxy listens on 127.0.0.1:1080 (SOCKS5) and 127.0.0.1:8080
 (HTTP). Management endpoints remain on loopback by default and require the
-generated management token for status, metrics, and configuration management.
-The embedded Dashboard can be disabled with management.web.enabled: false.
+generated viewer token for status and the Dashboard. Configuration writes and
+runtime actions require the generated admin token through the CLI or API.
+The embedded Dashboard is enabled for dev bundles and disabled for prod
+bundles; set management.web.enabled explicitly when changing that policy.
 Keep every file in secrets/ private.
 `, opts.Profile, opts.AgentID, opts.GatewayHost, opts.GatewayPort, profileWarning)
 }

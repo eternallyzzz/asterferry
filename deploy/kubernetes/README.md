@@ -18,10 +18,13 @@ gateway:
     key_file: /etc/asterferry/secrets/server.key
     client_ca_file: /etc/asterferry/secrets/agents-ca.crt
 management:
-  # The page is enabled by default; set false to keep only the protected API.
+  # Production defaults to no embedded page; set true only for an internal
+  # administrative port-forward.
   web:
-    enabled: true
-  auth_token_file: /etc/asterferry/secrets/management.token
+    enabled: false
+  auth:
+    admin_token_file: /etc/asterferry/secrets/management-admin.token
+    viewer_token_file: /etc/asterferry/secrets/management-viewer.token
   # Non-loopback management.listen requires both TLS files.
   # tls:
   #   cert_file: /etc/asterferry/secrets/management.crt
@@ -48,13 +51,14 @@ kubectl -n asterferry create secret generic asterferry-gateway-secrets \
   --from-file=server.key=./secrets/gateway/server.key \
   --from-file=agents-ca.crt=./secrets/gateway/agents-ca.crt \
   --from-file=edge-a.token=./secrets/gateway/edge-a.token \
-  --from-file=management.token=./secrets/gateway/management.token \
+  --from-file=management-admin.token=./secrets/gateway/management-admin.token \
+  --from-file=management-viewer.token=./secrets/gateway/management-viewer.token \
   --from-file=obfs.key=./secrets/gateway/obfs.key
 ```
 
 Create corresponding Agent ConfigMap and Secret resources with the Agent CA,
 client certificate (URI SAN `urn:asterferry:agent:<agent-id>`), client key,
-Agent token, management token, and the same `obfs.key` (plus the
+Agent token, management Admin/Viewer tokens, and the same `obfs.key` (plus the
 optional `obfs.key.previous` during rotation). Never commit these files or put
 their contents into `values.yaml`.
 
@@ -70,7 +74,8 @@ asterferry doctor --config ./config/agent.yaml --skip-ports
 
 After rollout, use the Kubernetes readiness probe for availability and query
 `asterferry status --config ...` from an administrative context when the
-loopback management endpoint is reachable.
+loopback management endpoint is reachable. Use the Viewer token for status and
+the Admin token for actions or configuration writes.
 
 Each role also serves the embedded Dashboard from its management listener.
 When the pod runtime permits an administrative port-forward, use

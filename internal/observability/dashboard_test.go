@@ -163,13 +163,46 @@ func TestManagementDashboardActionsAndSSE(t *testing.T) {
 	}
 }
 
+func TestManagementViewerCannotRunAdminActions(t *testing.T) {
+	provider := &dashboardTestProvider{ready: true}
+	actions := &dashboardTestActions{}
+	viewer := strings.Repeat("v", 32)
+	admin := strings.Repeat("a", 32)
+	server, err := StartWithTokens("127.0.0.1:0", nil, provider, AuthTokens{Admin: []byte(admin), Viewer: []byte(viewer)}, ServerOptions{Actions: actions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client := &http.Client{Timeout: time.Second}
+	base := "http://" + server.listener.Addr().String()
+	response := authorizedRequestWithToken(t, client, http.MethodGet, base+"/v1/status", viewer, "")
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("viewer status = %d", response.StatusCode)
+	}
+	response = authorizedRequestWithToken(t, client, http.MethodPost, base+"/v1/actions/shutdown", viewer, "")
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || actions.shutdown.Load() != 0 {
+		t.Fatalf("viewer action status=%d calls=%d", response.StatusCode, actions.shutdown.Load())
+	}
+	response = authorizedRequestWithToken(t, client, http.MethodPost, base+"/v1/actions/shutdown", admin, "")
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted || actions.shutdown.Load() != 1 {
+		t.Fatalf("admin action status=%d calls=%d", response.StatusCode, actions.shutdown.Load())
+	}
+}
+
 func authorizedRequest(t *testing.T, client *http.Client, method, url, lastEventID string) *http.Response {
+	return authorizedRequestWithToken(t, client, method, url, testManagementToken, lastEventID)
+}
+
+func authorizedRequestWithToken(t *testing.T, client *http.Client, method, url, token string, lastEventID string) *http.Response {
 	t.Helper()
 	request, err := http.NewRequest(method, url, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+testManagementToken)
+	request.Header.Set("Authorization", "Bearer "+token)
 	if lastEventID != "" {
 		request.Header.Set("Last-Event-ID", lastEventID)
 	}

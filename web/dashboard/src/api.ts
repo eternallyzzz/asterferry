@@ -83,6 +83,30 @@ export interface DashboardEvent {
   attributes?: Record<string, string>;
 }
 
+export type ConfigValue = string | number | boolean | null | ConfigObject | ConfigValue[];
+export interface ConfigObject {
+  [key: string]: ConfigValue;
+}
+
+export interface ConfigSnapshot {
+  schema_version: number;
+  role: Role;
+  revision: string;
+  writable: boolean;
+  backup_available: boolean;
+  yaml: string;
+  values: ConfigObject;
+}
+
+export interface ConfigValidation {
+  schema_version: number;
+  role: Role;
+  revision: string;
+  changed: boolean;
+  diff?: string;
+  warnings?: string[];
+}
+
 export class APIError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -119,8 +143,22 @@ export function fetchSnapshot(token: string): Promise<DashboardSnapshot> {
   return request<DashboardSnapshot>(token, "/v1/dashboard");
 }
 
-export async function requestAction(token: string, action: "shutdown" | "reconnect"): Promise<void> {
-  await request<{ action: string }>(token, "/v1/actions/" + action, { method: "POST" });
+export function fetchConfig(token: string): Promise<ConfigSnapshot> {
+  return request<ConfigSnapshot>(token, "/v1/config");
+}
+
+export type ConfigPayload = { base_revision: string; yaml?: string; config?: ConfigObject };
+
+async function postConfig<T>(token: string, path: string, payload: ConfigPayload | { base_revision: string }): Promise<T> {
+  return request<T>(token, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function validateConfig(token: string, payload: ConfigPayload): Promise<ConfigValidation> {
+  return postConfig<ConfigValidation>(token, "/v1/config/validate", payload);
 }
 
 export interface EventCallbacks {

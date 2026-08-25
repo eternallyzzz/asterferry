@@ -11,9 +11,9 @@ For the fastest local test, generate a complete pair instead of following the
 manual certificate steps below:
 
 ```powershell
-asterferry init --dir ./asterferry --profile dev
-asterferry doctor --config ./asterferry/config/gateway.yaml
-asterferry doctor --config ./asterferry/config/agent.yaml
+asterferry init ./asterferry --profile dev
+asterferry doctor ./asterferry
+asterferry up ./asterferry
 ```
 
 The generated development certificates are self-signed and must not be used
@@ -54,16 +54,19 @@ certificate and private-key permissions to the service account.
 
 ```powershell
 openssl rand -hex 32 | Set-Content -NoNewline edge-a.token
-openssl rand -hex 32 | Set-Content -NoNewline management.token
+openssl rand -hex 32 | Set-Content -NoNewline management-admin.token
+openssl rand -hex 32 | Set-Content -NoNewline management-viewer.token
 ```
 
 Use the same token file contents on the Gateway and the corresponding Agent.
 Use a separate token for every Agent. Never commit tokens, private keys, or real
 certificates to the repository.
 
-The management token is independent from Agent tokens. Set
-`management.auth_token_file` on both roles. Health probes remain anonymous;
-`/metrics` and `/v1/status` require the Bearer token.
+The management Admin and Viewer tokens are independent from Agent tokens. Set
+`management.auth.admin_token_file` and `management.auth.viewer_token_file` on
+both roles. Health probes remain anonymous; `/metrics` and `/v1/status` require
+the Viewer token, while actions and configuration writes require the Admin
+token.
 
 Create the same independent transport-obfuscation key on the Gateway and
 Agent. It is not a replacement for mTLS or the Agent token:
@@ -96,7 +99,8 @@ current key while inbound packets accept both keys for the overlap window.
   `SIGTERM`/`SIGINT` (30 seconds by default). The first signal rejects new
   traffic while admitted streams finish; a second signal forces close. Config
   changes take effect after validation and restart, not through SIGHUP.
-- The embedded Dashboard is enabled by default. Set
+- The embedded Dashboard is enabled by default for legacy/manual
+  configurations; generated production bundles set it to `false`. Set
   `management.web.enabled: false` to retain the protected API without serving
   the page. A non-loopback management listener requires
   `management.tls.cert_file` and `management.tls.key_file`; `ca_file` is

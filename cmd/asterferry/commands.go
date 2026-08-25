@@ -1,13 +1,11 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -22,6 +20,7 @@ import (
 	"asterferry/internal/gateway"
 	"asterferry/internal/lifecycle"
 	"asterferry/internal/logging"
+	"asterferry/internal/managementclient"
 	"asterferry/internal/observability"
 	"github.com/spf13/cobra"
 )
@@ -60,7 +59,9 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &codedError{code: 2, err: fmt.Errorf("%w; run %q for help", err, "asterferry "+cmd.Name()+" --help")}
 	})
-	root.Example = `  asterferry init --dir ./asterferry --profile dev
+	root.Example = `  asterferry init ./asterferry --profile dev
+  asterferry up ./asterferry
+  asterferry status ./asterferry
   asterferry doctor --config ./asterferry/config/gateway.yaml
   asterferry gateway --config ./asterferry/config/gateway.yaml`
 
@@ -68,12 +69,17 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 		newVersionCommand(),
 		newCompletionCommand(),
 		newInitCommand(),
+		newMigrateCommand(),
+		newUpCommand(),
+		newDownCommand(),
 		newValidateCommand(),
 		newDoctorCommand(),
 		newStatusCommand(),
+		newConfigCommand(),
 		newHealthcheckCommand(),
 		newGatewayCommand(),
 		newAgentCommand(),
+		newSupervisorCommand(),
 	)
 	return root
 }
@@ -130,10 +136,16 @@ func newInitCommand() *cobra.Command {
 		force       bool
 	)
 	cmd := &cobra.Command{
-		Use:   "init",
+		Use:   "init [dir]",
 		Short: "generate a secure Gateway-Agent configuration bundle",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				if cmd.Flags().Changed("dir") {
+					return &codedError{code: 2, err: errors.New("provide the bundle directory either as an argument or with --dir, not both")}
+				}
+				dir = args[0]
+			}
 			if profile == "" {
 				return &codedError{code: 2, err: errors.New(`--profile is required; choose "dev" for local testing or "prod" for PKI CSRs`)}
 			}
@@ -180,10 +192,20 @@ func newDoctorCommand() *cobra.Command {
 		skipPorts  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "doctor",
+		Use:   "doctor [dir]",
 		Short: "check local files, TLS material, secrets and listener ports",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				if cmd.Flags().Changed("config") {
+					return &codedError{code: 2, err: errors.New("provide a bundle directory argument or --config, not both")}
+				}
+				b, err := openBundle(args[0])
+				if err != nil {
+					return err
+				}
+				return checkBundle(cmd.OutOrStdout(), b, jsonOutput, skipPorts)
+			}
 			c, err := loadConfig(path)
 			if err != nil {
 				return err
@@ -211,10 +233,20 @@ func newStatusCommand() *cobra.Command {
 		timeout    time.Duration
 	)
 	cmd := &cobra.Command{
-		Use:   "status",
+		Use:   "status [dir]",
 		Short: "query the local protected management status endpoint",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				if cmd.Flags().Changed("config") {
+					return &codedError{code: 2, err: errors.New("provide a bundle directory argument or --config, not both")}
+				}
+				b, err := openBundle(args[0])
+				if err != nil {
+					return err
+				}
+				return queryBundleStatus(cmd.OutOrStdout(), b, jsonOutput, timeout)
+			}
 			return queryStatus(cmd.OutOrStdout(), path, jsonOutput, timeout)
 		},
 	}
@@ -395,53 +427,17 @@ func queryStatus(w io.Writer, path string, jsonOutput bool, timeout time.Duratio
 	if err != nil {
 		return err
 	}
-	token, err := config.ReadToken(c.Management.AuthTokenFile)
+	client, err := managementclient.New(c, managementclient.Viewer, timeout)
 	if err != nil {
-		return fmt.Errorf("read management token: %w; run asterferry doctor --config %q", err, path)
-	}
-	scheme := "http"
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if c.Management.TLS.CertFile != "" {
-		scheme = "https"
-		roots, rootErr := x509.SystemCertPool()
-		if rootErr != nil || roots == nil {
-			roots = x509.NewCertPool()
-		}
-		if c.Management.TLS.CAFile != "" {
-			caBytes, readErr := os.ReadFile(c.Management.TLS.CAFile)
-			if readErr != nil {
-				return fmt.Errorf("read management TLS CA: %w", readErr)
-			}
-			if !roots.AppendCertsFromPEM(caBytes) {
-				return errors.New("management.tls.ca_file does not contain a certificate")
-			}
-		}
-		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}
-	}
-	req, err := http.NewRequest(http.MethodGet, scheme+"://"+c.Management.Listen+"/v1/status", nil)
-	if err != nil {
-		return fmt.Errorf("build status request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+string(token))
-	client := &http.Client{Timeout: timeout, Transport: transport}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("status endpoint %s is unavailable: %w; ensure the role is running", c.Management.Listen, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("read status response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusUnauthorized {
-			return errors.New("status request was unauthorized; verify management.auth_token_file")
-		}
-		return fmt.Errorf("status endpoint returned HTTP %s", resp.Status)
+		return fmt.Errorf("prepare management client: %w; run asterferry doctor --config %q", err, path)
 	}
 	var value any
-	if err := json.Unmarshal(body, &value); err != nil {
-		return fmt.Errorf("parse status response: %w", err)
+	if err := client.JSON(context.Background(), "GET", "/v1/status", nil, &value); err != nil {
+		var apiErr *managementclient.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 401 {
+			return errors.New("status request was unauthorized; verify management.auth.viewer_token_file")
+		}
+		return fmt.Errorf("status endpoint %s is unavailable: %w; ensure the role is running", c.Management.Listen, err)
 	}
 	if jsonOutput {
 		formatted, err := json.MarshalIndent(value, "", "  ")

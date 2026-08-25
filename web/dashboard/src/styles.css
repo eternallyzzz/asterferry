@@ -151,3 +151,36 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-so
   td, th { padding-right: 6px; font-size: 11px; }
   .hero-card { padding: 22px; }
 }
+
+.configuration-page { padding-bottom: 48px; }
+.config-heading { align-items: flex-end; margin-bottom: 22px; }
+.config-meta { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; color: var(--muted); font-size: 12px; }
+.config-meta code { color: var(--text); }
+.config-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.config-tabs button { border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; color: var(--muted); background: var(--panel); }
+.config-tabs button.active { color: #062117; border-color: var(--accent); background: var(--accent); font-weight: 800; }
+.config-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.config-card { padding: 22px; }
+.config-field { display: grid; gap: 7px; margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+.config-field input, .config-editor { width: 100%; border: 1px solid var(--border); border-radius: 9px; padding: 10px 11px; color: var(--text); background: var(--panel-solid); }
+.config-checkbox { display: flex; align-items: center; gap: 9px; margin-bottom: 15px; color: var(--text); font-size: 13px; }
+.config-checkbox input { width: auto; accent-color: var(--accent); }
+.config-editor-label { display: grid; gap: 8px; margin: 0; color: var(--muted); font-size: 12px; }
+.config-editor { min-height: 520px; resize: vertical; color: var(--text); font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.55; }
+.config-validation { margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+.config-validation strong { color: var(--accent); }
+.config-validation pre { max-height: 320px; overflow: auto; margin: 12px 0 0; padding: 13px; border-radius: 9px; color: var(--text); background: var(--panel-solid); font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
+.warning-line { margin: 10px 0 0; color: var(--warn); font-size: 12px; }
+.config-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.config-apply { width: auto; margin-top: 0; }
+.config-hint { margin: 13px 0 0; font-size: 12px; }
+
+@media (max-width: 1000px) {
+  .config-form-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 720px) {
+  .config-form-grid { grid-template-columns: 1fr; }
+  .config-heading { align-items: flex-start; }
+  .config-actions > button, .config-apply { width: 100%; }
+}

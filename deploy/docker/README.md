@@ -31,11 +31,11 @@ docker inspect ghcr.io/eternallyzzz/asterferry:0.1.0 --format '{{index .RepoDige
 
 ## Compose layout
 
-`compose.yaml` starts one Gateway and one Agent. It expects this local layout:
+`compose.yaml` starts one Gateway and one Agent. It can consume the same bundle
+created by `asterferry init`:
 
 ```text
-deploy/docker/
-  compose.yaml
+asterferry/
   config/
     gateway.yaml
     agent.yaml
@@ -45,7 +45,8 @@ deploy/docker/
       server.key
       agents-ca.crt
       edge-a.token
-      management.token
+      management-admin.token
+      management-viewer.token
       obfs.key
       obfs.key.previous   # optional during key rotation
     agent/
@@ -53,30 +54,36 @@ deploy/docker/
       edge-a.crt
       edge-a.key
       edge-a.token
-      management.token
+      management-admin.token
+      management-viewer.token
       obfs.key
       obfs.key.previous   # optional during key rotation
 ```
 
-Create the directories and copy the example configurations before starting.
-Change certificates (including the Agent URI SAN identity), tokens, ALPN, and
-`obfuscation.transport.key_file` paths in the copied configuration to use
-`/etc/asterferry/secrets/...`. The Gateway and
-Agent must share the same current `obfs.key`; keep the previous key in
-`obfs.key.previous` on both sides only while rotating. The Agent server address should be
-`gateway:4433` inside the Compose network.
+Generate a Docker-ready development bundle from the repository root. The
+Gateway hostname is included in the generated development certificate and the
+Agent uses the Compose service name:
 
 ```sh
-cd deploy/docker
-docker compose config
-docker compose up -d --build
-docker compose ps
+asterferry init ./asterferry --profile dev --gateway-host gateway
+# Paths in compose.yaml are resolved from deploy/docker; use an absolute path
+# or ../../asterferry when running this command from the repository root.
+export ASTERFERRY_BUNDLE_DIR=../../asterferry
+# Linux hosts: init creates private files owned by the current user. Match the
+# non-root container identity so 0600 secrets stay private and readable.
+export ASTERFERRY_CONTAINER_UID="$(id -u)"
+export ASTERFERRY_CONTAINER_GID="$(id -g)"
+docker compose -f deploy/docker/compose.yaml config
+docker compose -f deploy/docker/compose.yaml up -d --build
+docker compose -f deploy/docker/compose.yaml ps
 ```
 
-For a native bundle, `asterferry init --dir ./local --profile dev` creates the
-same `config/` and `secrets/` split used by this Compose layout. Review the
-generated paths and bind addresses before using it in a container; development
-certificates are not production credentials.
+`ASTERFERRY_BUNDLE_DIR` defaults to `../../asterferry` relative to the Compose
+file, matching the repository-root quick start. Set an absolute path when the
+bundle lives elsewhere. The Gateway and Agent must share
+the same current `obfs.key`; keep the previous key in `obfs.key.previous` on
+both sides only while rotating. Development certificates are not production
+credentials.
 
 Both services use a 35-second Compose stop window for the default 30-second
 application drain. Set `shutdown.grace_period_seconds` in each configuration
@@ -117,15 +124,16 @@ management TLS, change the corresponding healthcheck URL to `https://...` and
 add `--insecure-tls` only when the probe is strictly against `127.0.0.1` and
 the container does not trust the management CA.
 
-The image also contains the embedded Dashboard at `/dashboard/` on each
-service's management listener. Set `management.web.enabled: false` to omit the
-page while retaining the protected API. The default Compose file does not
+The image also contains the optional embedded Dashboard at `/dashboard/` on
+each service's management listener. Set `management.web.enabled: false` to omit
+the page while retaining the protected API. The default Compose file does not
 publish management listeners and mounts configuration read-only, so the
 protected configuration API reports read-only and changes must be made in the
 host file. Use `docker compose exec gateway asterferry status --config
-/etc/asterferry/config.yaml` for a container-side check, or publish a narrowly
+/etc/asterferry/config/gateway.yaml` for a container-side check, or publish a narrowly
 scoped local port/reverse proxy if a browser view is required. A public bind
-requires built-in management TLS and the management Bearer token.
+requires built-in management TLS and the management Viewer token. Actions and
+configuration writes require the Admin token through the CLI or protected API.
 
 ## Release upgrades and rollback
 

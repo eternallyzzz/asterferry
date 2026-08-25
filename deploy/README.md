@@ -22,8 +22,9 @@
    /usr/local/bin/asterferry doctor --config /etc/asterferry/agent.yaml --skip-ports
    ```
 
-   `status --config ...` queries the loopback management endpoint of a running
-   role and uses the configured management token automatically.
+   `status --config ...` queries one running role with its Viewer token;
+   `status /path/to/bundle` queries both roles. Admin-scoped actions use the
+   Admin token automatically.
 
 4. Install and start the appropriate service:
 
@@ -49,7 +50,7 @@
    ssh -N -L 9090:127.0.0.1:9090 operator@example-host
    ```
 
-   Enter the matching management token in the browser. It is held in memory
+   Enter the generated Viewer token in the browser. It is held in memory
    only; Dashboard event history is intentionally not persisted.
 
    Set `management.web.enabled: false` when only the protected API and CLI

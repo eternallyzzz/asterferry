@@ -4,7 +4,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
-    command: ["gateway", "--config", "/etc/asterferry/config.yaml"]
+    user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
+    command: ["gateway", "--config", "/etc/asterferry/config/gateway.yaml"]
     restart: unless-stopped
     stop_grace_period: 35s
     init: true
@@ -20,8 +21,8 @@ services:
       - "${ASTERFERRY_REVERSE_WEB_PORT:-28080}:28080/tcp"
       - "${ASTERFERRY_REVERSE_DNS_PORT:-21003}:21003/udp"
     volumes:
-      - ${ASTERFERRY_GATEWAY_CONFIG:-./config/gateway.yaml}:/etc/asterferry/config.yaml:ro
-      - ${ASTERFERRY_GATEWAY_SECRETS:-./secrets/gateway}:/etc/asterferry/secrets:ro
+      - ${ASTERFERRY_GATEWAY_CONFIG:-${ASTERFERRY_BUNDLE_DIR:-../../asterferry}/config/gateway.yaml}:/etc/asterferry/config/gateway.yaml:ro
+      - ${ASTERFERRY_GATEWAY_SECRETS:-${ASTERFERRY_BUNDLE_DIR:-../../asterferry}/secrets/gateway}:/etc/asterferry/secrets/gateway:ro
     healthcheck:
       test: ["CMD", "/usr/local/bin/asterferry", "healthcheck", "--url", "http://127.0.0.1:9090/healthz"]
       interval: 10s
@@ -34,7 +35,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
-    command: ["agent", "--config", "/etc/asterferry/config.yaml"]
+    user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
+    command: ["agent", "--config", "/etc/asterferry/config/agent.yaml"]
     restart: unless-stopped
     stop_grace_period: 35s
     init: true
@@ -49,8 +51,8 @@ services:
       gateway:
         condition: service_healthy
     volumes:
-      - ${ASTERFERRY_AGENT_CONFIG:-./config/agent.yaml}:/etc/asterferry/config.yaml:ro
-      - ${ASTERFERRY_AGENT_SECRETS:-./secrets/agent}:/etc/asterferry/secrets:ro
+      - ${ASTERFERRY_AGENT_CONFIG:-${ASTERFERRY_BUNDLE_DIR:-../../asterferry}/config/agent.yaml}:/etc/asterferry/config/agent.yaml:ro
+      - ${ASTERFERRY_AGENT_SECRETS:-${ASTERFERRY_BUNDLE_DIR:-../../asterferry}/secrets/agent}:/etc/asterferry/secrets/agent:ro
     healthcheck:
       test: ["CMD", "/usr/local/bin/asterferry", "healthcheck", "--url", "http://127.0.0.1:9091/readyz"]
       interval: 10s
