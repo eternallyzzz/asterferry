@@ -47,6 +47,7 @@ type GatewayMappingSnapshot struct {
 	AgentID     string `json:"agent_id"`
 	Protocol    string `json:"protocol"`
 	GatewayPort uint16 `json:"gateway_port"`
+	GatewayBind string `json:"gateway_bind"`
 	Profile     string `json:"profile"`
 	State       string `json:"state"`
 }
@@ -70,6 +71,7 @@ type AgentReverseSnapshot struct {
 	Name        string `json:"name"`
 	Protocol    string `json:"protocol"`
 	GatewayPort uint16 `json:"gateway_port"`
+	GatewayBind string `json:"gateway_bind"`
 	Local       string `json:"local"`
 }
 

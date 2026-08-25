@@ -25,6 +25,17 @@ fail() {
 commit="$(git -C "$root" rev-parse HEAD)"
 cd "$root"
 
+cleanup_frontend_scratch() {
+  [[ -d "$root/tmp" ]] || return 0
+  find "$root/tmp" -mindepth 1 -maxdepth 1 -type d \( \
+    -name 'release-check-frontend-*' -o \
+    -name 'release-check-worktree-*' -o \
+    -name 'web-dashboard-check-*' \
+  \) -exec rm -rf -- {} +
+}
+
+cleanup_frontend_scratch
+
 if ! command -v go >/dev/null 2>&1; then
   [[ "$skip_race" == "1" ]] || fail "Go is not installed; install Go $expected_go_version or rerun with -SkipRace for the functional fallback"
   [[ -n "$fallback_bin_dir" && -d "$fallback_bin_dir" ]] || fail "WSL test binaries are missing: $fallback_bin_dir"
@@ -46,6 +57,8 @@ if ! command -v go >/dev/null 2>&1; then
   echo "WSL functional verification passed using cross-compiled test binaries"
   exit 0
 fi
+
+go mod tidy -diff
 
 go_version="$(go version)"
 case "$go_version" in
@@ -103,3 +116,4 @@ if [[ "$skip_race" == "1" ]]; then
 else
   echo "WSL full verification passed"
 fi
+cleanup_frontend_scratch

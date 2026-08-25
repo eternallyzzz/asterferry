@@ -1,5 +1,5 @@
-# AsterFerry v5 public Gateway configuration.
-version: 5
+# AsterFerry v6 public Gateway configuration.
+version: 6
 role: gateway
 
 transport:
@@ -59,7 +59,7 @@ obfuscation:
   reverse_profile: standard
   max_padding_bytes: 2048
   transport:
-    # camouflage is the v5 default. Set standard only during an explicit
+    # camouflage is the v6 default. Set standard only during an explicit
     # migration or on a trusted network where raw QUIC is required.
     mode: camouflage
     key_file: "/etc/asterferry/obfs.key"

@@ -70,11 +70,23 @@ func (p *EgressPolicy) Enabled() bool {
 }
 
 func (p *EgressPolicy) Allow(ctx context.Context, network, host string, port uint16) (string, error) {
+	addresses, err := p.AllowCandidates(ctx, network, host, port, nil)
+	if err != nil {
+		return "", err
+	}
+	return addresses[0], nil
+}
+
+// AllowCandidates validates the supplied literal addresses against the same
+// policy used for hostname resolution. A non-empty candidate list is used as
+// the authenticated resolver result, preventing the dialer from silently
+// falling back to an unreviewed DNS result.
+func (p *EgressPolicy) AllowCandidates(ctx context.Context, network, host string, port uint16, candidates []string) ([]string, error) {
 	if p == nil || !p.Enabled() {
-		return "", ErrDenied
+		return nil, ErrDenied
 	}
 	if network != "tcp" && network != "udp" {
-		return "", fmt.Errorf("unsupported egress network %q", network)
+		return nil, fmt.Errorf("unsupported egress network %q", network)
 	}
 	ranges := p.tcp
 	if network == "udp" {
@@ -88,30 +100,52 @@ func (p *EgressPolicy) Allow(ctx context.Context, network, host string, port uin
 		}
 	}
 	if !allowedPort {
-		return "", fmt.Errorf("egress %s port %d is not allowed", network, port)
+		return nil, fmt.Errorf("egress %s port %d is not allowed", network, port)
 	}
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return "", ErrDenied
+		return nil, ErrDenied
 	}
-	ipList := []net.IP{net.ParseIP(strings.TrimSpace(host))}
-	if ipList[0] == nil {
+	usingCandidates := len(candidates) > 0
+	var ipList []net.IP
+	if usingCandidates {
+		ipList = make([]net.IP, 0, len(candidates))
+		for _, candidate := range candidates {
+			ip := net.ParseIP(strings.TrimSpace(candidate))
+			if ip != nil {
+				ipList = append(ipList, ip)
+			}
+		}
+	} else {
+		ipList = []net.IP{net.ParseIP(host)}
+	}
+	if !usingCandidates && (len(ipList) == 0 || (len(ipList) == 1 && ipList[0] == nil)) {
 		if ctx == nil {
 			ctx = context.Background()
 		}
 		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", strings.TrimSuffix(host, "."))
 		if err != nil {
-			return "", fmt.Errorf("resolve egress destination: %w", err)
+			return nil, fmt.Errorf("resolve egress destination: %w", err)
 		}
 		ipList = ips
 	}
+	addresses := make([]string, 0, len(ipList))
+	seen := make(map[string]struct{}, len(ipList))
 	for _, ip := range ipList {
 		if ip == nil || !p.allowedIP(ip) {
 			continue
 		}
-		return net.JoinHostPort(ip.String(), strconv.Itoa(int(port))), nil
+		address := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
+		if _, ok := seen[address]; ok {
+			continue
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
 	}
-	return "", ErrDenied
+	if len(addresses) == 0 {
+		return nil, ErrDenied
+	}
+	return addresses, nil
 }
 
 func (p *EgressPolicy) allowedIP(ip net.IP) bool {

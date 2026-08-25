@@ -10,7 +10,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -52,6 +51,23 @@ type Config struct {
 	Gateway     *GatewayConfig    `yaml:"gateway"`
 	Agent       *AgentConfig      `yaml:"agent"`
 }
+
+var ErrLegacyField = errors.New("legacy configuration field")
+
+// LegacyFieldError identifies a configuration field that must be migrated
+// before the strict runtime loader can accept the document.
+type LegacyFieldError struct {
+	Path string
+}
+
+func (e *LegacyFieldError) Error() string {
+	if e == nil || e.Path == "" {
+		return ErrLegacyField.Error()
+	}
+	return fmt.Sprintf("%s: %s", ErrLegacyField, e.Path)
+}
+
+func (e *LegacyFieldError) Unwrap() error { return ErrLegacyField }
 
 type LoggingConfig struct {
 	Level               string         `yaml:"level"`
@@ -262,7 +278,10 @@ type Tunnel struct {
 	Protocol    string `yaml:"protocol"`
 	Local       string `yaml:"local"`
 	GatewayPort uint16 `yaml:"gateway_port"`
+	GatewayBind string `yaml:"gateway_bind"`
 }
+
+const DefaultReverseGatewayBind = "127.0.0.1"
 
 type PortRange struct{ Min, Max uint16 }
 
@@ -293,6 +312,9 @@ func LoadRuntime(path string) (*Config, error) {
 // before it is written to disk.
 func LoadBytes(b []byte, path string) (*Config, error) {
 	cleanPath := filepath.Clean(path)
+	if legacy := findLegacyField(b); legacy != nil {
+		return nil, fmt.Errorf("parse config: %w", legacy)
+	}
 	var c Config
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
@@ -315,6 +337,37 @@ func LoadBytes(b []byte, path string) (*Config, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+func findLegacyField(raw []byte) *LegacyFieldError {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	var doc yaml.Node
+	if err := dec.Decode(&doc); err != nil || len(doc.Content) != 1 {
+		return nil
+	}
+	root := doc.Content[0]
+	management := yamlMappingValue(root, "management")
+	if management == nil || management.Kind != yaml.MappingNode {
+		return nil
+	}
+	for _, field := range []string{"auth_token_file", "viewer_token_file"} {
+		if yamlMappingValue(management, field) != nil {
+			return &LegacyFieldError{Path: "management." + field}
+		}
+	}
+	return nil
+}
+
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
 
 // resolveFilePaths makes file references portable when a configuration is
@@ -887,7 +940,8 @@ func (c *Config) validateAgent() error {
 		}
 	}
 	seenNames := map[string]bool{}
-	for _, t := range a.Reverse {
+	for i := range a.Reverse {
+		t := &a.Reverse[i]
 		if err := validateIdentifier(t.Name, "reverse mapping name", 128); err != nil {
 			return err
 		}
@@ -900,6 +954,15 @@ func (c *Config) validateAgent() error {
 		}
 		if t.GatewayPort == 0 {
 			return fmt.Errorf("mapping %q gateway_port must be non-zero", t.Name)
+		}
+		if strings.TrimSpace(t.GatewayBind) == "" {
+			t.GatewayBind = DefaultReverseGatewayBind
+		} else {
+			bind, err := netip.ParseAddr(strings.TrimSpace(t.GatewayBind))
+			if err != nil || strings.Contains(t.GatewayBind, "%") {
+				return fmt.Errorf("mapping %q gateway_bind must be an IP address", t.Name)
+			}
+			t.GatewayBind = bind.String()
 		}
 		if t.Protocol == "tcp" {
 			if _, err := net.ResolveTCPAddr("tcp", t.Local); err != nil {
@@ -1107,8 +1170,8 @@ func readSecretFile(path, kind string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("read %s: path must be a regular file", kind)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("read %s: file must not be writable by group or other users", kind)
+	if err := ValidateSecretFilePermissions(clean, info); err != nil {
+		return nil, fmt.Errorf("read %s: %w", kind, err)
 	}
 	b, err := os.ReadFile(clean)
 	if err != nil {

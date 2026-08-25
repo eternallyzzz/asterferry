@@ -4,9 +4,9 @@ All notable AsterFerry releases are documented here.
 
 ## [0.1.0] - Unreleased
 
-The first product release of the v5 transport stack.
+The first product release of the v6 transport stack.
 
-- Ships the v5 TLS 1.3 and QUIC relay protocol with explicit capability and
+- Ships the v6 TLS 1.3 and QUIC relay protocol with explicit capability and
   limit negotiation.
 - Provides Gateway and Agent roles, SOCKS5/HTTP proxying, TCP/UDP reverse
   mappings, policy-controlled egress, and graceful draining.
@@ -28,6 +28,8 @@ The first product release of the v5 transport stack.
 - Uses immutable release metadata, SHA256 checksums, SBOMs, and build
   attestations for published artifacts.
 
-The v5 protocol is a breaking generation. v4 configuration frames and
+The v6 protocol is a breaking generation. v5 configuration frames and
 connections are not compatible with this release; upgrade the Gateway and
-Agent together.
+Agent together. Reverse mappings now default to loopback and require an
+explicit `gateway_bind` for public exposure; proxy opens carry bounded DNS
+candidates for address-family failover.

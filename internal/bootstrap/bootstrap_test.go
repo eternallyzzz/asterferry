@@ -158,14 +158,24 @@ func TestGenerateCanRefreshItsOwnBundle(t *testing.T) {
 	if _, err := Generate(Options{Dir: root, Profile: ProfileDev, AgentID: "edge-a"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "operator-notes.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Generate(Options{Dir: root, Profile: ProfileDev, AgentID: "edge-b", Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "secrets", "gateway", "edge-b.token")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "secrets", "gateway", "edge-a.token")); err != nil {
-		t.Fatal("refresh should preserve old generated files rather than deleting user data")
+	backup := root + ".bak"
+	if _, err := os.Stat(filepath.Join(backup, "secrets", "gateway", "edge-a.token")); err != nil {
+		t.Fatal("refresh should preserve the complete old bundle in its backup")
+	}
+	if data, err := os.ReadFile(filepath.Join(backup, "operator-notes.txt")); err != nil || string(data) != "keep" {
+		t.Fatalf("backup lost operator data: %q, %v", data, err)
+	}
+	if _, err := Generate(Options{Dir: root, Profile: ProfileDev, AgentID: "edge-c", Force: true}); err == nil {
+		t.Fatal("force refresh must refuse to overwrite an existing backup")
 	}
 }
 

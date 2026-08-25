@@ -235,7 +235,7 @@ design.
 
 For a production upgrade, run `validate` and `doctor` against the exact
 configuration and secrets, then use the OCI command with the new version and
-`--atomic --wait`. Upgrade Gateway and Agent together because v5 is a breaking
+`--atomic --wait`. Upgrade Gateway and Agent together because v6 is a breaking
 protocol generation. Check `kubectl rollout status` and the readiness probe
 before removing the previous release. If the new release is unhealthy, inspect
 `helm history` and roll back both roles with:
@@ -245,7 +245,7 @@ helm rollback asterferry-gateway <revision> --namespace asterferry --wait
 helm rollback asterferry-agent <revision> --namespace asterferry --wait
 ```
 
-Only roll back to a release with a compatible configuration and the same v5
+Only roll back to a release with a compatible configuration and the same v6
 protocol generation; v4 is not a valid rollback target.
 
 ## Cluster readiness boundary

@@ -24,6 +24,11 @@ import (
 
 const RestartRequestedExitCode = 75
 
+var (
+	ErrForcedShutdownTimeout = errors.New("forced shutdown did not finish within the close wait period")
+	forcedShutdownWait       = 2 * time.Second
+)
+
 type ExitCodeError struct {
 	Code int
 	Err  error
@@ -79,8 +84,9 @@ func Run(ctx context.Context, options Options) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("configuration %q was not found: %w; create it or run asterferry init", options.ConfigPath, err)
 		}
-		if strings.Contains(err.Error(), "auth_token_file") {
-			return fmt.Errorf("configuration %q uses the removed management.auth_token_file field: %w; run asterferry migrate <bundle>", options.ConfigPath, err)
+		var legacy *config.LegacyFieldError
+		if errors.As(err, &legacy) {
+			return fmt.Errorf("configuration %q uses the removed %s field: %w; run asterferry migrate <bundle>", options.ConfigPath, legacy.Path, err)
 		}
 		return fmt.Errorf("configuration %q is invalid: %w; run asterferry doctor after fixing YAML errors", options.ConfigPath, err)
 	}
@@ -169,14 +175,26 @@ func waitSignals(ctx context.Context, grace time.Duration, shutdown func(context
 		return intentionalShutdownError(err)
 	case <-signals:
 		forceErr := closeFn()
-		shutdownErr := <-done
+		shutdownErr, finished := waitShutdown(done, forcedShutdownWait)
+		if !finished {
+			if forceErr != nil {
+				return errors.Join(forceErr, ErrForcedShutdownTimeout)
+			}
+			return ErrForcedShutdownTimeout
+		}
 		if forceErr != nil {
 			return forceErr
 		}
 		return intentionalShutdownError(shutdownErr)
 	case <-ctx.Done():
 		forceErr := closeFn()
-		shutdownErr := <-done
+		shutdownErr, finished := waitShutdown(done, forcedShutdownWait)
+		if !finished {
+			if forceErr != nil {
+				return errors.Join(forceErr, ErrForcedShutdownTimeout)
+			}
+			return ErrForcedShutdownTimeout
+		}
 		if forceErr != nil {
 			return forceErr
 		}
@@ -184,6 +202,20 @@ func waitSignals(ctx context.Context, grace time.Duration, shutdown func(context
 			return shutdownErr
 		}
 		return ctx.Err()
+	}
+}
+
+func waitShutdown(done <-chan error, timeout time.Duration) (error, bool) {
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err, true
+	case <-timer.C:
+		return nil, false
 	}
 }
 

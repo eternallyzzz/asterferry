@@ -296,7 +296,7 @@ func (a *Agent) Dashboard() observability.DashboardSnapshot {
 	}
 	reverse := make([]observability.AgentReverseSnapshot, 0, len(a.cfg.Agent.Reverse))
 	for _, tunnel := range a.cfg.Agent.Reverse {
-		reverse = append(reverse, observability.AgentReverseSnapshot{Name: tunnel.Name, Protocol: tunnel.Protocol, GatewayPort: tunnel.GatewayPort, Local: tunnel.Local})
+		reverse = append(reverse, observability.AgentReverseSnapshot{Name: tunnel.Name, Protocol: tunnel.Protocol, GatewayPort: tunnel.GatewayPort, GatewayBind: tunnel.GatewayBind, Local: tunnel.Local})
 	}
 	keyFingerprint := ""
 	if len(a.cfg.TransportObfuscation.CurrentKey) > 0 {
@@ -444,7 +444,7 @@ func (a *Agent) connectOnce(ctx context.Context) (transport.Session, *Session, e
 	}
 	regs := make([]transport.TunnelRegistration, 0, len(a.cfg.Agent.Reverse))
 	for _, t := range a.cfg.Agent.Reverse {
-		regs = append(regs, transport.TunnelRegistration{Name: t.Name, Protocol: t.Protocol, GatewayPort: t.GatewayPort, Profile: a.profile(a.cfg.Obfuscation.ReverseProfile)})
+		regs = append(regs, transport.TunnelRegistration{Name: t.Name, Protocol: t.Protocol, GatewayPort: t.GatewayPort, GatewayBind: t.GatewayBind, Profile: a.profile(a.cfg.Obfuscation.ReverseProfile)})
 	}
 	reg, _ := transport.MessageFrame(transport.TypeRegister, 2, transport.Register{Mappings: regs})
 	if err = transport.ValidateRegister(transport.Register{Mappings: regs}); err != nil {
@@ -772,10 +772,14 @@ func (s *Session) reverseUDP(stream transport.Stream, tunnel config.Tunnel, requ
 }
 
 func (a *Agent) OpenProxy(ctx context.Context, network, address string, port uint16) (transport.Stream, error) {
+	return a.OpenProxyCandidates(ctx, network, address, port, nil)
+}
+
+func (a *Agent) OpenProxyCandidates(ctx context.Context, network, address string, port uint16, candidates []string) (transport.Stream, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := transport.ValidateOpenProxy(transport.OpenProxy{Network: network, Address: address, Port: port, Profile: a.profile(a.cfg.Obfuscation.ProxyProfile)}); err != nil {
+	if err := transport.ValidateOpenProxy(transport.OpenProxy{Network: network, Address: address, Port: port, Profile: a.profile(a.cfg.Obfuscation.ProxyProfile), Candidates: candidates}); err != nil {
 		return nil, err
 	}
 	sess, err := a.sessions.wait(ctx)
@@ -802,7 +806,7 @@ func (a *Agent) OpenProxy(ctx context.Context, network, address string, port uin
 	stopStreamContext := transport.SetStreamContext(stream, handshakeCtx)
 	defer stopStreamContext()
 	requestID := uint64(1)
-	open, _ := transport.MessageFrame(transport.TypeOpenProxy, requestID, transport.OpenProxy{Network: network, Address: address, Port: port, Profile: a.profile(a.cfg.Obfuscation.ProxyProfile)})
+	open, _ := transport.MessageFrame(transport.TypeOpenProxy, requestID, transport.OpenProxy{Network: network, Address: address, Port: port, Profile: a.profile(a.cfg.Obfuscation.ProxyProfile), Candidates: append([]string(nil), candidates...)})
 	if err := writeFrame(stream, open, sess.maxFrame()); err != nil {
 		_ = stream.Close()
 		release()
@@ -843,18 +847,35 @@ func (a *Agent) route(inbound, host string) string {
 	return route
 }
 
-func (a *Agent) routeTarget(inbound, host string) (string, netip.Addr) {
+func (a *Agent) routeTarget(inbound, host string) (string, []netip.Addr) {
 	ctx, cancel := context.WithTimeout(a.ctx, time.Duration(a.cfg.Limits.DialTimeoutSec)*time.Second)
 	defer cancel()
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil || len(ips) == 0 {
-		return config.RouteGateway, netip.Addr{}
+		return config.RouteGateway, nil
 	}
-	addr, ok := netip.AddrFromSlice(ips[0])
-	if !ok {
-		return config.RouteGateway, netip.Addr{}
+	route := config.RouteDirect
+	result := make([]netip.Addr, 0, len(ips))
+	seen := make(map[netip.Addr]struct{}, len(ips))
+	for _, ip := range ips {
+		addr, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			continue
+		}
+		addr = addr.Unmap()
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		result = append(result, addr)
+		if a.router == nil || a.router.Choose(inbound, host, ip) != config.RouteDirect {
+			route = config.RouteGateway
+		}
 	}
-	return a.router.Choose(inbound, host, ips[0]), addr.Unmap()
+	if len(result) == 0 {
+		return config.RouteGateway, nil
+	}
+	return route, result
 }
 
 func (a *Agent) relayProfileWithLimits(name string, limits transport.Limits) relay.Profile {

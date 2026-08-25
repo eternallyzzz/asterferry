@@ -186,8 +186,8 @@ func socksReply(conn net.Conn, code byte, addr net.IP, port uint16) {
 }
 
 func (a *Agent) handleSOCKSConnect(conn net.Conn, br *bufio.Reader, tag, host string, port uint16) {
-	route, resolvedIP := a.routeTarget(tag, host)
-	remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: port, ResolvedIP: resolvedIP}, proxy.Path(route))
+	route, resolvedIPs := a.routeTarget(tag, host)
+	remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: port, ResolvedIPs: resolvedIPs}, proxy.Path(route))
 	if err != nil {
 		a.logProxyEvent(tag, "socks5", host, port, route, "open_failed", route, agentErrorKind(err))
 		socksReply(conn, 5, nil, 0)
@@ -372,9 +372,9 @@ func (a *Agent) newUDPPath(ctx context.Context, tag, host string, port uint16, c
 	limits := transport.LimitsFromConfig(a.cfg.Limits, a.cfg.StreamLimit)
 	p := &udpPath{agent: a, addr: source, client: client, clientAddr: source, target: net.JoinHostPort(host, strconv.Itoa(int(port))), ctx: ctx, limits: limits}
 	p.touch()
-	routeName, resolvedIP := a.routeTarget(tag, host)
+	routeName, resolvedIPs := a.routeTarget(tag, host)
 	route := proxy.Path(routeName)
-	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port, ResolvedIP: resolvedIP}, route)
+	remote, err := a.outbound.OpenDatagram(ctx, proxy.Target{Network: "udp", Host: host, Port: port, ResolvedIPs: resolvedIPs}, route)
 	if err != nil {
 		return nil
 	}
@@ -566,8 +566,8 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 		return
 	}
 	if req.Method == http.MethodConnect {
-		route, resolvedIP := a.routeTarget(in.Tag, host)
-		remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIP: resolvedIP}, proxy.Path(route))
+		route, resolvedIPs := a.routeTarget(in.Tag, host)
+		remote, err := a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIPs: resolvedIPs}, proxy.Path(route))
 		if err != nil {
 			a.logProxyEvent(in.Tag, "http_connect", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
 			return
@@ -580,8 +580,8 @@ func (a *Agent) handleHTTP(conn net.Conn, in config.Inbound) {
 		return
 	}
 	var remote io.ReadWriteCloser
-	route, resolvedIP := a.routeTarget(in.Tag, host)
-	remote, err = a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIP: resolvedIP}, proxy.Path(route))
+	route, resolvedIPs := a.routeTarget(in.Tag, host)
+	remote, err = a.outbound.OpenStream(a.ctx, proxy.Target{Network: "tcp", Host: host, Port: uint16(portNum), ResolvedIPs: resolvedIPs}, proxy.Path(route))
 	if err != nil {
 		a.logProxyEvent(in.Tag, "http", host, uint16(portNum), route, "open_failed", route, agentErrorKind(err))
 		return

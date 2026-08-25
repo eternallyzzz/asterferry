@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -84,5 +85,39 @@ func TestAgentOutboundDirectDatagram(t *testing.T) {
 	n, err := datagram.Read(got)
 	if err != nil || string(got[:n]) != "udp" {
 		t.Fatalf("direct UDP echo = %q, err=%v", got[:n], err)
+	}
+}
+
+func TestAgentOutboundDirectStreamFallsBackAcrossResolvedCandidates(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.Copy(conn, conn)
+	}()
+	a := testAgentRuntime()
+	a.cfg.Limits.DialTimeoutSec = 1
+	outbound := agentOutbound{agent: a}
+	port := uint16(listener.Addr().(*net.TCPAddr).Port)
+	target := proxy.Target{Network: "tcp", Host: "example.invalid", Port: port, ResolvedIPs: []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("127.0.0.1")}}
+	stream, err := outbound.OpenStream(context.Background(), target, proxy.PathDirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Write([]byte("fallback")); err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.(net.Conn).SetDeadline(time.Now().Add(time.Second))
+	got := make([]byte, len("fallback"))
+	if _, err := io.ReadFull(stream, got); err != nil || string(got) != "fallback" {
+		t.Fatalf("fallback echo = %q, err=%v", got, err)
 	}
 }

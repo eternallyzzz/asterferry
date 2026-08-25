@@ -18,7 +18,7 @@ func TestRunValidationAndCommandErrors(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gateway.yaml")
-	data := []byte(`version: 5
+	data := []byte(`version: 6
 role: gateway
 transport:
   alpn: af-test-123456

@@ -558,6 +558,31 @@ func restoreNode(node, base *yaml.Node) error {
 		}
 	}
 	if node.Kind == yaml.SequenceNode && base.Kind == yaml.SequenceNode {
+		if keyed, ok := keyedSequence(node, base, "tag"); ok {
+			for _, child := range node.Content {
+				tag, hasTag := mappingScalar(child, "tag")
+				if !hasTag {
+					if containsRedactedPassword(child) {
+						return ErrSecretField
+					}
+					if err := restoreNode(child, nil); err != nil {
+						return err
+					}
+					continue
+				}
+				baseChild, exists := keyed[tag]
+				if !exists {
+					if containsRedactedPassword(child) {
+						return ErrSecretField
+					}
+					continue
+				}
+				if err := restoreNode(child, baseChild); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		for i, child := range node.Content {
 			if i < len(base.Content) {
 				if err := restoreNode(child, base.Content[i]); err != nil {
@@ -567,6 +592,60 @@ func restoreNode(node, base *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+func keyedSequence(node, base *yaml.Node, key string) (map[string]*yaml.Node, bool) {
+	result := make(map[string]*yaml.Node)
+	if node == nil || base == nil || len(base.Content) == 0 {
+		return nil, false
+	}
+	for _, child := range base.Content {
+		value, ok := mappingScalar(child, key)
+		if !ok || value == "" {
+			return nil, false
+		}
+		if _, exists := result[value]; exists {
+			return nil, false
+		}
+		result[value] = child
+	}
+	for _, child := range node.Content {
+		if _, ok := mappingScalar(child, key); ok {
+			return result, true
+		}
+	}
+	return nil, false
+}
+
+func mappingScalar(node *yaml.Node, key string) (string, bool) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return "", false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key && node.Content[i+1].Kind == yaml.ScalarNode {
+			return node.Content[i+1].Value, true
+		}
+	}
+	return "", false
+}
+
+func containsRedactedPassword(node *yaml.Node) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == "password" && node.Content[i+1].Kind == yaml.ScalarNode && node.Content[i+1].Value == RedactedValue {
+				return true
+			}
+		}
+	}
+	for _, child := range node.Content {
+		if containsRedactedPassword(child) {
+			return true
+		}
+	}
+	return node.Kind == yaml.AliasNode && containsRedactedPassword(node.Alias)
 }
 
 func mappingValues(node *yaml.Node) map[string]*yaml.Node {

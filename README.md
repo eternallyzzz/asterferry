@@ -4,7 +4,7 @@ AsterFerry is a lightweight private-network relay. A public `gateway` and an
 internal `agent` connect over TLS 1.3 and QUIC to provide local SOCKS5/HTTP
 proxying and TCP/UDP reverse mappings.
 
-The current configuration and wire protocol are v5, with strict role
+The current configuration and wire protocol are v6, with strict role
 separation:
 
 - `gateway`: public entry point, Agent mTLS/token authentication, reverse port
@@ -157,7 +157,7 @@ records. The `balanced` profile adds bounded random padding to reduce fixed-size
 fingerprints; it does not impersonate HTTP/3, WebSocket, or another application
 protocol.
 
-The v5 default also applies a versioned outer UDP camouflage layer around QUIC.
+The v6 default also applies a versioned outer UDP camouflage layer around QUIC.
 It uses an independent key file, random salts, keyed packet tags, and bounded
 handshake shaping. This hides QUIC packet bytes from passive DPI and silently
 drops unauthenticated probes. Normal QUIC data keeps native packet coalescing;
@@ -184,7 +184,7 @@ process-scoped keyed hash; plaintext domains require both DEBUG logging and the
 explicit `ASTERFERRY_LOG_EXPOSE_DOMAIN_DEBUG=true` override. Payloads, cookies,
 credentials, and headers are never logged.
 
-## v5 protocol negotiation
+## v6 protocol negotiation
 
 Control messages use a deterministic binary codec maintained under
 `internal/transport`; the outer envelope has a fixed 16-byte header, stable
@@ -196,8 +196,10 @@ datagrams.
 During the authenticated handshake, the Agent and Gateway negotiate supported
 features and the minimum of their frame, record, write-batch, UDP, and stream
 limits. The required `errors.v1` and `limits.v1` capabilities must be present
-on both sides. v5 is a breaking protocol generation: v4 protobuf frames and
-connections are rejected, with no downgrade or compatibility path.
+on both sides. v6 is a breaking protocol generation: v5 frames and
+connections are rejected, with no downgrade or compatibility path. The v6
+registration payload carries an explicit reverse bind address, and proxy
+opens carry bounded DNS candidates for deterministic address-family failover.
 
 Protocol failures use stable error codes and a retryable flag. Remote error
 details are deliberately short and sanitized, while full diagnostics remain
@@ -235,7 +237,7 @@ The optional `cluster.node_id` field is identity metadata for future Gateway
 coordination. It does not enable clustering, connect to Redis/etcd, or make
 multiple Gateway replicas safe. Keep the Gateway at one replica until a
 coordinated owner store, L4 connection affinity, and reverse-port routing are
-deployed together. The v5 data plane remains local to the Gateway that owns an
+deployed together. The v6 data plane remains local to the Gateway that owns an
 Agent session; existing QUIC streams cannot be migrated between nodes.
 
 ## Security boundaries
@@ -282,7 +284,7 @@ ASTERFERRY_SNIFF_TIMEOUT_MS=250
 ## Releases, verification, and upgrades
 
 The first product release is `v0.1.0`. Product versions use SemVer without
-changing the independent v5 wire-protocol identifier. A release tag on `main`
+changing the independent v6 wire-protocol identifier. A release tag on `main`
 publishes the following immutable release material:
 
 - Linux amd64/arm64 and Windows amd64 CLI archives.
@@ -322,10 +324,10 @@ configuration and secrets before upgrading. Use an atomic Helm upgrade and
 keep the previous release available for rollback. For Compose, pull the pinned
 image, run `docker compose config`, then recreate both roles together.
 
-The v5 protocol is a breaking generation, so Gateway and Agent upgrades must
+The v6 protocol is a breaking generation, so Gateway and Agent upgrades must
 be coordinated. A rollback is supported only between releases that share the
-same compatible configuration and protocol generation; do not use a v4
-binary or configuration as a v5 rollback target.
+same compatible configuration and protocol generation; do not use a v5
+binary or configuration as a v6 rollback target.
 
 ## Verification
 
@@ -384,7 +386,7 @@ distribution must have the expected Go toolchain installed; coverage does not
 fall back to cross-compiled test binaries.
 
 The historical `myproxy` and `myfrp` projects were design references only;
-their v1 configuration and wire protocol are not compatible with AsterFerry v5.
+their v1 configuration and wire protocol are not compatible with AsterFerry v6.
 
 ## Performance validation
 
@@ -418,7 +420,7 @@ acceptable for a quick smoke test but can distort build and startup timings.
 Record the WSL `net.core.rmem_max` and `net.core.wmem_max` values as well:
 restricted UDP socket limits can dominate Linux/WSL results before application
 tuning. For a two-process Windows↔WSL reverse-tunnel measurement, use
-`scripts/bench-cross-platform.ps1` with separately prepared v5 configs; it
+`scripts/bench-cross-platform.ps1` with separately prepared v6 configs; it
 uses `cmd/asterferry-bench` and emits a JSON goodput result. The configs must
 map a TCP reverse tunnel to the benchmark echo endpoint; the script does not
 generate or copy certificates and private keys.

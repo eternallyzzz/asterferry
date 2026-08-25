@@ -204,6 +204,9 @@ func Run(ctx context.Context, options Options) error {
 }
 
 func StartDetached(ctx context.Context, executable string, b bundle.Bundle, output io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := b.EnsureRuntimeDirs(); err != nil {
 		return err
 	}
@@ -214,12 +217,10 @@ func StartDetached(ctx context.Context, executable string, b bundle.Bundle, outp
 		output = io.Discard
 	}
 	statePath := filepath.Join(b.RunDir, "state.json")
-	if state, stateErr := readState(b); stateErr == nil {
-		if state.SupervisorPID > 0 {
-			if process, findErr := os.FindProcess(state.SupervisorPID); findErr == nil && processExists(process) {
-				return errors.New("bundle is already running")
-			}
-		}
+	if bundleManagementReachable(ctx, b, time.Second) {
+		return errors.New("bundle is already running")
+	}
+	if _, stateErr := readState(b); stateErr == nil {
 		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove stale supervisor state: %w", err)
 		}
@@ -262,7 +263,12 @@ func Stop(ctx context.Context, b bundle.Bundle, timeout time.Duration, output io
 	if timeout <= 0 {
 		timeout = defaultStopWait
 	}
-	state, err := readState(b)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCtx, cancelStop := context.WithTimeout(ctx, timeout)
+	defer cancelStop()
+	_, err := readState(b)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -280,34 +286,70 @@ func Stop(ctx context.Context, b bundle.Bundle, timeout time.Duration, output io
 		if clientErr != nil {
 			continue
 		}
-		requestCtx, cancel := context.WithTimeout(ctx, timeout)
-		response, requestErr := client.Do(requestCtx, "POST", "/v1/actions/shutdown", nil)
+		response, requestErr := client.Do(stopCtx, "POST", "/v1/actions/shutdown", nil)
 		if response != nil {
 			_ = response.Body.Close()
 		}
-		cancel()
 		if requestErr == nil && output != nil {
 			_, _ = fmt.Fprintf(output, "%s shutdown requested\n", role)
 		}
 	}
-	if state.SupervisorPID > 0 {
-		if process, findErr := os.FindProcess(state.SupervisorPID); findErr == nil {
-			deadline := time.Now().Add(timeout)
-			for time.Now().Before(deadline) {
-				if !processExists(process) {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
-			_ = process.Kill()
-		}
+	if err := waitForBundleStopped(stopCtx, b); err != nil {
+		return err
 	}
 	_ = os.Remove(filepath.Join(b.RunDir, "state.json"))
 	return nil
+}
+
+func bundleManagementReachable(ctx context.Context, b bundle.Bundle, timeout time.Duration) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+	for _, role := range []string{bundle.AgentRole, bundle.GatewayRole} {
+		path, err := b.Config(role)
+		if err != nil {
+			continue
+		}
+		c, err := config.LoadRuntime(path)
+		if err != nil {
+			continue
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, timeout)
+		conn, dialErr := (&net.Dialer{}).DialContext(requestCtx, "tcp", c.Management.Listen)
+		cancel()
+		if dialErr == nil {
+			_ = conn.Close()
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+	}
+	return false
+}
+
+func waitForBundleStopped(ctx context.Context, b bundle.Bundle) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("bundle did not stop before timeout: %w", err)
+		}
+		if !bundleManagementReachable(ctx, b, 250*time.Millisecond) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("bundle did not stop before timeout: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func validateBundle(b bundle.Bundle) error {

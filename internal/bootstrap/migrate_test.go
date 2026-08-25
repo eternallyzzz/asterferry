@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,8 +109,8 @@ func TestMigrateRemovesLegacyFieldsWhenViewerAlreadyExists(t *testing.T) {
   auth:
     admin_token_file: admin.token
     viewer_token_file: viewer.token
-  auth_token_file: old-admin.token
-  viewer_token_file: old-viewer.token
+  auth_token_file: admin.token
+  viewer_token_file: viewer.token
 `)
 	updated, changed, createViewer, err := migrateConfigDocument(raw, "generated-viewer.token")
 	if err != nil {
@@ -124,6 +125,37 @@ func TestMigrateRemovesLegacyFieldsWhenViewerAlreadyExists(t *testing.T) {
 	}
 	if !strings.Contains(text, "viewer_token_file: viewer.token") {
 		t.Fatalf("nested viewer token was not retained: %s", text)
+	}
+}
+
+func TestMigrateRejectsConflictingAdminFields(t *testing.T) {
+	raw := []byte(`management:
+  auth:
+    admin_token_file: nested-admin.token
+  auth_token_file: legacy-admin.token
+`)
+	updated, changed, createViewer, err := migrateConfigDocument(raw, "generated-viewer.token")
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("conflicting admin fields error = %v", err)
+	}
+	if updated != nil || changed || createViewer {
+		t.Fatalf("conflict must not produce a migration: updated=%q changed=%t createViewer=%t", updated, changed, createViewer)
+	}
+}
+
+func TestMigrateRejectsConflictingViewerFields(t *testing.T) {
+	raw := []byte(`management:
+  auth:
+    admin_token_file: admin.token
+    viewer_token_file: nested-viewer.token
+  viewer_token_file: legacy-viewer.token
+`)
+	_, changed, createViewer, err := migrateConfigDocument(raw, "generated-viewer.token")
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("conflicting viewer fields error = %v", err)
+	}
+	if changed || createViewer {
+		t.Fatalf("conflict must not change document: changed=%t createViewer=%t", changed, createViewer)
 	}
 }
 

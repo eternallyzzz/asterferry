@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -48,6 +49,14 @@ func TestRuntimeSecretReadersAndFingerprint(t *testing.T) {
 	}
 	if _, err := ReadSecret(longPath); err == nil {
 		t.Fatal("oversized secret should fail")
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(tokenPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadToken(tokenPath); err == nil {
+			t.Fatal("owner-readable secret with group/other read permission should fail")
+		}
 	}
 }
 

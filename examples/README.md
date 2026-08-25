@@ -1,11 +1,13 @@
-# AsterFerry v5 configuration examples
+# AsterFerry v6 configuration examples
 
 The configuration uses two fixed roles: `gateway` (public entry point) and
 `agent` (internal node). The old `tunnels` section is now named `reverse`, and
-the public port field is `gateway_port`.
+the public port field is `gateway_port`. Reverse mappings bind to loopback by
+default; set `gateway_bind` explicitly to a public interface when exposure is
+intentional.
 
-The examples use protocol/configuration version 5. Gateway and Agent must be
-upgraded together; v4 and older configurations and connections are rejected.
+The examples use protocol/configuration version 6. Gateway and Agent must be
+upgraded together; v5 and older configurations and connections are rejected.
 
 For the fastest local test, generate a complete pair instead of following the
 manual certificate steps below:

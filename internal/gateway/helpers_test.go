@@ -76,7 +76,7 @@ func TestGatewayHelpersAndSessionAdmission(t *testing.T) {
 	if !allowedPort("tcp", 443, g.acl["edge"]) || !allowedPort("udp", 53, g.acl["edge"]) || allowedPort("tcp", 0, g.acl["edge"]) {
 		t.Fatal("gateway ACL port checks are incorrect")
 	}
-	if mappingKey("tcp", 443) != "tcp:443" {
+	if mappingKey("tcp", config.DefaultReverseGatewayBind, 443) != "tcp:127.0.0.1:443" {
 		t.Fatal("mapping key format changed")
 	}
 	if errorKind(context.Canceled) != "canceled" || errorKind(errors.New("boom")) == "" {
@@ -133,7 +133,7 @@ func TestMappingManagerRegisterDrainAndClose(t *testing.T) {
 	if result.Error != nil || manager.Count() != 1 {
 		t.Fatalf("mapping registration = %#v count=%d", result, manager.Count())
 	}
-	item := manager.items[mappingKey("tcp", uint16(port))]
+	item := manager.items[mappingKey("tcp", config.DefaultReverseGatewayBind, uint16(port))]
 	if item == nil || item.Ownership().AgentID != "edge" {
 		t.Fatal("registered mapping ownership is missing")
 	}

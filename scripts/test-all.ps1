@@ -22,6 +22,37 @@ $expectedGoVersion = if ([string]::IsNullOrWhiteSpace($env:ASTERFERRY_EXPECTED_G
 $outputDir = Join-Path $root "tmp/test/windows"
 $null = New-Item -ItemType Directory -Force -Path $outputDir
 $logPath = Join-Path $outputDir "test.log"
+$frontendTemp = $null
+
+function Remove-FrontendScratch {
+    $scratchRoot = Join-Path $root "tmp"
+    if (-not (Test-Path -LiteralPath $scratchRoot)) { return }
+    $targets = @(Get-ChildItem -LiteralPath $scratchRoot -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "release-check-frontend-*" -or $_.Name -like "release-check-worktree-*" -or $_.Name -like "web-dashboard-check-*" })
+    foreach ($target in $targets) {
+        $targetPath = (Resolve-Path -LiteralPath $target.FullName).Path
+        if (-not $targetPath.StartsWith($scratchRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "refuse to remove frontend scratch outside tmp: $targetPath"
+        }
+        Get-ChildItem -LiteralPath $targetPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
+            }
+        }
+        Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $targetPath) {
+            throw "frontend scratch cleanup did not remove $targetPath"
+        }
+    }
+}
+
+function Prepare-FrontendScratch {
+    $script:frontendTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("asterferry-dashboard-" + [guid]::NewGuid().ToString("N"))
+    $null = New-Item -ItemType Directory -Force -Path $script:frontendTemp
+    Get-ChildItem -LiteralPath (Join-Path $root "web/dashboard") -Force |
+        Where-Object { $_.Name -ne "node_modules" } |
+        Copy-Item -Destination $script:frontendTemp -Recurse -Force
+}
 
 function Require-Command([string]$Name) {
     if ($null -eq (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -112,6 +143,7 @@ function Build-WslTestBinaries {
 }
 
 try {
+    Remove-FrontendScratch
     Require-Command "go"
     Require-Command "gofmt"
     Require-Command "node"
@@ -164,11 +196,21 @@ try {
     }
     $metadata | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $outputDir "metadata.json")
 
-    Invoke-Logged "Dashboard npm dependencies" "npm" @("--prefix", "web/dashboard", "ci")
-    Invoke-Logged "Dashboard type check" "npm" @("--prefix", "web/dashboard", "run", "lint")
-    Invoke-Logged "Dashboard unit tests" "npm" @("--prefix", "web/dashboard", "test")
-    Invoke-Logged "Dashboard production build" "npm" @("--prefix", "web/dashboard", "run", "build")
-    Invoke-Logged "Dashboard dependency audit" "npm" @("--prefix", "web/dashboard", "audit", "--registry=https://registry.npmjs.org", "--omit=dev", "--audit-level=high")
+    Invoke-Logged "Go module tidy check" "go" @("mod", "tidy", "-diff")
+    Prepare-FrontendScratch
+    $oldDashboardOut = $env:ASTERFERRY_DASHBOARD_OUT
+    try {
+        $env:ASTERFERRY_DASHBOARD_OUT = (Join-Path $root "internal/dashboard/dist")
+        Invoke-Logged "Dashboard npm dependencies" "npm" @("--prefix", $frontendTemp, "ci")
+        Invoke-Logged "Dashboard type check" "npm" @("--prefix", $frontendTemp, "run", "lint")
+        Invoke-Logged "Dashboard unit tests" "npm" @("--prefix", $frontendTemp, "test")
+        Invoke-Logged "Dashboard production build" "npm" @("--prefix", $frontendTemp, "run", "build")
+        Invoke-Logged "Dashboard dependency audit" "npm" @("--prefix", $frontendTemp, "audit", "--registry=https://registry.npmjs.org", "--omit=dev", "--audit-level=high")
+    } finally {
+        if ($null -eq $oldDashboardOut) { Remove-Item Env:ASTERFERRY_DASHBOARD_OUT -ErrorAction SilentlyContinue } else { $env:ASTERFERRY_DASHBOARD_OUT = $oldDashboardOut }
+        if ($null -ne $frontendTemp -and (Test-Path -LiteralPath $frontendTemp)) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }
+        $frontendTemp = $null
+    }
     Invoke-Logged "Dashboard generated assets check" "git" @("diff", "--exit-code", "--", "internal/dashboard/dist")
 
     Invoke-Logged "Go module verification" "go" @("mod", "verify")
@@ -278,6 +320,8 @@ try {
         Write-Host "Race tests were skipped; install a CGO-enabled Go toolchain before claiming strict full verification."
     }
 } catch {
+    if ($null -ne $frontendTemp -and (Test-Path -LiteralPath $frontendTemp)) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }
+    Remove-FrontendScratch
     Write-Error $_
     exit 1
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"asterferry/internal/cluster"
+	"asterferry/internal/config"
 	"asterferry/internal/relay"
 	"asterferry/internal/transport"
 )
@@ -31,16 +32,25 @@ type Mapping struct {
 
 func newMapping(server *Gateway, session *Session, spec transport.TunnelRegistration) (*Mapping, error) {
 	ctx, cancel := context.WithCancel(session.ctx)
-	m := &Mapping{server: server, session: session, owner: session.owner(server.nodeID), spec: spec, key: mappingKey(spec.Protocol, spec.GatewayPort), ctx: ctx, cancel: cancel}
+	if spec.GatewayBind == "" {
+		spec.GatewayBind = config.DefaultReverseGatewayBind
+	}
+	m := &Mapping{server: server, session: session, owner: session.owner(server.nodeID), spec: spec, key: mappingKey(spec.Protocol, spec.GatewayBind, spec.GatewayPort), ctx: ctx, cancel: cancel}
+	listenAddress := net.JoinHostPort(spec.GatewayBind, fmt.Sprint(spec.GatewayPort))
 	if spec.Protocol == "tcp" {
-		l, err := net.Listen("tcp", fmt.Sprintf(":%d", spec.GatewayPort))
+		l, err := net.Listen("tcp", listenAddress)
 		if err != nil {
 			cancel()
 			return nil, err
 		}
 		m.tcp = l
 	} else {
-		u, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6zero, Port: int(spec.GatewayPort)})
+		addr, err := net.ResolveUDPAddr("udp", listenAddress)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		u, err := net.ListenUDP("udp", addr)
 		if err != nil {
 			cancel()
 			return nil, err

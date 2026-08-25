@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"asterferry/internal/cluster"
@@ -46,6 +47,7 @@ type Gateway struct {
 	admission *handshakeAdmission
 	closeOnce sync.Once
 	closeErr  error
+	accepting atomic.Bool
 }
 
 type credential struct {
@@ -159,12 +161,13 @@ func (s *Gateway) Start() error {
 		return err
 	}
 	s.mgmt = mgmt
+	s.accepting.Store(true)
 	go s.acceptLoop()
 	return nil
 }
 
 func (s *Gateway) IsReady() bool {
-	return s != nil && s.life != nil && s.life.IsRunning() && s.ep != nil && s.ctx.Err() == nil
+	return s != nil && s.life != nil && s.life.IsRunning() && s.ep != nil && s.accepting.Load() && s.ctx.Err() == nil
 }
 
 func (s *Gateway) Close() error {
@@ -172,6 +175,7 @@ func (s *Gateway) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		s.accepting.Store(false)
 		s.life.Stop()
 		s.cancel()
 		if s.mgmt != nil {
@@ -204,6 +208,7 @@ func (s *Gateway) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	if started {
+		s.accepting.Store(false)
 		s.metrics.BeginDrain()
 		s.logger.Warn("gateway draining", "event", "runtime.draining", "role", config.RoleGateway, "node_id", s.nodeID, "grace_period", s.cfg.Shutdown.GracePeriod.String())
 		if s.ep != nil {
@@ -346,9 +351,19 @@ func (s *Gateway) RequestReconnect() error {
 }
 
 func (s *Gateway) acceptLoop() {
+	defer s.accepting.Store(false)
 	for {
 		conn, err := s.ep.Accept(s.ctx)
 		if err != nil {
+			if s.ctx.Err() != nil || s.life == nil || s.life.State() != lifecycle.StateRunning {
+				return
+			}
+			s.logger.Error("gateway accept loop stopped", "event", "gateway.accept_loop_failed", "error_kind", errorKind(err), "security_audit", true)
+			if s.shutdownTrigger != nil {
+				_ = s.shutdownTrigger.Request()
+			} else {
+				_ = s.Shutdown(context.Background())
+			}
 			return
 		}
 		go s.handleConn(conn)
@@ -639,14 +654,16 @@ func (s *Gateway) handleAgentStream(sess *Session, stream transport.Stream) {
 		return
 	}
 	dialCtx, cancelDial := context.WithTimeout(sess.ctx, time.Duration(s.cfg.Limits.DialTimeoutSec)*time.Second)
-	address, err := cred.egress.Allow(dialCtx, open.Network, open.Address, open.Port)
+	addresses, err := cred.egress.AllowCandidates(dialCtx, open.Network, open.Address, open.Port, open.Candidates)
 	cancelDial()
 	if err != nil {
 		sendOpenError(stream, f.RequestID, transport.ErrorPolicyDenied, "egress policy denied", false, sess.maxFrame())
 		return
 	}
-	if cred.egress.IsSpecialException(address) {
-		s.logger.Warn("special-use egress exception used", "event", "security.egress.special_exception", "agent_id", sess.agentID, "network", open.Network, "address", address, "security_audit", true)
+	for _, address := range addresses {
+		if cred.egress.IsSpecialException(address) {
+			s.logger.Warn("special-use egress exception used", "event", "security.egress.special_exception", "agent_id", sess.agentID, "network", open.Network, "address", address, "security_audit", true)
+		}
 	}
 	release, ok := cred.egress.Acquire()
 	if !ok {
@@ -660,15 +677,14 @@ func (s *Gateway) handleAgentStream(sess *Session, stream transport.Stream) {
 		return
 	}
 	if open.Network == "tcp" {
-		s.egress.TCP(sess, stream, address, f.RequestID, profile)
+		s.egress.TCP(sess, stream, addresses, f.RequestID, profile)
 		return
 	}
-	s.egress.UDP(sess, stream, address, f.RequestID, s.profile(open.Profile))
+	s.egress.UDP(sess, stream, addresses, f.RequestID, s.profile(open.Profile))
 }
 
-func (s *Gateway) proxyTCP(sess *Session, stream transport.Stream, address string, requestID uint64, profile relay.Profile) {
-	dialer := &net.Dialer{Timeout: time.Duration(s.cfg.Limits.DialTimeoutSec) * time.Second}
-	conn, err := dialer.DialContext(sess.ctx, "tcp", address)
+func (s *Gateway) proxyTCP(sess *Session, stream transport.Stream, addresses []string, requestID uint64, profile relay.Profile) {
+	conn, err := dialTCPAddresses(sess.ctx, addresses, time.Duration(s.cfg.Limits.DialTimeoutSec)*time.Second)
 	if err != nil {
 		sendOpenError(stream, requestID, transport.ErrorResourceExhausted, "destination unavailable", true, sess.maxFrame())
 		return
@@ -684,14 +700,21 @@ func (s *Gateway) proxyTCP(sess *Session, stream transport.Stream, address strin
 	relay.BidirectionalWithIdle(sess.ctx, remote, conn, time.Duration(s.cfg.Limits.RelayIdleTimeoutSec)*time.Second, relay.Counters{In: func(n uint64) { s.metrics.BytesIn.Add(n) }, Out: func(n uint64) { s.metrics.BytesOut.Add(n) }})
 }
 
-func (s *Gateway) proxyUDP(sess *Session, stream transport.Stream, address string, requestID uint64, profile string) {
-	remote, err := net.ResolveUDPAddr("udp", address)
-	if err != nil {
-		sendOpenError(stream, requestID, transport.ErrorResourceExhausted, "destination unavailable", true, sess.maxFrame())
-		return
+func (s *Gateway) proxyUDP(sess *Session, stream transport.Stream, addresses []string, requestID uint64, profile string) {
+	var conn *net.UDPConn
+	var err error
+	for _, address := range addresses {
+		remote, resolveErr := net.ResolveUDPAddr("udp", address)
+		if resolveErr != nil {
+			err = resolveErr
+			continue
+		}
+		conn, err = net.DialUDP("udp", nil, remote)
+		if err == nil {
+			break
+		}
 	}
-	conn, err := net.DialUDP("udp", nil, remote)
-	if err != nil {
+	if err != nil || conn == nil {
 		sendOpenError(stream, requestID, transport.ErrorResourceExhausted, "destination unavailable", true, sess.maxFrame())
 		return
 	}
@@ -766,6 +789,66 @@ func (s *Gateway) proxyUDP(sess *Session, stream transport.Stream, address strin
 	<-errCh
 }
 
+func dialTCPAddresses(ctx context.Context, addresses []string, timeout time.Duration) (net.Conn, error) {
+	if len(addresses) == 0 {
+		return nil, errors.New("no destination addresses")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	results := make(chan result)
+	for i, address := range addresses {
+		go func(index int, address string) {
+			if index > 0 {
+				timer := time.NewTimer(time.Duration(index) * 200 * time.Millisecond)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					return
+				}
+			}
+			conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", address)
+			if err == nil {
+				select {
+				case results <- result{conn: conn}:
+				case <-ctx.Done():
+					_ = conn.Close()
+				}
+				return
+			}
+			select {
+			case results <- result{err: err}:
+			case <-ctx.Done():
+			}
+		}(i, address)
+	}
+	var first error
+	for range addresses {
+		select {
+		case result := <-results:
+			if result.err == nil {
+				cancel()
+				return result.conn, nil
+			}
+			if first == nil {
+				first = result.err
+			}
+		case <-ctx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if first == nil {
+		first = errors.New("all destination addresses failed")
+	}
+	return nil, first
+}
+
 func allowedPort(protocol string, port uint16, c *credential) bool {
 	ranges := c.tcp
 	if protocol == "udp" {
@@ -779,7 +862,9 @@ func allowedPort(protocol string, port uint16, c *credential) bool {
 	return false
 }
 
-func mappingKey(protocol string, port uint16) string { return protocol + ":" + strconv.Itoa(int(port)) }
+func mappingKey(protocol, bind string, port uint16) string {
+	return protocol + ":" + bind + ":" + strconv.Itoa(int(port))
+}
 
 func (s *Session) acquireStream() bool {
 	select {

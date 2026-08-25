@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -174,8 +173,8 @@ func checkSecret(report *Report, field, path string, token bool) bool {
 		report.add(SeverityError, "secret.file.type", field, "secret path is not a regular file", "point the setting at a regular secret file")
 		return false
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
-		report.add(SeverityError, "secret.file.permissions", field, "secret file is writable by group or other users", "chmod 600 the secret file")
+	if err := config.ValidateSecretFilePermissions(path, info); err != nil {
+		report.add(SeverityError, "secret.file.permissions", field, err.Error(), "restrict the secret file to the owning user")
 		return false
 	}
 	var readErr error

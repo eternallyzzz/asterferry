@@ -68,3 +68,17 @@ func TestEgressConnectionLimit(t *testing.T) {
 		t.Fatal("second connection should be rejected")
 	}
 }
+
+func TestEgressPolicyFiltersAllSuppliedCandidates(t *testing.T) {
+	p, err := NewEgressPolicy(config.EgressPolicy{Enabled: true, TCPPorts: []string{"443"}, AllowCIDRs: []string{"1.1.1.0/24"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses, err := p.AllowCandidates(context.Background(), "tcp", "example.com", 443, []string{"1.1.1.1", "192.0.2.1", "1.1.1.2"})
+	if err != nil || len(addresses) != 2 || addresses[0] != "1.1.1.1:443" || addresses[1] != "1.1.1.2:443" {
+		t.Fatalf("filtered candidates = %#v, err=%v", addresses, err)
+	}
+	if _, err := p.AllowCandidates(context.Background(), "tcp", "example.com", 443, []string{"192.0.2.1"}); err == nil {
+		t.Fatal("disallowed supplied candidate should not trigger a DNS fallback")
+	}
+}

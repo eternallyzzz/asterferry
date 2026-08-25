@@ -118,13 +118,24 @@ func Generate(opts Options) (Result, error) {
 	if err := writeJSON(filepath.Join(temp, manifestName), manifest{Version: manifestVersion, Files: files}, 0o600); err != nil {
 		return Result{}, fmt.Errorf("write init manifest: %w", err)
 	}
-	files = append(files, manifestName)
 	if _, err := os.Stat(target); err == nil {
 		if !opts.Force {
 			return Result{}, fmt.Errorf("output directory %q already exists; choose another directory or use --force for an existing init bundle", target)
 		}
-		if err := copyGeneratedFiles(temp, target, files); err != nil {
-			return Result{}, err
+		backup := target + ".bak"
+		if _, err := os.Lstat(backup); err == nil {
+			return Result{}, fmt.Errorf("refuse to replace %q: backup %q already exists; move it aside before retrying", target, backup)
+		} else if !os.IsNotExist(err) {
+			return Result{}, fmt.Errorf("inspect init backup %q: %w", backup, err)
+		}
+		if err := os.Rename(target, backup); err != nil {
+			return Result{}, fmt.Errorf("backup existing init bundle: %w", err)
+		}
+		if err := os.Rename(temp, target); err != nil {
+			if restoreErr := os.Rename(backup, target); restoreErr != nil {
+				return Result{}, fmt.Errorf("publish init bundle: %w; restore backup: %v", err, restoreErr)
+			}
+			return Result{}, fmt.Errorf("publish init bundle: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
 		return Result{}, fmt.Errorf("inspect output directory: %w", err)
@@ -156,6 +167,12 @@ func prepareTarget(target string, force bool) error {
 	}
 	if _, err := readManifest(target); err != nil {
 		return fmt.Errorf("refuse to overwrite %q: %w", target, err)
+	}
+	backup := target + ".bak"
+	if _, err := os.Lstat(backup); err == nil {
+		return fmt.Errorf("refuse to overwrite %q: backup %q already exists", target, backup)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect init backup %q: %w", backup, err)
 	}
 	return nil
 }
@@ -456,8 +473,8 @@ func agentConfig(opts Options, alpn string) config.Config {
 				Sniff: config.SniffConfig{Enabled: boolPtr(true), MaxBytes: 16 << 10, TimeoutMillis: 250},
 			},
 			Reverse: []config.Tunnel{
-				{Name: "web", Protocol: "tcp", Local: "127.0.0.1:8081", GatewayPort: 28080},
-				{Name: "dns", Protocol: "udp", Local: "127.0.0.1:53", GatewayPort: 21003},
+				{Name: "web", Protocol: "tcp", Local: "127.0.0.1:8081", GatewayPort: 28080, GatewayBind: config.DefaultReverseGatewayBind},
+				{Name: "dns", Protocol: "udp", Local: "127.0.0.1:53", GatewayPort: 21003, GatewayBind: config.DefaultReverseGatewayBind},
 			},
 		},
 	}
@@ -672,53 +689,6 @@ func writeFile(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := os.Chmod(path, mode); err != nil {
 		return err
-	}
-	return nil
-}
-
-func copyGeneratedFiles(source, target string, files []string) error {
-	for _, relative := range files {
-		if filepath.IsAbs(relative) || filepath.Clean(relative) == "." || strings.HasPrefix(filepath.Clean(relative), ".."+string(filepath.Separator)) {
-			return fmt.Errorf("invalid init manifest path %q", relative)
-		}
-		from := filepath.Join(source, filepath.FromSlash(relative))
-		to := filepath.Join(target, filepath.FromSlash(relative))
-		if err := rejectSymlinkParents(target, to); err != nil {
-			return err
-		}
-		data, err := os.ReadFile(from)
-		if err != nil {
-			return fmt.Errorf("read generated file %q: %w", relative, err)
-		}
-		info, err := os.Stat(from)
-		if err != nil {
-			return fmt.Errorf("stat generated file %q: %w", relative, err)
-		}
-		if err := writeFile(to, data, info.Mode().Perm()); err != nil {
-			return fmt.Errorf("replace generated file %q: %w", relative, err)
-		}
-	}
-	return nil
-}
-
-func rejectSymlinkParents(root, path string) error {
-	relative, err := filepath.Rel(root, path)
-	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("generated path %q escapes output directory", path)
-	}
-	current := root
-	for _, part := range strings.Split(relative, string(filepath.Separator)) {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if os.IsNotExist(err) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("inspect generated path %q: %w", current, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refuse to write through symlink %q", current)
-		}
 	}
 	return nil
 }

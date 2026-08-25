@@ -24,6 +24,37 @@ function Invoke-Checked([string]$Name, [string]$File, [string[]]$Arguments) {
     }
 }
 
+function Remove-FrontendScratch {
+    $scratchRoot = Join-Path $root "tmp"
+    if (-not (Test-Path -LiteralPath $scratchRoot)) { return }
+    $targets = @(Get-ChildItem -LiteralPath $scratchRoot -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "release-check-frontend-*" -or $_.Name -like "release-check-worktree-*" -or $_.Name -like "web-dashboard-check-*" })
+    foreach ($target in $targets) {
+        $targetPath = (Resolve-Path -LiteralPath $target.FullName).Path
+        if (-not $targetPath.StartsWith($scratchRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "refuse to remove frontend scratch outside tmp: $targetPath"
+        }
+        Get-ChildItem -LiteralPath $targetPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                $_.Attributes = $_.Attributes -bxor [IO.FileAttributes]::ReadOnly
+            }
+        }
+        Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $targetPath) {
+            throw "frontend scratch cleanup did not remove $targetPath"
+        }
+    }
+}
+
+function Prepare-FrontendScratch {
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("asterferry-dashboard-release-" + [guid]::NewGuid().ToString("N"))
+    $null = New-Item -ItemType Directory -Force -Path $path
+    Get-ChildItem -LiteralPath (Join-Path $root "web/dashboard") -Force |
+        Where-Object { $_.Name -ne "node_modules" } |
+        Copy-Item -Destination $path -Recurse -Force
+    return $path
+}
+
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
     throw "Version must be MAJOR.MINOR.PATCH without the leading v"
 }
@@ -45,6 +76,7 @@ if (Test-Path -LiteralPath $output) {
     Remove-Item -LiteralPath $output -Recurse -Force
 }
 $null = New-Item -ItemType Directory -Force -Path $output
+Remove-FrontendScratch
 
 $chartPath = Join-Path $root "deploy/helm/asterferry/Chart.yaml"
 $chartText = Get-Content -Raw -LiteralPath $chartPath
@@ -54,8 +86,17 @@ if ($chartVersion -ne $Version -or $appVersion -ne $Version) {
     throw "Chart metadata must match $Version; got version=$chartVersion appVersion=$appVersion"
 }
 
-Invoke-Checked "Dashboard dependencies" "npm" @("--prefix", "web/dashboard", "ci")
-Invoke-Checked "Dashboard build" "npm" @("--prefix", "web/dashboard", "run", "build")
+Invoke-Checked "Go module tidy check" "go" @("mod", "tidy", "-diff")
+$frontendTemp = Prepare-FrontendScratch
+$oldDashboardOut = $env:ASTERFERRY_DASHBOARD_OUT
+try {
+    $env:ASTERFERRY_DASHBOARD_OUT = (Join-Path $root "internal/dashboard/dist")
+    Invoke-Checked "Dashboard dependencies" "npm" @("--prefix", $frontendTemp, "ci")
+    Invoke-Checked "Dashboard build" "npm" @("--prefix", $frontendTemp, "run", "build")
+} finally {
+    if ($null -eq $oldDashboardOut) { Remove-Item Env:ASTERFERRY_DASHBOARD_OUT -ErrorAction SilentlyContinue } else { $env:ASTERFERRY_DASHBOARD_OUT = $oldDashboardOut }
+    if (Test-Path -LiteralPath $frontendTemp) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }
+}
 Invoke-Checked "Generated dashboard check" "git" @("diff", "--exit-code", "--", "internal/dashboard/dist")
 Invoke-Checked "Go module verification" "go" @("mod", "verify")
 
@@ -63,8 +104,8 @@ $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferr
 $binaryPath = Join-Path $output "asterferry.exe"
 Invoke-Checked "Windows amd64 binary" "go" @("build", "-trimpath", "-ldflags=$ldflags", "-o", $binaryPath, "./cmd/asterferry")
 $versionOutput = (& $binaryPath version | Out-String)
-if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: v5") {
-    throw "Release binary did not report version $Version and protocol v5: $versionOutput"
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: v6") {
+	throw "Release binary did not report version $Version and protocol v6: $versionOutput"
 }
 
 Invoke-Checked "Helm lint gateway" "helm" @("lint", "deploy/helm/asterferry", "--set", "role=gateway")
@@ -96,7 +137,7 @@ if (-not $SkipDocker) {
 
 $report = [ordered]@{
     version = $Version
-    protocol = 5
+	protocol = 6
     windows_binary = $binaryPath
     chart = Join-Path $output "asterferry-$Version.tgz"
     docker_checked = (-not $SkipDocker)

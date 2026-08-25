@@ -57,7 +57,7 @@ func NewProfileWithBatch(name string, maxRecordBytes, maxPadding, maxWriteBatchB
 	return Profile{Name: name, MaxRecordBytes: maxRecordBytes, MaxPadding: maxPadding, MaxWriteBatchBytes: maxWriteBatchBytes}, nil
 }
 
-// Conn turns an ordinary byte stream into bounded v5 application records.
+// Conn turns an ordinary byte stream into bounded v6 application records.
 // Both ends must use Conn; the underlying stream remains encrypted by QUIC.
 type Conn struct {
 	underlying io.ReadWriteCloser

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"sort"
 	"strings"
 
@@ -23,6 +24,7 @@ const (
 	MaxMappingNameBytes      = 128
 	MaxEndpointBytes         = 2048
 	MaxMappings              = 256
+	MaxProxyCandidates       = 16
 
 	frameHeaderBytes = 16
 
@@ -42,7 +44,7 @@ const (
 	TypeError
 )
 
-// ErrorCode is a stable, machine-readable v5 protocol failure category.
+// ErrorCode is a stable, machine-readable v6 protocol failure category.
 type ErrorCode uint32
 
 const (
@@ -59,8 +61,8 @@ const (
 	ErrorInternal
 )
 
-// Capability identifies an optional v5 application feature. The first two
-// capabilities are mandatory for every v5 connection.
+// Capability identifies an optional v6 application feature. The first two
+// capabilities are mandatory for every v6 connection.
 type Capability uint32
 
 const (
@@ -73,7 +75,7 @@ const (
 	CapabilityRelayBalanced Capability = 13
 )
 
-// Limits are the bounded values negotiated during the v5 handshake.
+// Limits are the bounded values negotiated during the v6 handshake.
 type Limits struct {
 	MaxFrameBytes      int64
 	MaxRecordBytes     int64
@@ -107,7 +109,7 @@ func (e *ProtocolError) Error() string {
 	return errorCodeName(e.Code)
 }
 
-// Frame is the v5 control envelope. Payload is the deterministic binary
+// Frame is the v6 control envelope. Payload is the deterministic binary
 // encoding of the typed message selected by Type.
 type Frame struct {
 	Version   byte
@@ -116,7 +118,7 @@ type Frame struct {
 	Payload   []byte
 }
 
-// WriteFrame writes a fixed 16-byte v5 header followed by its payload. max is
+// WriteFrame writes a fixed 16-byte v6 header followed by its payload. max is
 // the total frame limit, including the header.
 func WriteFrame(w io.Writer, f Frame, max int64) error {
 	if f.Version == 0 {
@@ -149,7 +151,7 @@ func WriteFrame(w io.Writer, f Frame, max int64) error {
 	return writeAll(w, f.Payload)
 }
 
-// ReadFrame reads and validates a v5 control envelope before allocating its
+// ReadFrame reads and validates a v6 control envelope before allocating its
 // payload. max is the total frame limit, including the header.
 func ReadFrame(r io.Reader, max int64) (Frame, error) {
 	if max <= 0 {
@@ -183,7 +185,7 @@ func ReadFrame(r io.Reader, max int64) (Frame, error) {
 	return Frame{Version: Version, Type: typ, RequestID: binary.BigEndian.Uint64(header[8:16]), Payload: payload}, nil
 }
 
-// MessageFrame serializes one typed v5 payload into a control frame.
+// MessageFrame serializes one typed v6 payload into a control frame.
 func MessageFrame(typ byte, requestID uint64, v any) (Frame, error) {
 	if !validType(typ) {
 		return Frame{}, fmt.Errorf("unsupported frame type %d", typ)
@@ -229,6 +231,7 @@ type TunnelRegistration struct {
 	Name        string
 	Protocol    string
 	GatewayPort uint16
+	GatewayBind string
 	Profile     string
 }
 
@@ -240,10 +243,11 @@ type RegisterResult struct {
 }
 
 type OpenProxy struct {
-	Network string
-	Address string
-	Port    uint16
-	Profile string
+	Network    string
+	Address    string
+	Port       uint16
+	Profile    string
+	Candidates []string
 }
 
 type OpenReverse struct {
@@ -303,7 +307,7 @@ func NewNonce() ([]byte, error) {
 	return n, err
 }
 
-// SignChallenge binds authentication to the exact v5 capability and limit
+// SignChallenge binds authentication to the exact v6 capability and limit
 // negotiation. The transcript encoding is explicit and canonical.
 func SignChallenge(token, nonce []byte, agentID string, capabilities []Capability, limits Limits) []byte {
 	h := hmac.New(sha256.New, token)
@@ -381,7 +385,7 @@ func ValidateRegister(value Register) error {
 		return fmt.Errorf("too many mappings: %d", len(value.Mappings))
 	}
 	for _, mapping := range value.Mappings {
-		if !validIdentifier(mapping.Name, MaxMappingNameBytes) || (mapping.Protocol != "tcp" && mapping.Protocol != "udp") || mapping.GatewayPort == 0 || !validProfile(mapping.Profile) {
+		if !validIdentifier(mapping.Name, MaxMappingNameBytes) || (mapping.Protocol != "tcp" && mapping.Protocol != "udp") || mapping.GatewayPort == 0 || !validProfile(mapping.Profile) || !validBindAddress(mapping.GatewayBind) {
 			return errors.New("invalid mapping registration")
 		}
 	}
@@ -392,10 +396,30 @@ func ValidateOpenProxy(value OpenProxy) error {
 	if value.Network != "tcp" && value.Network != "udp" {
 		return errors.New("invalid proxy network")
 	}
-	if value.Port == 0 || !validEndpointText(value.Address) || !validProfile(value.Profile) {
+	if value.Port == 0 || !validEndpointText(value.Address) || !validProfile(value.Profile) || len(value.Candidates) > MaxProxyCandidates {
 		return errors.New("invalid proxy destination")
 	}
+	seen := make(map[string]struct{}, len(value.Candidates))
+	for _, candidate := range value.Candidates {
+		addr, err := netip.ParseAddr(strings.TrimSpace(candidate))
+		if err != nil || !addr.IsValid() || strings.Contains(candidate, "%") {
+			return errors.New("invalid proxy destination candidate")
+		}
+		key := addr.Unmap().String()
+		if _, ok := seen[key]; ok {
+			return errors.New("duplicate proxy destination candidate")
+		}
+		seen[key] = struct{}{}
+	}
 	return nil
+}
+
+func validBindAddress(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return true
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	return err == nil && addr.IsValid() && !strings.Contains(value, "%")
 }
 
 func ValidateOpenReverse(value OpenReverse) error {
@@ -464,7 +488,7 @@ func NegotiateCapabilities(offered, supported []Capability) ([]Capability, error
 		return nil, err
 	}
 	if !SupportsCapability(offered, CapabilityErrorsV1) || !SupportsCapability(offered, CapabilityLimitsV1) {
-		return nil, errors.New("required v5 capabilities are missing")
+		return nil, errors.New("required v6 capabilities are missing")
 	}
 	result := make([]Capability, 0, len(offered))
 	for _, capability := range normalizedCapabilities(offered) {
@@ -473,7 +497,7 @@ func NegotiateCapabilities(offered, supported []Capability) ([]Capability, error
 		}
 	}
 	if !SupportsCapability(result, CapabilityErrorsV1) || !SupportsCapability(result, CapabilityLimitsV1) {
-		return nil, errors.New("required v5 capabilities are unsupported")
+		return nil, errors.New("required v6 capabilities are unsupported")
 	}
 	return result, nil
 }
@@ -520,7 +544,7 @@ func ValidateNegotiation(offeredCaps, selectedCaps []Capability, offeredLimits, 
 		return errors.New("peer selected limits above the offer")
 	}
 	if !SupportsCapability(selectedCaps, CapabilityErrorsV1) || !SupportsCapability(selectedCaps, CapabilityLimitsV1) {
-		return errors.New("required v5 capabilities were not selected")
+		return errors.New("required v6 capabilities were not selected")
 	}
 	return nil
 }
@@ -861,6 +885,13 @@ func marshalPayload(typ byte, value any) ([]byte, error) {
 		e.string(v.Address)
 		e.uvarint(uint64(v.Port))
 		e.string(v.Profile)
+		if len(v.Candidates) > MaxProxyCandidates {
+			return nil, errors.New("too many proxy destination candidates")
+		}
+		e.uvarint(uint64(len(v.Candidates)))
+		for _, candidate := range v.Candidates {
+			e.string(candidate)
+		}
 	case TypeOpenReverse:
 		v, ok := asOpenReverse(value)
 		if !ok {
@@ -1026,6 +1057,20 @@ func unmarshalPayload(typ byte, payload []byte, target any) error {
 		if err != nil {
 			return err
 		}
+		count, err := d.uvarint()
+		if err != nil {
+			return err
+		}
+		if count > MaxProxyCandidates || count > uint64(d.remaining()) {
+			return errors.New("too many proxy destination candidates")
+		}
+		v.Candidates = make([]string, int(count))
+		for i := range v.Candidates {
+			v.Candidates[i], err = d.string(64)
+			if err != nil {
+				return err
+			}
+		}
 	case TypeOpenReverse:
 		v, ok := target.(*OpenReverse)
 		if !ok || v == nil {
@@ -1090,6 +1135,7 @@ func encodeRegistration(e *frameEncoder, value TunnelRegistration) {
 	e.string(value.Name)
 	e.string(value.Protocol)
 	e.uvarint(uint64(value.GatewayPort))
+	e.string(value.GatewayBind)
 	e.string(value.Profile)
 }
 
@@ -1119,6 +1165,10 @@ func decodeRegistrations(d *frameDecoder) ([]TunnelRegistration, error) {
 			return nil, errors.New("tunnel gateway port is out of range")
 		}
 		result[i].GatewayPort = uint16(port)
+		result[i].GatewayBind, err = d.string(64)
+		if err != nil {
+			return nil, err
+		}
 		result[i].Profile, err = d.string(16)
 		if err != nil {
 			return nil, err

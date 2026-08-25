@@ -388,8 +388,9 @@ func loadConfig(path string) (*config.Config, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("configuration %q was not found: %w; create it or run asterferry init", path, err)
 		}
-		if strings.Contains(err.Error(), "auth_token_file") {
-			return nil, fmt.Errorf("configuration %q uses the removed management.auth_token_file field: %w; run asterferry migrate <bundle>", path, err)
+		var legacy *config.LegacyFieldError
+		if errors.As(err, &legacy) {
+			return nil, fmt.Errorf("configuration %q uses the removed %s field: %w; run asterferry migrate <bundle>", path, legacy.Path, err)
 		}
 		return nil, fmt.Errorf("configuration %q is invalid: %w; run asterferry doctor after fixing YAML errors", path, err)
 	}

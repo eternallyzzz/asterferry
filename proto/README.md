@@ -1,7 +1,7 @@
 # AsterFerry protocol notes
 
-AsterFerry v5 uses a small deterministic binary codec instead of a generated
-protobuf runtime. The v5 envelope is a fixed 16-byte header followed by a
+AsterFerry v6 uses a small deterministic binary codec instead of a generated
+protobuf runtime. The v6 envelope is a fixed 16-byte header followed by a
 typed payload:
 
 ```text
@@ -14,5 +14,5 @@ relay data stream uses the separate 12-byte record format implemented in
 `internal/relay`.
 
 The checked-in Go codec is the protocol source of truth. The former v4
-protobuf wire files are intentionally removed: v5 has no v4 fallback or
+protobuf wire files are intentionally removed: v6 has no v5 fallback or
 downgrade path.

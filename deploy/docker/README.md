@@ -139,7 +139,7 @@ configuration writes require the Admin token through the CLI or protected API.
 
 Set `ASTERFERRY_IMAGE` to the release digest recorded in
 `release-manifest.json`, verify the configuration first, and recreate both
-roles together because the v5 protocol is not compatible with v4:
+roles together because the v6 protocol is not compatible with v5:
 
 ```sh
 export ASTERFERRY_IMAGE=ghcr.io/eternallyzzz/asterferry@sha256:<image-digest>

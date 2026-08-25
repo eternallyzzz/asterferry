@@ -16,10 +16,10 @@ func newEgressProxy(gateway *Gateway) *egressProxy {
 	return &egressProxy{gateway: gateway}
 }
 
-func (p *egressProxy) TCP(sess *Session, stream transport.Stream, address string, requestID uint64, profile relay.Profile) {
-	p.gateway.proxyTCP(sess, stream, address, requestID, profile)
+func (p *egressProxy) TCP(sess *Session, stream transport.Stream, addresses []string, requestID uint64, profile relay.Profile) {
+	p.gateway.proxyTCP(sess, stream, addresses, requestID, profile)
 }
 
-func (p *egressProxy) UDP(sess *Session, stream transport.Stream, address string, requestID uint64, profile string) {
-	p.gateway.proxyUDP(sess, stream, address, requestID, profile)
+func (p *egressProxy) UDP(sess *Session, stream transport.Stream, addresses []string, requestID uint64, profile string) {
+	p.gateway.proxyUDP(sess, stream, addresses, requestID, profile)
 }

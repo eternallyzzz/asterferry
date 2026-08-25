@@ -17,9 +17,9 @@ func TestMessageVariantsRoundTrip(t *testing.T) {
 		{"challenge", TypeChallenge, Challenge{Nonce: []byte("nonce"), Capabilities: []Capability{CapabilityErrorsV1, CapabilityLimitsV1}, Limits: Limits{MaxStreams: 4}}, &Challenge{}},
 		{"auth", TypeAuth, Auth{MAC: []byte("mac")}, &Auth{}},
 		{"auth-ok", TypeAuthOK, AuthResult{Error: NewProtocolError(ErrorAuthFailed, "denied", false)}, &AuthResult{}},
-		{"register", TypeRegister, Register{Mappings: []TunnelRegistration{{Name: "web", Protocol: "tcp", GatewayPort: 8080, Profile: "standard"}}}, &Register{}},
+		{"register", TypeRegister, Register{Mappings: []TunnelRegistration{{Name: "web", Protocol: "tcp", GatewayPort: 8080, GatewayBind: "127.0.0.1", Profile: "standard"}}}, &Register{}},
 		{"register-result", TypeRegisterResult, RegisterResult{Mappings: []TunnelRegistration{{Name: "dns", Protocol: "udp", GatewayPort: 5353, Profile: "balanced"}}, Error: NewProtocolError(ErrorMappingRejected, "busy", true)}, &RegisterResult{}},
-		{"open-proxy", TypeOpenProxy, OpenProxy{Network: "tcp", Address: "example.com", Port: 443, Profile: "standard"}, &OpenProxy{}},
+		{"open-proxy", TypeOpenProxy, OpenProxy{Network: "tcp", Address: "example.com", Port: 443, Profile: "standard", Candidates: []string{"2001:db8::1", "1.1.1.1"}}, &OpenProxy{}},
 		{"open-reverse", TypeOpenReverse, OpenReverse{Name: "web", Protocol: "tcp", Profile: "balanced"}, &OpenReverse{}},
 		{"open-result", TypeOpenOK, OpenResult{}, &OpenResult{}},
 		{"open-error", TypeOpenError, OpenResult{Error: NewProtocolError(ErrorPolicyDenied, "denied", false)}, &OpenResult{}},
@@ -122,7 +122,7 @@ func TestProtocolFieldValidatorsRejectMalformedValues(t *testing.T) {
 		t.Fatal("short authentication MAC was accepted")
 	}
 
-	validMapping := TunnelRegistration{Name: "web", Protocol: "tcp", GatewayPort: 443, Profile: "standard"}
+	validMapping := TunnelRegistration{Name: "web", Protocol: "tcp", GatewayPort: 443, GatewayBind: "127.0.0.1", Profile: "standard"}
 	if err := ValidateRegister(Register{Mappings: []TunnelRegistration{validMapping}}); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +131,7 @@ func TestProtocolFieldValidatorsRejectMalformedValues(t *testing.T) {
 		{Mappings: []TunnelRegistration{{Name: "web", Protocol: "icmp", GatewayPort: 443, Profile: "standard"}}},
 		{Mappings: []TunnelRegistration{{Name: "web", Protocol: "tcp", GatewayPort: 0, Profile: "standard"}}},
 		{Mappings: []TunnelRegistration{{Name: "web", Protocol: "tcp", GatewayPort: 443, Profile: "unknown"}}},
+		{Mappings: []TunnelRegistration{{Name: "web", Protocol: "tcp", GatewayPort: 443, GatewayBind: "example.com", Profile: "standard"}}},
 		{Mappings: []TunnelRegistration{{Name: strings.Repeat("x", MaxMappingNameBytes+1), Protocol: "tcp", GatewayPort: 443, Profile: "standard"}}},
 		{Mappings: make([]TunnelRegistration, MaxMappings+1)},
 	} {
@@ -149,6 +150,7 @@ func TestProtocolFieldValidatorsRejectMalformedValues(t *testing.T) {
 		{Network: "tcp", Address: "example.com\nHost: evil", Port: 443, Profile: "standard"},
 		{Network: "tcp", Address: strings.Repeat("x", MaxEndpointBytes+1), Port: 443, Profile: "standard"},
 		{Network: "tcp", Address: "example.com", Port: 443, Profile: "unknown"},
+		{Network: "tcp", Address: "example.com", Port: 443, Profile: "standard", Candidates: []string{"not-an-ip"}},
 	} {
 		if err := ValidateOpenProxy(value); err == nil {
 			t.Fatalf("malformed proxy open %#v was accepted", value)

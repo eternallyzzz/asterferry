@@ -20,17 +20,39 @@ const (
 )
 
 type Target struct {
-	Network    string
-	Host       string
-	Port       uint16
-	ResolvedIP netip.Addr
+	Network     string
+	Host        string
+	Port        uint16
+	ResolvedIP  netip.Addr
+	ResolvedIPs []netip.Addr
 }
 
 func (t Target) Address() string {
-	if t.ResolvedIP.IsValid() {
-		return net.JoinHostPort(t.ResolvedIP.String(), strconv.Itoa(int(t.Port)))
+	if candidates := t.CandidateAddresses(); len(candidates) > 0 {
+		return net.JoinHostPort(candidates[0], strconv.Itoa(int(t.Port)))
 	}
 	return net.JoinHostPort(t.Host, strconv.Itoa(int(t.Port)))
+}
+
+func (t Target) CandidateAddresses() []string {
+	result := make([]string, 0, len(t.ResolvedIPs)+1)
+	seen := make(map[string]struct{}, cap(result))
+	appendAddress := func(addr netip.Addr) {
+		if !addr.IsValid() {
+			return
+		}
+		value := addr.Unmap().String()
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	for _, addr := range t.ResolvedIPs {
+		appendAddress(addr)
+	}
+	appendAddress(t.ResolvedIP)
+	return result
 }
 
 // Outbound is the boundary between local proxy protocol handling and the

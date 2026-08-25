@@ -24,6 +24,24 @@ type MigrateResult struct {
 	Changed []string
 }
 
+var ErrMigrationConflict = errors.New("migration field conflict")
+
+type MigrationConflictError struct {
+	NestedPath  string
+	LegacyPath  string
+	NestedValue string
+	LegacyValue string
+}
+
+func (e *MigrationConflictError) Error() string {
+	if e == nil {
+		return ErrMigrationConflict.Error()
+	}
+	return fmt.Sprintf("%s: %s=%q conflicts with %s=%q", ErrMigrationConflict, e.NestedPath, e.NestedValue, e.LegacyPath, e.LegacyValue)
+}
+
+func (e *MigrationConflictError) Unwrap() error { return ErrMigrationConflict }
+
 func Migrate(opts MigrateOptions) (MigrateResult, error) {
 	b, err := bundle.Open(opts.Dir)
 	if err != nil {
@@ -99,6 +117,22 @@ func migrateConfigDocument(raw []byte, viewerPath string) ([]byte, bool, bool, e
 	nestedViewer := scalarValue(mappingValue(auth, "viewer_token_file"))
 	legacyAdmin := scalarValue(mappingValue(management, "auth_token_file"))
 	flatViewer := scalarValue(mappingValue(management, "viewer_token_file"))
+	if nestedAdmin != "" && legacyAdmin != "" && nestedAdmin != legacyAdmin {
+		return nil, false, false, &MigrationConflictError{
+			NestedPath:  "management.auth.admin_token_file",
+			LegacyPath:  "management.auth_token_file",
+			NestedValue: nestedAdmin,
+			LegacyValue: legacyAdmin,
+		}
+	}
+	if nestedViewer != "" && flatViewer != "" && nestedViewer != flatViewer {
+		return nil, false, false, &MigrationConflictError{
+			NestedPath:  "management.auth.viewer_token_file",
+			LegacyPath:  "management.viewer_token_file",
+			NestedValue: nestedViewer,
+			LegacyValue: flatViewer,
+		}
+	}
 	admin := nestedAdmin
 	if admin == "" {
 		admin = legacyAdmin

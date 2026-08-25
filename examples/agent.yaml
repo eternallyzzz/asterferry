@@ -1,5 +1,5 @@
-# AsterFerry v5 internal Agent configuration.
-version: 5
+# AsterFerry v6 internal Agent configuration.
+version: 6
 role: agent
 
 transport:
@@ -117,7 +117,9 @@ agent:
       protocol: tcp
       local: "127.0.0.1:8081"
       gateway_port: 28080
+      gateway_bind: "127.0.0.1"
     - name: dns
       protocol: udp
       local: "127.0.0.1:53"
       gateway_port: 21003
+      gateway_bind: "127.0.0.1"

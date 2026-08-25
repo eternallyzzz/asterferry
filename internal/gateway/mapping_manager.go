@@ -6,13 +6,14 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"asterferry/internal/config"
 	"asterferry/internal/observability"
 	"asterferry/internal/transport"
 )
 
 // mappingDirectory keeps port ownership and mapping lifecycle behind a local
 // interface so a future node-owner router does not have to change Gateway's
-// session handling. The current implementation always binds locally.
+// session handling. The current implementation binds every mapping locally.
 type mappingDirectory interface {
 	Count() int
 	Snapshot() []observability.GatewayMappingSnapshot
@@ -32,6 +33,16 @@ type mappingManager struct {
 
 func newMappingManager(server *Gateway) *mappingManager {
 	return &mappingManager{server: server, items: make(map[string]*Mapping)}
+}
+
+func normalizeMappingSpecs(specs []transport.TunnelRegistration) []transport.TunnelRegistration {
+	result := append([]transport.TunnelRegistration(nil), specs...)
+	for i := range result {
+		if result[i].GatewayBind == "" {
+			result[i].GatewayBind = config.DefaultReverseGatewayBind
+		}
+	}
+	return result
 }
 
 func (m *mappingManager) Count() int {
@@ -64,6 +75,7 @@ func (m *mappingManager) Snapshot() []observability.GatewayMappingSnapshot {
 			AgentID:     item.session.agentID,
 			Protocol:    item.spec.Protocol,
 			GatewayPort: item.spec.GatewayPort,
+			GatewayBind: item.spec.GatewayBind,
 			Profile:     item.spec.Profile,
 			State:       state,
 		})
@@ -85,6 +97,7 @@ func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistr
 	if m.draining.Load() || (m.server.life != nil && !m.server.life.IsRunning()) {
 		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, "gateway is draining", true)}
 	}
+	specs = normalizeMappingSpecs(specs)
 	if err := transport.ValidateRegister(transport.Register{Mappings: specs}); err != nil {
 		return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, "invalid mapping registration", false)}
 	}
@@ -123,16 +136,16 @@ func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistr
 		if !allowedPort(spec.Protocol, spec.GatewayPort, cred) {
 			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorPolicyDenied, fmt.Sprintf("port %d is not allowed", spec.GatewayPort), false)}
 		}
-		key := mappingKey(spec.Protocol, spec.GatewayPort)
+		key := mappingKey(spec.Protocol, spec.GatewayBind, spec.GatewayPort)
 		if seenPorts[key] {
-			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, fmt.Sprintf("port %d is registered more than once", spec.GatewayPort), false)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, fmt.Sprintf("%s/%d is registered more than once", spec.GatewayBind, spec.GatewayPort), false)}
 		}
 		seenPorts[key] = true
 		m.mu.RLock()
 		existing := m.items[key]
 		m.mu.RUnlock()
 		if existing != nil && existing.session != sess {
-			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, fmt.Sprintf("port %d is already in use", spec.GatewayPort), true)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorResourceExhausted, fmt.Sprintf("%s/%d is already in use", spec.GatewayBind, spec.GatewayPort), true)}
 		}
 	}
 
@@ -157,7 +170,7 @@ func (m *mappingManager) Register(sess *Session, specs []transport.TunnelRegistr
 				_ = old.Close()
 			}
 			s.metrics.MappingFailures.Add(1)
-			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, fmt.Sprintf("bind %s/%d failed", spec.Protocol, spec.GatewayPort), true)}
+			return transport.RegisterResult{Error: transport.NewProtocolError(transport.ErrorMappingRejected, fmt.Sprintf("bind %s/%s/%d failed", spec.Protocol, spec.GatewayBind, spec.GatewayPort), true)}
 		}
 		created = append(created, item)
 	}

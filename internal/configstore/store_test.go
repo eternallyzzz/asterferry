@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,7 +75,7 @@ func TestManagerRedactsAppliesAndRollsBack(t *testing.T) {
 }
 
 func TestJSONToYAMLAndSecretProtection(t *testing.T) {
-	data, err := JSONToYAML([]byte(`{"version":5,"role":"agent","agent":{"proxy":{"inbounds":[{"password":"changed"}]}}}`))
+	data, err := JSONToYAML([]byte(`{"version":6,"role":"agent","agent":{"proxy":{"inbounds":[{"password":"changed"}]}}}`))
 	if err != nil || !strings.Contains(string(data), "password: changed") {
 		t.Fatalf("JSONToYAML = %q, err=%v", data, err)
 	}
@@ -85,6 +86,16 @@ func TestJSONToYAMLAndSecretProtection(t *testing.T) {
 	}
 	if _, err := restoreRedactedSecrets([]byte("agent:\n  proxy:\n    inbounds:\n      - password: changed\n"), current); err != ErrSecretField {
 		t.Fatalf("secret mutation error = %v", err)
+	}
+	reordered := []byte("agent:\n  proxy:\n    inbounds:\n      - tag: second\n        password: <redacted>\n      - tag: first\n        password: <redacted>\n")
+	base := []byte("agent:\n  proxy:\n    inbounds:\n      - tag: first\n        password: first-secret\n      - tag: second\n        password: second-secret\n")
+	restored, err := restoreRedactedSecrets(reordered, base)
+	if err != nil || !strings.Contains(string(restored), "password: second-secret") || !strings.Contains(string(restored), "password: first-secret") {
+		t.Fatalf("reordered redacted secrets = %q, err=%v", restored, err)
+	}
+	renamed := []byte("agent:\n  proxy:\n    inbounds:\n      - tag: renamed\n        password: <redacted>\n")
+	if _, err := restoreRedactedSecrets(renamed, base); !errors.Is(err, ErrSecretField) {
+		t.Fatalf("renamed redacted secret error = %v", err)
 	}
 	redacted, err := redactYAML([]byte("# token-comment-secret\npassword: original # inline-secret\n"))
 	if err != nil || strings.Contains(string(redacted), "secret") || strings.Contains(string(redacted), "original") || !strings.Contains(string(redacted), RedactedValue) {

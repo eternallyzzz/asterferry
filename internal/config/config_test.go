@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,26 @@ func TestV3DefaultsAndRoleValidation(t *testing.T) {
 	if c.Management.Web.Enabled == nil || !*c.Management.Web.Enabled {
 		t.Fatal("management web should be enabled by default")
 	}
+	agent := Config{
+		Version:   ConfigVersion,
+		Role:      RoleAgent,
+		Transport: TransportConfig{ALPN: "af-test-123456"},
+		Management: ManagementConfig{Auth: ManagementAuthConfig{
+			AdminTokenFile: "management-token", ViewerTokenFile: "management-token",
+		}},
+		Obfuscation: ObfuscationConfig{Transport: TransportObfuscationConfig{Mode: TransportObfuscationStandard}},
+		Agent:       &AgentConfig{ID: "edge", Server: "gateway.example.com:4433", TokenFile: "token", TLS: AgentTLS{CAFile: "ca", CertFile: "cert", KeyFile: "key", ServerName: "gateway.example.com"}, Reverse: []Tunnel{{Name: "web", Protocol: "tcp", Local: "127.0.0.1:8080", GatewayPort: 28080}}},
+	}
+	if err := agent.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.Agent.Reverse[0].GatewayBind; got != DefaultReverseGatewayBind {
+		t.Fatalf("reverse bind default = %q", got)
+	}
+	agent.Agent.Reverse[0].GatewayBind = "example.com"
+	if err := agent.Validate(); err == nil {
+		t.Fatal("hostname reverse bind should be rejected")
+	}
 	bad := gatewayConfig()
 	bad.Gateway.Agents[0].Reverse = ReverseACL{}
 	if err := bad.Validate(); err == nil {
@@ -81,8 +102,18 @@ func TestManagementAuthRequiresExplicitAdminAndViewerPaths(t *testing.T) {
 }
 
 func TestLegacyManagementTokenFieldIsRejectedByStrictLoader(t *testing.T) {
-	if _, err := LoadBytes([]byte("management:\n  auth_token_file: management.token\n"), "gateway.yaml"); err == nil {
+	_, err := LoadBytes([]byte("management:\n  auth_token_file: management.token\n"), "gateway.yaml")
+	var legacy *LegacyFieldError
+	if !errors.As(err, &legacy) || legacy.Path != "management.auth_token_file" {
 		t.Fatal("legacy management.auth_token_file should be rejected")
+	}
+}
+
+func TestLegacyManagementViewerFieldIsTyped(t *testing.T) {
+	_, err := LoadBytes([]byte("management:\n  viewer_token_file: management.token\n"), "gateway.yaml")
+	var legacy *LegacyFieldError
+	if !errors.As(err, &legacy) || legacy.Path != "management.viewer_token_file" {
+		t.Fatalf("legacy viewer field error = %v", err)
 	}
 }
 

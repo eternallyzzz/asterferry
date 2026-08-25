@@ -126,6 +126,38 @@ func TestWaitSignalsSecondSignalForcesClose(t *testing.T) {
 	}
 }
 
+func TestWaitSignalsForceCloseHasBoundedWait(t *testing.T) {
+	oldWait := forcedShutdownWait
+	forcedShutdownWait = 20 * time.Millisecond
+	t.Cleanup(func() { forcedShutdownWait = oldWait })
+	signals := make(chan os.Signal, 2)
+	signals <- os.Interrupt
+	signals <- os.Interrupt
+	started := make(chan struct{})
+	var forced atomic.Bool
+	startedAt := time.Now()
+	err := waitSignals(context.Background(), time.Second, func(context.Context) error {
+		close(started)
+		select {}
+	}, func() error {
+		forced.Store(true)
+		return nil
+	}, signals)
+	if !forced.Load() {
+		t.Fatal("second signal must force close")
+	}
+	if !errors.Is(err, ErrForcedShutdownTimeout) {
+		t.Fatalf("force close timeout error = %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("force close wait was unbounded: %s", elapsed)
+	}
+	select {
+	case <-started:
+	default:
+	}
+}
+
 func TestWaitSignalsManagementRequestStartsGracefulShutdown(t *testing.T) {
 	signals := make(chan os.Signal, 1)
 	trigger := lifecycle.NewShutdownTrigger()

@@ -155,6 +155,22 @@ type AuthTokens struct {
 	Viewer []byte
 }
 
+type scopedAuthGuards struct {
+	viewer *authGuard
+	admin  *authGuard
+}
+
+func newScopedAuthGuards(now func() time.Time) scopedAuthGuards {
+	return scopedAuthGuards{viewer: newAuthGuard(now), admin: newAuthGuard(now)}
+}
+
+func (g scopedAuthGuards) forScope(scope AuthScope) *authGuard {
+	if scope == ScopeAdmin {
+		return g.admin
+	}
+	return g.viewer
+}
+
 func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte, options ...ServerOptions) (*Server, error) {
 	return StartWithTokens(listen, metrics, provider, AuthTokens{Admin: authToken, Viewer: authToken}, options...)
 }
@@ -173,7 +189,7 @@ func StartWithTokens(listen string, metrics *Metrics, provider StatusProvider, t
 	if !managementListenIsLoopback(listen) && serverOptions.TLS == nil {
 		return nil, errors.New("non-loopback management listener requires TLS")
 	}
-	auth := newAuthGuard(time.Now)
+	auth := newScopedAuthGuards(time.Now)
 	mux := http.NewServeMux()
 	if serverOptions.Dashboard != nil {
 		mux.Handle("/dashboard/", http.StripPrefix("/dashboard", serverOptions.Dashboard))
@@ -193,25 +209,25 @@ func StartWithTokens(listen string, metrics *Metrics, provider StatusProvider, t
 	})
 	protected := func(required AuthScope, next http.HandlerFunc) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			guard := auth.forScope(required)
 			scope := authorizationScope(r, tokens)
 			if scope == ScopeAdmin || (scope == ScopeViewer && required == ScopeViewer) {
-				auth.reset()
+				guard.reset()
 				next(w, r)
 				return
 			}
 			if scope != ScopeNone {
-				auth.reset()
 				w.Header().Set("WWW-Authenticate", `Bearer realm="asterferry-management", scope="admin"`)
 				writeActionError(w, http.StatusForbidden, "insufficient_scope", "management token lacks the required scope")
 				return
 			}
-			if blocked, retryAfter := auth.blocked(); blocked {
+			if blocked, retryAfter := guard.blocked(); blocked {
 				metrics.ManagementAuthRateLimited.Add(1)
 				auditManagement(serverOptions.Logger, "management authentication rate limited", "management.auth.rate_limited", "error_kind", "rate_limited")
 				writeRateLimited(w, retryAfter)
 				return
 			}
-			limited, retryAfter := auth.recordFailure()
+			limited, retryAfter := guard.recordFailure()
 			if limited {
 				metrics.ManagementAuthRateLimited.Add(1)
 				auditManagement(serverOptions.Logger, "management authentication rate limited", "management.auth.rate_limited", "error_kind", "rate_limited")

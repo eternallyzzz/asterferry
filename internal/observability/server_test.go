@@ -127,6 +127,59 @@ func TestManagementAuthFailureLimitAndAudit(t *testing.T) {
 	}
 }
 
+func TestViewerSuccessDoesNotResetAdminAuthGuard(t *testing.T) {
+	metrics := &Metrics{}
+	server, err := StartWithTokens("127.0.0.1:0", metrics, nil, AuthTokens{Admin: []byte(testManagementToken), Viewer: []byte("viewer-token-0123456789abcdef012345")}, ServerOptions{Actions: &dashboardTestActions{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client := &http.Client{Timeout: time.Second}
+	adminURL := "http://" + server.listener.Addr().String() + "/v1/actions/shutdown"
+	viewerURL := "http://" + server.listener.Addr().String() + "/v1/status"
+	for attempt := 0; attempt < managementAuthFailureLimit; attempt++ {
+		request, err := http.NewRequest(http.MethodPost, adminURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer invalid-admin-token")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("admin failure %d status = %d", attempt+1, response.StatusCode)
+		}
+		viewerRequest, err := http.NewRequest(http.MethodGet, viewerURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		viewerRequest.Header.Set("Authorization", "Bearer "+"viewer-token-0123456789abcdef012345")
+		viewerResponse, err := client.Do(viewerRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = viewerResponse.Body.Close()
+		if viewerResponse.StatusCode != http.StatusOK {
+			t.Fatalf("viewer poll status = %d", viewerResponse.StatusCode)
+		}
+	}
+	request, err := http.NewRequest(http.MethodPost, adminURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer invalid-admin-token")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("admin failure after viewer polling = %d", response.StatusCode)
+	}
+}
+
 func TestManagementServerProtectsSensitiveEndpoints(t *testing.T) {
 	server, err := Start("127.0.0.1:0", nil, nil, []byte(testManagementToken))
 	if err != nil {
