@@ -301,8 +301,12 @@ func ValidateAgentCredentials(cfg *config.AgentOptions) error {
 		return fmt.Errorf("parse agent certificate: %w", err)
 	}
 	certAgentID, ok := CertificateAgentID(leaf)
+	expectedURI, err := identity.AgentIdentityURI(cfg.Agent.ID)
+	if err != nil {
+		return fmt.Errorf("agent id: %w", err)
+	}
 	if !ok || certAgentID != cfg.Agent.ID {
-		return fmt.Errorf("agent certificate URI SAN must be %q", identity.AgentIdentityURI(cfg.Agent.ID))
+		return fmt.Errorf("agent certificate URI SAN must be %q", expectedURI)
 	}
 	if len(cfg.Token) < 32 {
 		return errors.New("agent token must contain at least 32 bytes")

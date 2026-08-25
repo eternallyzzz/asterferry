@@ -57,13 +57,12 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	}
 	if err := os.Rename(tmpPath, path); err == nil {
 		return nil
-	} else {
-		if removeErr := os.Remove(path); removeErr != nil {
-			return errors.Join(err, removeErr)
-		}
-		if renameErr := os.Rename(tmpPath, path); renameErr != nil {
-			return renameErr
-		}
+	}
+	if removeErr := os.Remove(path); removeErr != nil {
+		return errors.Join(err, removeErr)
+	}
+	if renameErr := os.Rename(tmpPath, path); renameErr != nil {
+		return renameErr
 	}
 	return nil
 }

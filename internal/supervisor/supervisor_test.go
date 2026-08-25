@@ -63,4 +63,16 @@ func TestStateRoundTrip(t *testing.T) {
 	if state.Version != stateVersion || !state.StartedAt.Equal(started) || len(state.Processes) != 0 {
 		t.Fatalf("state = %#v", state)
 	}
+
+	updated := started.Add(time.Second)
+	if err := writeState(b, updated, map[string]*child{}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = readState(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.StartedAt.Equal(updated) {
+		t.Fatalf("overwritten state started_at = %s, want %s", state.StartedAt, updated)
+	}
 }

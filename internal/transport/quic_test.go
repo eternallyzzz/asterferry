@@ -59,16 +59,34 @@ func TestTransportNilBoundariesAndStats(t *testing.T) {
 }
 
 func TestCertificateAgentIdentityBinding(t *testing.T) {
-	identityURI, err := url.Parse(identity.AgentIdentityURI("edge-a"))
+	identityURIText, err := identity.AgentIdentityURI("edge-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityURI, err := url.Parse(identityURIText)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := CertificateAgentID(&x509.Certificate{URIs: []*url.URL{identityURI}}); !ok || got != "edge-a" {
 		t.Fatalf("certificate identity = %q, %v", got, ok)
 	}
-	other, _ := url.Parse(identity.AgentIdentityURI("edge-b"))
+	otherText, err := identity.AgentIdentityURI("edge-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := url.Parse(otherText)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := CertificateAgentID(&x509.Certificate{URIs: []*url.URL{identityURI, other}}); ok {
 		t.Fatal("multiple AsterFerry identities should be rejected")
+	}
+	invalid, err := url.Parse(identity.AgentIdentityPrefix + "edge/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := CertificateAgentID(&x509.Certificate{URIs: []*url.URL{invalid}}); ok {
+		t.Fatal("invalid AsterFerry identity should be rejected")
 	}
 	if _, ok := CertificateAgentID(&x509.Certificate{}); ok {
 		t.Fatal("certificate without URI identity should be rejected")

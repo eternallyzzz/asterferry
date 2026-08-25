@@ -17,6 +17,7 @@ import (
 
 	"asterferry/internal/addresspolicy"
 	"asterferry/internal/cluster"
+	"asterferry/internal/identity"
 	"asterferry/internal/protocol"
 )
 
@@ -845,8 +846,8 @@ func (c *Config) validateGateway() error {
 	seen := map[string]bool{}
 	for index := range g.Agents {
 		agent := &g.Agents[index]
-		if err := validateIdentifier(agent.ID, "gateway agent id", 128); err != nil {
-			return err
+		if err := identity.ValidateAgentID(agent.ID); err != nil {
+			return fmt.Errorf("gateway agent id: %w", err)
 		}
 		if seen[agent.ID] {
 			return errors.New("gateway agent IDs must be unique")
@@ -875,8 +876,8 @@ func (c *Config) validateGateway() error {
 
 func (c *Config) validateAgent() error {
 	a := c.Agent
-	if err := validateIdentifier(a.ID, "agent.id", 128); err != nil {
-		return err
+	if err := identity.ValidateAgentID(a.ID); err != nil {
+		return fmt.Errorf("agent.id: %w", err)
 	}
 	if a.Server == "" || a.TokenFile == "" {
 		return errors.New("agent.id, agent.server and agent.token_file are required")

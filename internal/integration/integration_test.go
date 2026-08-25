@@ -446,7 +446,11 @@ func makeCertificates(t testing.TB, dir, agentID string) certificateFiles {
 		tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: name}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 		if client {
 			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
-			agentIdentity, parseErr := url.Parse(identity.AgentIdentityURI(agentID))
+			agentIdentityText, identityErr := identity.AgentIdentityURI(agentID)
+			if identityErr != nil {
+				t.Fatal(identityErr)
+			}
+			agentIdentity, parseErr := url.Parse(agentIdentityText)
 			if parseErr != nil {
 				t.Fatal(parseErr)
 			}

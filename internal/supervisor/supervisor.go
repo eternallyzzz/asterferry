@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"asterferry/internal/atomicfile"
 	"asterferry/internal/bundle"
 	"asterferry/internal/config"
 	"asterferry/internal/managementclient"
@@ -407,12 +408,11 @@ func stopChildren(ctx context.Context, b bundle.Bundle, children map[string]*chi
 	for len(children) > 0 && time.Now().Before(deadline) {
 		for role, current := range children {
 			select {
-			case result := <-current.wait:
+			case <-current.wait:
 				if current.logFile != nil {
 					_ = current.logFile.Close()
 				}
 				delete(children, role)
-				_ = result
 			default:
 			}
 		}
@@ -462,25 +462,8 @@ func writeState(b bundle.Bundle, startedAt time.Time, children map[string]*child
 		return err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(b.RunDir, ".state-*")
-	if err != nil {
-		return fmt.Errorf("create supervisor state: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, filepath.Join(b.RunDir, "state.json")); err != nil {
-		return fmt.Errorf("publish supervisor state: %w", err)
+	if err := atomicfile.AtomicWrite(filepath.Join(b.RunDir, "state.json"), data, 0o600); err != nil {
+		return fmt.Errorf("write supervisor state: %w", err)
 	}
 	return nil
 }

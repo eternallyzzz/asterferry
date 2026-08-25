@@ -90,7 +90,11 @@ func TestGenerateProductionBundleCreatesCSRsWithoutCertificates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.URIs) != 1 || request.URIs[0].String() != identity.AgentIdentityURI("edge-prod") {
+	wantURI, err := identity.AgentIdentityURI("edge-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.URIs) != 1 || request.URIs[0].String() != wantURI {
 		t.Fatalf("unexpected agent CSR URI SANs: %#v", request.URIs)
 	}
 	for _, path := range []string{

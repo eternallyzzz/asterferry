@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"asterferry/internal/identity"
 	"asterferry/internal/protocol"
 	"asterferry/internal/random"
 )
@@ -21,7 +22,7 @@ const (
 	DefaultMaxFrame          = 16 << 20
 	HandshakeMaxFrame        = 64 << 10
 	MaxCapabilities          = 16
-	MaxAgentIDBytes          = 128
+	MaxAgentIDBytes          = identity.MaxAgentIDBytes
 	MaxMappingNameBytes      = 128
 	MaxEndpointBytes         = 2048
 	MaxMappings              = 256
@@ -355,7 +356,7 @@ func ValidateCapabilities(capabilities []Capability) error {
 }
 
 func ValidateHello(value Hello) error {
-	if !validIdentifier(value.AgentID, MaxAgentIDBytes) {
+	if err := identity.ValidateAgentID(value.AgentID); err != nil {
 		return errors.New("invalid agent identity")
 	}
 	if err := ValidateCapabilities(value.Capabilities); err != nil {

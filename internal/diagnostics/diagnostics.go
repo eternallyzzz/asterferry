@@ -236,7 +236,7 @@ func checkCertificatePair(report *Report, prefix, certPath, keyPath string, usag
 	if expectedAgentID != "" {
 		certAgentID, ok := transport.CertificateAgentID(leaf)
 		if !ok || certAgentID != expectedAgentID {
-			report.add(SeverityError, "certificate.agent_identity", prefix, "Agent certificate does not contain exactly one AsterFerry URI identity", "add URI SAN "+identity.AgentIdentityURI("<agent-id>"))
+			report.add(SeverityError, "certificate.agent_identity", prefix, "Agent certificate does not contain exactly one AsterFerry URI identity", "add URI SAN "+identity.AgentIdentityPrefix+"<agent-id>")
 		} else {
 			report.add(SeverityOK, "certificate.agent_identity", prefix, fmt.Sprintf("Agent certificate identity is %q", certAgentID), "")
 		}
@@ -321,14 +321,18 @@ func VerifyAgentCertificate(cert *x509.Certificate, roots *x509.CertPool, agentI
 	if cert == nil {
 		return errors.New("agent certificate is nil")
 	}
+	expectedURI, err := identity.AgentIdentityURI(agentID)
+	if err != nil {
+		return fmt.Errorf("agent id: %w", err)
+	}
 	certAgentID, ok := transport.CertificateAgentID(cert)
 	if !ok || certAgentID != agentID {
-		return fmt.Errorf("agent certificate identity must be %s", identity.AgentIdentityURI(agentID))
+		return fmt.Errorf("agent certificate identity must be %s", expectedURI)
 	}
 	if roots == nil {
 		return errors.New("agent CA pool is required")
 	}
-	_, err := cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
+	_, err = cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
 	return err
 }
 
