@@ -23,7 +23,9 @@ role: gateway
 transport:
   alpn: af-test-123456
 management:
-  auth_token_file: management.token
+  auth:
+    admin_token_file: management.token
+    viewer_token_file: management.token
 obfuscation:
   transport:
     mode: standard

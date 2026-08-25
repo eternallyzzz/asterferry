@@ -162,7 +162,7 @@ func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *
 			InitialStreamReceiveWindow: 1 << 20, InitialConnectionReceiveWindow: 8 << 20,
 			MaxStreamReadBuffer: 16 << 20, MaxConnReadBuffer: 64 << 20,
 		},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway), AuthTokenFile: managementTokenPath},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway), Auth: config.ManagementAuthConfig{AdminTokenFile: managementTokenPath, ViewerTokenFile: managementTokenPath}},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 128, MaxStreamsPerAgent: 64, MaxFrameBytes: 2 << 20, MaxRecordBytes: 16 << 10, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: profile, ReverseProfile: profile, MaxPaddingBytes: 2048, Transport: transportObfuscation},
 		Gateway: &config.GatewayConfig{
@@ -195,7 +195,7 @@ func startBenchmarkPair(t testing.TB, profile, mode string) (*gateway.Gateway, *
 			InitialStreamReceiveWindow: 1 << 20, InitialConnectionReceiveWindow: 8 << 20,
 			MaxStreamReadBuffer: 16 << 20, MaxConnReadBuffer: 64 << 20,
 		},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent), AuthTokenFile: managementTokenPath},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent), Auth: config.ManagementAuthConfig{AdminTokenFile: managementTokenPath, ViewerTokenFile: managementTokenPath}},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 128, MaxStreamsPerAgent: 64, MaxFrameBytes: 2 << 20, MaxRecordBytes: 16 << 10, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: profile, ReverseProfile: profile, MaxPaddingBytes: 2048, Transport: transportObfuscation},
 		Agent: &config.AgentConfig{
@@ -290,7 +290,7 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		Version:     config.ConfigVersion,
 		Role:        config.RoleGateway,
 		Transport:   config.TransportConfig{ALPN: alpn, MaxBidiRemoteStreams: 64},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway), AuthTokenFile: managementTokenPath},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementGateway), Auth: config.ManagementAuthConfig{AdminTokenFile: managementTokenPath, ViewerTokenFile: managementTokenPath}},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 8, MaxStreamsPerAgent: 16, MaxFrameBytes: 1 << 20, MaxRecordBytes: 4096, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256, Transport: config.TransportObfuscationConfig{Mode: config.TransportObfuscationStandard}},
 		Gateway: &config.GatewayConfig{
@@ -306,7 +306,7 @@ func TestGatewayAgentReverseTCP(t *testing.T) {
 		Version:     config.ConfigVersion,
 		Role:        config.RoleAgent,
 		Transport:   config.TransportConfig{ALPN: alpn, MaxBidiRemoteStreams: 64},
-		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent), AuthTokenFile: managementTokenPath},
+		Management:  config.ManagementConfig{Listen: fmt.Sprintf("127.0.0.1:%d", managementAgent), Auth: config.ManagementAuthConfig{AdminTokenFile: managementTokenPath, ViewerTokenFile: managementTokenPath}},
 		Limits:      config.Limits{MaxAgents: 4, MaxConnectionsPerAgent: 8, MaxStreamsPerAgent: 16, MaxFrameBytes: 1 << 20, MaxRecordBytes: 4096, UDPIdleTimeoutSec: 5},
 		Obfuscation: config.ObfuscationConfig{ProxyProfile: config.ProfileBalanced, ReverseProfile: config.ProfileBalanced, MaxPaddingBytes: 256, Transport: config.TransportObfuscationConfig{Mode: config.TransportObfuscationStandard}},
 		Agent: &config.AgentConfig{

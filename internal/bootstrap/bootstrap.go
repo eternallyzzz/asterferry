@@ -636,7 +636,6 @@ func portableConfigPaths(c *config.Config) {
 	toSlash := func(path string) string { return filepath.ToSlash(path) }
 	c.Management.Auth.AdminTokenFile = toSlash(c.Management.Auth.AdminTokenFile)
 	c.Management.Auth.ViewerTokenFile = toSlash(c.Management.Auth.ViewerTokenFile)
-	c.Management.AuthTokenFile = toSlash(c.Management.AuthTokenFile)
 	c.Obfuscation.Transport.KeyFile = toSlash(c.Obfuscation.Transport.KeyFile)
 	c.Obfuscation.Transport.PreviousKeyFile = toSlash(c.Obfuscation.Transport.PreviousKeyFile)
 	if c.Gateway != nil {
@@ -809,6 +808,12 @@ Validate and inspect both roles:
 
     asterferry doctor .
     asterferry status .
+    asterferry config show . --role gateway
+    asterferry config show . --role agent
+
+Upgrade an older bundle before starting it:
+
+    asterferry migrate .
 
 Start locally in the foreground:
 

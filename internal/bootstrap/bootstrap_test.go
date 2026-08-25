@@ -36,7 +36,7 @@ func TestGenerateDevBundleIsRunnableAndPortable(t *testing.T) {
 	if _, err := agent.ResolveAgent(); err != nil {
 		t.Fatalf("resolve agent: %v", err)
 	}
-	if !filepath.IsAbs(gateway.Management.AuthTokenFile) || !filepath.IsAbs(agent.Agent.TokenFile) {
+	if !filepath.IsAbs(gateway.Management.Auth.AdminTokenFile) || !filepath.IsAbs(gateway.Management.Auth.ViewerTokenFile) || !filepath.IsAbs(agent.Agent.TokenFile) {
 		t.Fatal("loaded relative secret paths must be anchored to the configuration directory")
 	}
 

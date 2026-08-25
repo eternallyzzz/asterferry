@@ -23,6 +23,9 @@ func TestOpenAndEnsureRuntimeDirs(t *testing.T) {
 	if err := b.EnsureRuntimeDirs(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := b.Config("unknown"); err == nil {
+		t.Fatal("unknown bundle role should be rejected")
+	}
 	for _, path := range []string{b.RunDir, b.LogsDir} {
 		info, err := os.Stat(path)
 		if err != nil || !info.IsDir() {

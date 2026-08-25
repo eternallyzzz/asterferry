@@ -16,6 +16,10 @@ The first product release of the v5 transport stack.
 - Adds portable two-role bundles with `init`, `doctor`, `status`, `up`, `down`,
   `config`, and legacy-bundle migration workflows. The local supervisor
   restarts only the role that requests configuration reload with exit code 75.
+- Makes Bundle workflows the primary CLI path, adds role-aware configuration
+  commands, and removes the legacy `management.auth_token_file` field. Older
+  Bundles must run `asterferry migrate` before startup; Admin and Viewer token
+  paths are now explicit.
 - Keeps Docker Compose aligned with the same Bundle layout and provides
   minimal generated configurations with production Dashboard serving disabled
   by default.

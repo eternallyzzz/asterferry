@@ -39,19 +39,29 @@ func Migrate(opts MigrateOptions) (MigrateResult, error) {
 			return MigrateResult{}, fmt.Errorf("read %s configuration: %w", item.role, err)
 		}
 		viewerPath := filepath.ToSlash(filepath.Join("..", "secrets", item.role, "management-viewer.token"))
-		updated, changed, err := migrateConfigDocument(raw, viewerPath)
+		updated, changed, createViewer, err := migrateConfigDocument(raw, viewerPath)
 		if err != nil {
 			return MigrateResult{}, fmt.Errorf("migrate %s configuration: %w", item.role, err)
 		}
 		if !changed {
 			continue
 		}
-		result.Changed = append(result.Changed, item.path, filepath.Join(b.Root, filepath.FromSlash(filepath.Join("secrets", item.role, "management-viewer.token"))))
+		result.Changed = append(result.Changed, item.path)
+		viewerSecret := filepath.Join(b.Root, filepath.FromSlash(filepath.Join("secrets", item.role, "management-viewer.token")))
+		if createViewer {
+			if _, statErr := os.Stat(viewerSecret); os.IsNotExist(statErr) {
+				result.Changed = append(result.Changed, viewerSecret)
+			} else if statErr != nil {
+				return MigrateResult{}, fmt.Errorf("inspect %s viewer token: %w", item.role, statErr)
+			}
+		}
 		if opts.DryRun {
 			continue
 		}
-		if err := writeSecretIfMissing(filepath.Join(b.Root, "secrets", item.role, "management-viewer.token")); err != nil {
-			return MigrateResult{}, fmt.Errorf("write %s viewer token: %w", item.role, err)
+		if createViewer {
+			if err := writeSecretIfMissing(viewerSecret); err != nil {
+				return MigrateResult{}, fmt.Errorf("write %s viewer token: %w", item.role, err)
+			}
 		}
 		if err := atomicBackupWrite(item.path, updated); err != nil {
 			return MigrateResult{}, fmt.Errorf("write %s configuration: %w", item.role, err)
@@ -60,67 +70,86 @@ func Migrate(opts MigrateOptions) (MigrateResult, error) {
 	return result, nil
 }
 
-func migrateConfigDocument(raw []byte, viewerPath string) ([]byte, bool, error) {
+func migrateConfigDocument(raw []byte, viewerPath string) ([]byte, bool, bool, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return nil, false, errors.New("multiple YAML documents are not allowed")
+			return nil, false, false, errors.New("multiple YAML documents are not allowed")
 		}
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
-		return nil, false, errors.New("configuration document must be a YAML mapping")
+		return nil, false, false, errors.New("configuration document must be a YAML mapping")
 	}
 	root := doc.Content[0]
 	management := mappingValue(root, "management")
 	if management == nil || management.Kind != yaml.MappingNode {
-		return nil, false, errors.New("management section is required")
+		return nil, false, false, errors.New("management section is required")
 	}
 	auth := mappingValue(management, "auth")
-	viewer := ""
-	if auth != nil && auth.Kind == yaml.MappingNode {
-		viewer = scalarValue(mappingValue(auth, "viewer_token_file"))
+	if auth != nil && auth.Kind != yaml.MappingNode {
+		return nil, false, false, errors.New("management.auth must be a YAML mapping")
 	}
+	nestedAdmin := scalarValue(mappingValue(auth, "admin_token_file"))
+	nestedViewer := scalarValue(mappingValue(auth, "viewer_token_file"))
+	legacyAdmin := scalarValue(mappingValue(management, "auth_token_file"))
+	flatViewer := scalarValue(mappingValue(management, "viewer_token_file"))
+	admin := nestedAdmin
+	if admin == "" {
+		admin = legacyAdmin
+	}
+	viewer := nestedViewer
 	if viewer == "" {
-		viewer = scalarValue(mappingValue(management, "viewer_token_file"))
-	}
-	if viewer != "" {
-		return raw, false, nil
-	}
-	admin := ""
-	if auth != nil && auth.Kind == yaml.MappingNode {
-		admin = scalarValue(mappingValue(auth, "admin_token_file"))
-	}
-	legacy := scalarValue(mappingValue(management, "auth_token_file"))
-	if admin == "" {
-		admin = legacy
+		viewer = flatViewer
 	}
 	if admin == "" {
-		return nil, false, errors.New("management admin token path is missing")
+		return nil, false, false, errors.New("management admin token path is missing")
 	}
+	createViewer := false
+	if viewer == "" {
+		viewer = viewerPath
+		createViewer = true
+	}
+	changed := false
 	if auth == nil {
 		auth = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 		setMappingValue(management, "auth", auth)
+		changed = true
 	}
-	setMappingValue(auth, "admin_token_file", scalarNode(admin))
-	setMappingValue(auth, "viewer_token_file", scalarNode(viewerPath))
-	removeMappingValue(management, "auth_token_file")
-	removeMappingValue(management, "viewer_token_file")
+	if nestedAdmin != admin {
+		setMappingValue(auth, "admin_token_file", scalarNode(admin))
+		changed = true
+	}
+	if nestedViewer != viewer {
+		setMappingValue(auth, "viewer_token_file", scalarNode(viewer))
+		changed = true
+	}
+	if legacyAdmin != "" {
+		removeMappingValue(management, "auth_token_file")
+		changed = true
+	}
+	if flatViewer != "" {
+		removeMappingValue(management, "viewer_token_file")
+		changed = true
+	}
+	if !changed {
+		return raw, false, false, nil
+	}
 	var out bytes.Buffer
 	enc := yaml.NewEncoder(&out)
 	enc.SetIndent(2)
 	if err := enc.Encode(&doc); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	if err := enc.Close(); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
-	return out.Bytes(), true, nil
+	return out.Bytes(), true, createViewer, nil
 }
 
 func mappingValue(node *yaml.Node, key string) *yaml.Node {

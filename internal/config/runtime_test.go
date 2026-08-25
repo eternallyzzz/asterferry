@@ -76,12 +76,9 @@ func TestLoadAndApplyEnvFromFile(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("ASTERFERRY_LOG_LEVEL", "debug")
-	if err := ApplyEnv(loaded); err != nil {
+	loaded, err := LoadRuntime(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if loaded.Logging.Level != "debug" {

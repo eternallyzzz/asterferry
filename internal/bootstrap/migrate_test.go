@@ -103,6 +103,30 @@ func TestMigrateFlatLegacyManagementToken(t *testing.T) {
 	}
 }
 
+func TestMigrateRemovesLegacyFieldsWhenViewerAlreadyExists(t *testing.T) {
+	raw := []byte(`management:
+  auth:
+    admin_token_file: admin.token
+    viewer_token_file: viewer.token
+  auth_token_file: old-admin.token
+  viewer_token_file: old-viewer.token
+`)
+	updated, changed, createViewer, err := migrateConfigDocument(raw, "generated-viewer.token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || createViewer {
+		t.Fatalf("legacy cleanup changed=%t createViewer=%t", changed, createViewer)
+	}
+	text := string(updated)
+	if strings.Contains(text, "auth_token_file") || strings.Contains(text, "viewer_token_file: old-viewer.token") {
+		t.Fatalf("legacy management fields remain: %s", text)
+	}
+	if !strings.Contains(text, "viewer_token_file: viewer.token") {
+		t.Fatalf("nested viewer token was not retained: %s", text)
+	}
+}
+
 func roleFromConfig(path string) string {
 	if strings.HasSuffix(path, "agent.yaml") {
 		return "agent"

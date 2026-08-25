@@ -15,13 +15,10 @@ import (
 	"asterferry/internal/bootstrap"
 	"asterferry/internal/buildinfo"
 	"asterferry/internal/config"
-	"asterferry/internal/configstore"
 	"asterferry/internal/diagnostics"
 	"asterferry/internal/gateway"
-	"asterferry/internal/lifecycle"
-	"asterferry/internal/logging"
 	"asterferry/internal/managementclient"
-	"asterferry/internal/observability"
+	"asterferry/internal/runner"
 	"github.com/spf13/cobra"
 )
 
@@ -62,7 +59,8 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	root.Example = `  asterferry init ./asterferry --profile dev
   asterferry up ./asterferry
   asterferry status ./asterferry
-  asterferry doctor --config ./asterferry/config/gateway.yaml
+  asterferry doctor ./asterferry
+  asterferry config show ./asterferry --role gateway
   asterferry gateway --config ./asterferry/config/gateway.yaml`
 
 	root.AddCommand(
@@ -167,12 +165,17 @@ func newInitCommand() *cobra.Command {
 }
 
 func newValidateCommand() *cobra.Command {
-	var path string
+	var path, role string
 	cmd := &cobra.Command{
-		Use:   "validate",
+		Use:   "validate [dir]",
 		Short: "validate YAML structure and configuration semantics",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			path, err = resolveRoleConfig(args, path, role, cmd.Flags().Changed("config"))
+			if err != nil {
+				return err
+			}
 			c, err := loadConfig(path)
 			if err != nil {
 				return err
@@ -181,7 +184,7 @@ func newValidateCommand() *cobra.Command {
 			return err
 		},
 	}
-	addConfigFlag(cmd, &path)
+	addRoleConfigFlags(cmd, &path, &role)
 	return cmd
 }
 
@@ -287,37 +290,7 @@ func newGatewayCommand() *cobra.Command {
 		Short: "run the Gateway role",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			c, err := loadConfig(path)
-			if err != nil {
-				return err
-			}
-			if c.Role != config.RoleGateway {
-				return errors.New("configuration role is not gateway; choose a gateway configuration")
-			}
-			opts, err := c.ResolveGateway()
-			if err != nil {
-				return runtimeConfigError(err, path)
-			}
-			events := observability.NewEventHub(0)
-			trigger := lifecycle.NewShutdownTrigger()
-			configManager, err := configstore.New(path)
-			if err != nil {
-				return fmt.Errorf("prepare configuration manager: %w", err)
-			}
-			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr(), events)
-			if err != nil {
-				return err
-			}
-			defer closeLog()
-			s, err := gateway.NewWithOptions(opts, gateway.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger, Config: configManager})
-			if err != nil {
-				return err
-			}
-			if err = s.Start(); err != nil {
-				return err
-			}
-			logGatewayStarted(logger, path, opts)
-			return waitForTrigger(opts.Shutdown.GracePeriod, s.Shutdown, s.Close, trigger)
+			return runRole(cmd.Context(), path, config.RoleGateway, cmd.ErrOrStderr())
 		},
 	}
 	addConfigFlag(cmd, &path)
@@ -331,41 +304,75 @@ func newAgentCommand() *cobra.Command {
 		Short: "run the Agent role",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			c, err := loadConfig(path)
-			if err != nil {
-				return err
-			}
-			if c.Role != config.RoleAgent {
-				return errors.New("configuration role is not agent; choose an agent configuration")
-			}
-			opts, err := c.ResolveAgent()
-			if err != nil {
-				return runtimeConfigError(err, path)
-			}
-			events := observability.NewEventHub(0)
-			trigger := lifecycle.NewShutdownTrigger()
-			configManager, err := configstore.New(path)
-			if err != nil {
-				return fmt.Errorf("prepare configuration manager: %w", err)
-			}
-			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr(), events)
-			if err != nil {
-				return err
-			}
-			defer closeLog()
-			a, err := agent.NewWithOptions(opts, agent.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger, Config: configManager})
-			if err != nil {
-				return err
-			}
-			if err = a.Start(); err != nil {
-				return err
-			}
-			logAgentStarted(logger, path, opts)
-			return waitForTrigger(opts.Shutdown.GracePeriod, a.Shutdown, a.Close, trigger)
+			return runRole(cmd.Context(), path, config.RoleAgent, cmd.ErrOrStderr())
 		},
 	}
 	addConfigFlag(cmd, &path)
 	return cmd
+}
+
+func runRole(ctx context.Context, path, expectedRole string, errorsOut io.Writer) error {
+	err := runner.Run(ctx, runner.Options{
+		ConfigPath:   path,
+		ExpectedRole: expectedRole,
+		Errors:       errorsOut,
+		Factory: func(c *config.Config, deps runner.Dependencies) (runner.Service, runner.StartInfo, error) {
+			switch expectedRole {
+			case config.RoleGateway:
+				opts, err := c.ResolveGateway()
+				if err != nil {
+					return nil, runner.StartInfo{}, runtimeConfigError(err, path)
+				}
+				service, err := gateway.NewWithOptions(opts, gateway.RuntimeOptions{
+					Logger:          deps.Logger,
+					Events:          deps.Events,
+					ShutdownTrigger: deps.ShutdownTrigger,
+					Config:          deps.Config,
+				})
+				if err != nil {
+					return nil, runner.StartInfo{}, err
+				}
+				return service, runner.StartInfo{
+					Message: "gateway started",
+					Attributes: []any{
+						"data_listen", opts.Gateway.Listen,
+						"management_listen", opts.Management.Listen,
+						"node_id", opts.Cluster.NodeID,
+						"transport_obfuscation", opts.TransportObfuscation.Mode,
+						"agent_count", len(opts.Agents),
+					},
+				}, nil
+			case config.RoleAgent:
+				opts, err := c.ResolveAgent()
+				if err != nil {
+					return nil, runner.StartInfo{}, runtimeConfigError(err, path)
+				}
+				service, err := agent.NewWithOptions(opts, agent.RuntimeOptions{
+					Logger:          deps.Logger,
+					Events:          deps.Events,
+					ShutdownTrigger: deps.ShutdownTrigger,
+					Config:          deps.Config,
+				})
+				if err != nil {
+					return nil, runner.StartInfo{}, err
+				}
+				return service, runner.StartInfo{
+					Message: "agent started",
+					Attributes: []any{
+						"gateway", opts.Agent.Server,
+						"management_listen", opts.Management.Listen,
+						"node_id", opts.Cluster.NodeID,
+						"agent_id", opts.Agent.ID,
+						"transport_obfuscation", opts.TransportObfuscation.Mode,
+						"proxy_inbounds", len(opts.Agent.Proxy.Inbounds),
+					},
+				}, nil
+			default:
+				return nil, runner.StartInfo{}, fmt.Errorf("unsupported runtime role %q", expectedRole)
+			}
+		},
+	})
+	return err
 }
 
 func addConfigFlag(cmd *cobra.Command, path *string) {
@@ -376,15 +383,15 @@ func loadConfig(path string) (*config.Config, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, &codedError{code: 2, err: errors.New("configuration path must not be empty")}
 	}
-	c, err := config.Load(path)
+	c, err := config.LoadRuntime(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("configuration %q was not found: %w; create it or run asterferry init", path, err)
 		}
+		if strings.Contains(err.Error(), "auth_token_file") {
+			return nil, fmt.Errorf("configuration %q uses the removed management.auth_token_file field: %w; run asterferry migrate <bundle>", path, err)
+		}
 		return nil, fmt.Errorf("configuration %q is invalid: %w; run asterferry doctor after fixing YAML errors", path, err)
-	}
-	if err := config.ApplyEnv(c); err != nil {
-		return nil, fmt.Errorf("configuration environment overrides are invalid: %w", err)
 	}
 	return c, nil
 }
@@ -468,12 +475,4 @@ func writeHumanStatus(w io.Writer, value any) error {
 		}
 	}
 	return nil
-}
-
-func logGatewayStarted(logger interface{ Info(string, ...any) }, path string, opts *config.GatewayOptions) {
-	logger.Info("gateway started", "event", "runtime.started", "config", path, "data_listen", opts.Gateway.Listen, "management_listen", opts.Management.Listen, "node_id", opts.Cluster.NodeID, "transport_obfuscation", opts.TransportObfuscation.Mode, "agent_count", len(opts.Agents))
-}
-
-func logAgentStarted(logger interface{ Info(string, ...any) }, path string, opts *config.AgentOptions) {
-	logger.Info("agent started", "event", "runtime.started", "config", path, "gateway", opts.Agent.Server, "management_listen", opts.Management.Listen, "node_id", opts.Cluster.NodeID, "agent_id", opts.Agent.ID, "transport_obfuscation", opts.TransportObfuscation.Mode, "proxy_inbounds", len(opts.Agent.Proxy.Inbounds))
 }

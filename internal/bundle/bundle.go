@@ -54,11 +54,15 @@ func Open(root string) (Bundle, error) {
 	return b, nil
 }
 
-func (b Bundle) Config(role string) string {
-	if role == AgentRole {
-		return b.AgentConfig
+func (b Bundle) Config(role string) (string, error) {
+	switch role {
+	case AgentRole:
+		return b.AgentConfig, nil
+	case GatewayRole:
+		return b.GatewayConfig, nil
+	default:
+		return "", fmt.Errorf("unsupported bundle role %q", role)
 	}
-	return b.GatewayConfig
 }
 
 func (b Bundle) EnsureRuntimeDirs() error {

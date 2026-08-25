@@ -16,7 +16,7 @@ import (
 // runtime.
 type AgentOptions struct {
 	Transport            TransportConfig
-	Management           ManagementConfig
+	Management           ManagementOptions
 	Shutdown             ShutdownOptions
 	Cluster              ClusterOptions
 	Limits               Limits
@@ -43,6 +43,17 @@ type LoggingOptions struct {
 	Format              string
 	Sampling            SamplingOptions
 	ExposeDomainAtDebug bool
+}
+
+// ManagementOptions is the resolved runtime view of the management listener.
+// File paths remain in the YAML-facing ManagementConfig; secrets are loaded
+// once here and are never carried by the raw configuration object.
+type ManagementOptions struct {
+	Listen      string
+	AdminToken  []byte
+	ViewerToken []byte
+	Web         ManagementWebConfig
+	TLS         ManagementTLSConfig
 }
 
 // ClusterOptions is the resolved identity metadata shared by both roles.
@@ -90,7 +101,7 @@ type GatewayAgentOptions struct {
 // GatewayOptions is the normalized runtime view of a gateway configuration.
 type GatewayOptions struct {
 	Transport            TransportConfig
-	Management           ManagementConfig
+	Management           ManagementOptions
 	Shutdown             ShutdownOptions
 	Cluster              ClusterOptions
 	Limits               Limits
@@ -162,7 +173,7 @@ func (c *Config) ResolveAgent() (*AgentOptions, error) {
 		Limits:               c.Limits,
 		Obfuscation:          c.Obfuscation,
 		TransportObfuscation: transportObfuscation,
-		Logging:              resolveLogging(c.Logging),
+		Logging:              ResolveLogging(c.Logging),
 		Agent:                AgentRuntime{ID: c.Agent.ID, Server: c.Agent.Server, TLS: c.Agent.TLS, Proxy: proxy, Reverse: reverse},
 		Token:                append([]byte(nil), token...),
 		StreamLimit:          UsableStreamLimit(c.Transport, c.Limits),
@@ -211,7 +222,7 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 		Limits:               c.Limits,
 		Obfuscation:          c.Obfuscation,
 		TransportObfuscation: transportObfuscation,
-		Logging:              resolveLogging(c.Logging),
+		Logging:              ResolveLogging(c.Logging),
 		Gateway: GatewayConfig{
 			Listen: c.Gateway.Listen,
 			TLS:    c.Gateway.TLS,
@@ -221,35 +232,37 @@ func (c *Config) ResolveGateway() (*GatewayOptions, error) {
 	}, nil
 }
 
-func resolveManagement(raw ManagementConfig) (ManagementConfig, error) {
+func resolveManagement(raw ManagementConfig) (ManagementOptions, error) {
 	adminPath := raw.Auth.AdminTokenFile
-	if adminPath == "" {
-		adminPath = raw.AuthTokenFile
-	}
 	viewerPath := raw.Auth.ViewerTokenFile
-	if viewerPath == "" {
-		viewerPath = adminPath
-	}
 	adminToken, err := ReadToken(adminPath)
 	if err != nil {
-		return ManagementConfig{}, fmt.Errorf("management admin token: %w", err)
+		return ManagementOptions{}, fmt.Errorf("management admin token: %w", err)
 	}
 	viewerToken := adminToken
 	if viewerPath != adminPath {
 		viewerToken, err = ReadToken(viewerPath)
 		if err != nil {
-			return ManagementConfig{}, fmt.Errorf("management viewer token: %w", err)
+			return ManagementOptions{}, fmt.Errorf("management viewer token: %w", err)
 		}
 	}
 	if raw.TLS.CertFile != "" {
 		if _, err := tls.LoadX509KeyPair(raw.TLS.CertFile, raw.TLS.KeyFile); err != nil {
-			return ManagementConfig{}, fmt.Errorf("management TLS certificate: %w", err)
+			return ManagementOptions{}, fmt.Errorf("management TLS certificate: %w", err)
 		}
 	}
-	raw.AuthToken = append([]byte(nil), adminToken...)
-	raw.AdminToken = append([]byte(nil), adminToken...)
-	raw.ViewerToken = append([]byte(nil), viewerToken...)
-	return raw, nil
+	web := raw.Web
+	if raw.Web.Enabled != nil {
+		enabled := *raw.Web.Enabled
+		web.Enabled = &enabled
+	}
+	return ManagementOptions{
+		Listen:      raw.Listen,
+		AdminToken:  append([]byte(nil), adminToken...),
+		ViewerToken: append([]byte(nil), viewerToken...),
+		Web:         web,
+		TLS:         raw.TLS,
+	}, nil
 }
 
 func resolveTransportObfuscation(raw TransportObfuscationConfig) (TransportObfuscationOptions, error) {
@@ -281,7 +294,9 @@ func resolveTransportObfuscation(raw TransportObfuscationConfig) (TransportObfus
 	return result, nil
 }
 
-func resolveLogging(raw LoggingConfig) LoggingOptions {
+// ResolveLogging converts validated YAML logging settings into immutable
+// runtime options.
+func ResolveLogging(raw LoggingConfig) LoggingOptions {
 	sampling := SamplingOptions{Enabled: raw.Sampling.Enabled == nil || *raw.Sampling.Enabled, RatePerSecond: raw.Sampling.RatePerSecond, Burst: raw.Sampling.Burst, SummaryIntervalSec: raw.Sampling.SummaryIntervalSec, MaxKeys: raw.Sampling.MaxKeys}
 	return LoggingOptions{Level: raw.Level, Format: raw.Format, Sampling: sampling, ExposeDomainAtDebug: raw.ExposeDomainAtDebug}
 }

@@ -32,7 +32,7 @@ func TestManagementConfigurationAPIAndOptionalDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := config.ReadToken(c.Management.AuthTokenFile)
+	token, err := config.ReadToken(c.Management.Auth.AdminTokenFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestManagementServerTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := config.ReadToken(c.Management.AuthTokenFile)
+	token, err := config.ReadToken(c.Management.Auth.AdminTokenFile)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,10 +12,20 @@ separation:
 - `agent`: actively connects to the Gateway, exposes local proxy listeners, and
   registers internal services as reverse mappings.
 
+For normal local operation, use the generated Bundle as the primary workflow:
+
+```text
+asterferry init ./asterferry --profile dev
+asterferry up ./asterferry
+asterferry status ./asterferry
+```
+
+The role commands remain available for systemd, Docker, Kubernetes, and other
+deployments that start one process per container or service:
+
 ```text
 asterferry gateway --config gateway.yaml
 asterferry agent   --config agent.yaml
-asterferry validate --config agent.yaml
 ```
 
 ## Quick start
@@ -28,7 +38,7 @@ asterferry init ./asterferry --profile dev
 asterferry doctor ./asterferry
 ```
 
-Start the two roles in separate terminals:
+Start both roles from the Bundle:
 
 ```powershell
 asterferry up ./asterferry
@@ -38,6 +48,25 @@ Use `asterferry status ./asterferry` to inspect both running roles. The generate
 `dev` certificates are for local testing only. For production, use
 `asterferry init --profile prod`, submit the generated CSRs to the deployment
 PKI, install the CA/certificates, and run `doctor` before starting.
+
+Inspect or validate one role from a Bundle without remembering its generated
+file path:
+
+```powershell
+asterferry config show ./asterferry --role gateway
+asterferry config validate ./asterferry --role agent
+asterferry validate ./asterferry --role gateway
+```
+
+Older Bundles that used `management.auth_token_file` must be upgraded once
+before they can start:
+
+```powershell
+asterferry migrate ./asterferry
+```
+
+Migration writes configuration backups beside the original YAML files. Use
+`--dry-run` to preview the changes.
 
 Every command has focused help. `asterferry completion powershell` (or
 `bash`/`zsh`) generates shell completion scripts, and `version` reports the

@@ -17,7 +17,7 @@ func configuredGatewayForHelpers() *Gateway {
 	g := testGatewayRuntime()
 	g.nodeID = "gw-a"
 	g.cfg = &config.GatewayOptions{
-		Management: config.ManagementConfig{Listen: "127.0.0.1:0"},
+		Management: config.ManagementOptions{Listen: "127.0.0.1:0"},
 		Shutdown:   config.ShutdownOptions{GracePeriod: time.Second},
 		Transport:  config.TransportConfig{HandshakeTimeoutSec: 1},
 		Limits: config.Limits{

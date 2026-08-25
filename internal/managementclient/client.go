@@ -44,9 +44,6 @@ func New(c *config.Config, scope Scope, timeout time.Duration) (*Client, error) 
 	if scope == Admin {
 		tokenPath = c.Management.Auth.AdminTokenFile
 	}
-	if tokenPath == "" {
-		tokenPath = c.Management.AuthTokenFile
-	}
 	token, err := config.ReadToken(tokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("read management token: %w", err)

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -108,13 +107,41 @@ func TestInitDoctorAndRuntimeCommandFailures(t *testing.T) {
 	}
 }
 
-func TestStartupSummariesDoNotRequireRuntime(t *testing.T) {
+func TestBundleFirstConfigurationCommands(t *testing.T) {
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	if _, err := bootstrap.Generate(bootstrap.Options{Dir: bundleDir, Profile: bootstrap.ProfileDev}); err != nil {
+		t.Fatal(err)
+	}
 	var output bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&output, nil))
-	logGatewayStarted(logger, "gateway.yaml", &config.GatewayOptions{Gateway: config.GatewayConfig{Listen: "127.0.0.1:4433"}, Management: config.ManagementConfig{Listen: "127.0.0.1:9090"}, Agents: []config.GatewayAgentOptions{{}}})
-	logAgentStarted(logger, "agent.yaml", &config.AgentOptions{Agent: config.AgentRuntime{ID: "edge-a", Server: "127.0.0.1:4433"}, Management: config.ManagementConfig{Listen: "127.0.0.1:9091"}})
-	if !strings.Contains(output.String(), "runtime.started") || !strings.Contains(output.String(), "edge-a") {
-		t.Fatalf("startup summaries missing: %s", output.String())
+	root := newRootCommand(&output, &output)
+	root.SetArgs([]string{"config", "show", bundleDir, "--role", "gateway"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "role: gateway") {
+		t.Fatalf("bundle configuration output is missing the role: %s", output.String())
+	}
+
+	output.Reset()
+	root = newRootCommand(&output, &output)
+	root.SetArgs([]string{"config", "validate", bundleDir, "--role", "agent"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "valid agent configuration") {
+		t.Fatalf("bundle validation output is incomplete: %s", output.String())
+	}
+
+	root = newRootCommand(&output, &output)
+	root.SetArgs([]string{"config", "show", bundleDir})
+	if err := root.Execute(); err == nil || exitCode(err) != 2 || !strings.Contains(err.Error(), "--role is required") {
+		t.Fatalf("missing bundle role error = %v", err)
+	}
+
+	root = newRootCommand(&output, &output)
+	root.SetArgs([]string{"validate", bundleDir, "--role", "gateway", "--config", filepath.Join(bundleDir, "config", "gateway.yaml")})
+	if err := root.Execute(); err == nil || exitCode(err) != 2 || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("bundle/config conflict error = %v", err)
 	}
 }
 
@@ -144,7 +171,7 @@ func TestQueryStatusHumanAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(c.Management.AuthTokenFile, []byte(testStatusToken), 0o600); err != nil {
+	if err := os.WriteFile(c.Management.Auth.AdminTokenFile, []byte(testStatusToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(c.Management.Auth.ViewerTokenFile, []byte(testStatusToken), 0o600); err != nil {
@@ -185,7 +212,7 @@ func TestQueryStatusUnauthorized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(c.Management.AuthTokenFile, []byte(testStatusToken), 0o600); err != nil {
+	if err := os.WriteFile(c.Management.Auth.AdminTokenFile, []byte(testStatusToken), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(c.Management.Auth.ViewerTokenFile, []byte(testStatusToken), 0o600); err != nil {

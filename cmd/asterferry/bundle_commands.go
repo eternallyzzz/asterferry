@@ -13,6 +13,7 @@ import (
 
 	"asterferry/internal/bootstrap"
 	"asterferry/internal/bundle"
+	"asterferry/internal/config"
 	"asterferry/internal/configstore"
 	"asterferry/internal/diagnostics"
 	"asterferry/internal/managementclient"
@@ -128,13 +129,18 @@ func newConfigCommand() *cobra.Command {
 }
 
 func newConfigShowCommand() *cobra.Command {
-	var path string
+	var path, role string
 	var jsonOutput bool
 	cmd := &cobra.Command{
-		Use:   "show",
+		Use:   "show [dir]",
 		Short: "show a redacted configuration snapshot",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			path, err = resolveRoleConfig(args, path, role, cmd.Flags().Changed("config"))
+			if err != nil {
+				return err
+			}
 			manager, err := configstore.New(path)
 			if err != nil {
 				return err
@@ -155,18 +161,23 @@ func newConfigShowCommand() *cobra.Command {
 			return err
 		},
 	}
-	addConfigFlag(cmd, &path)
+	addRoleConfigFlags(cmd, &path, &role)
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "write the snapshot as JSON")
 	return cmd
 }
 
 func newConfigValidateCommand() *cobra.Command {
-	var path, candidatePath string
+	var path, role, candidatePath string
 	cmd := &cobra.Command{
-		Use:   "validate",
+		Use:   "validate [dir]",
 		Short: "validate a role configuration or candidate YAML",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			path, err = resolveRoleConfig(args, path, role, cmd.Flags().Changed("config"))
+			if err != nil {
+				return err
+			}
 			if candidatePath == "" {
 				c, err := loadConfig(path)
 				if err != nil {
@@ -195,19 +206,24 @@ func newConfigValidateCommand() *cobra.Command {
 			return err
 		},
 	}
-	addConfigFlag(cmd, &path)
+	addRoleConfigFlags(cmd, &path, &role)
 	cmd.Flags().StringVar(&candidatePath, "file", "", "candidate YAML file")
 	return cmd
 }
 
 func newConfigApplyCommand() *cobra.Command {
-	var path, candidatePath string
+	var path, role, candidatePath string
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "apply",
+		Use:   "apply [dir]",
 		Short: "apply candidate YAML through the running role API",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			path, err = resolveRoleConfig(args, path, role, cmd.Flags().Changed("config"))
+			if err != nil {
+				return err
+			}
 			if candidatePath == "" {
 				return &codedError{code: 2, err: errors.New("--file is required")}
 			}
@@ -251,20 +267,25 @@ func newConfigApplyCommand() *cobra.Command {
 			return err
 		},
 	}
-	addConfigFlag(cmd, &path)
+	addRoleConfigFlags(cmd, &path, &role)
 	cmd.Flags().StringVar(&candidatePath, "file", "", "candidate YAML file")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
 }
 
 func newConfigRollbackCommand() *cobra.Command {
-	var path string
+	var path, role string
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "rollback",
+		Use:   "rollback [dir]",
 		Short: "restore the previous configuration through the running role API",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			path, err = resolveRoleConfig(args, path, role, cmd.Flags().Changed("config"))
+			if err != nil {
+				return err
+			}
 			manager, err := configstore.New(path)
 			if err != nil {
 				return err
@@ -295,9 +316,45 @@ func newConfigRollbackCommand() *cobra.Command {
 			return err
 		},
 	}
-	addConfigFlag(cmd, &path)
+	addRoleConfigFlags(cmd, &path, &role)
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the confirmation prompt")
 	return cmd
+}
+
+func addRoleConfigFlags(cmd *cobra.Command, path, role *string) {
+	addConfigFlag(cmd, path)
+	cmd.Flags().StringVar(role, "role", "", "bundle role: gateway or agent")
+}
+
+func resolveRoleConfig(args []string, path, role string, configFlagChanged bool) (string, error) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if role != "" && role != config.RoleGateway && role != config.RoleAgent {
+		return "", &codedError{code: 2, err: fmt.Errorf("unsupported role %q; choose gateway or agent", role)}
+	}
+	if len(args) == 1 {
+		if configFlagChanged {
+			return "", &codedError{code: 2, err: errors.New("provide a bundle directory argument or --config, not both")}
+		}
+		if role == "" {
+			return "", &codedError{code: 2, err: errors.New("--role is required when a bundle directory is provided")}
+		}
+		b, err := openBundle(args[0])
+		if err != nil {
+			return "", err
+		}
+		return b.Config(role)
+	}
+	if role == "" {
+		return path, nil
+	}
+	c, err := loadConfig(path)
+	if err != nil {
+		return "", err
+	}
+	if c.Role != role {
+		return "", &codedError{code: 2, err: fmt.Errorf("configuration role is %s, not %s", c.Role, role)}
+	}
+	return path, nil
 }
 
 func confirm(cmd *cobra.Command, yes bool, prompt string) error {

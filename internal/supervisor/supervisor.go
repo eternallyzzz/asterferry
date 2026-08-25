@@ -99,7 +99,10 @@ func Run(ctx context.Context, options Options) error {
 	defer removeState()
 
 	startRole := func(role string) (*child, error) {
-		configPath := options.Bundle.Config(role)
+		configPath, err := options.Bundle.Config(role)
+		if err != nil {
+			return nil, err
+		}
 		var logFile *os.File
 		if options.Output == io.Discard {
 			path := filepath.Join(options.Bundle.LogsDir, role+".log")
@@ -138,7 +141,11 @@ func Run(ctx context.Context, options Options) error {
 			return nil, err
 		}
 		children[role] = current
-		if err := waitForManagement(options.Bundle.Config(role), options.StartupTimeout); err != nil {
+		configPath, err := options.Bundle.Config(role)
+		if err != nil {
+			return nil, err
+		}
+		if err := waitForManagement(configPath, options.StartupTimeout); err != nil {
 			_ = terminateChild(current)
 			if current.logFile != nil {
 				_ = current.logFile.Close()
@@ -261,8 +268,11 @@ func Stop(ctx context.Context, b bundle.Bundle, timeout time.Duration, output io
 	}
 	roles := []string{bundle.AgentRole, bundle.GatewayRole}
 	for _, role := range roles {
-		path := b.Config(role)
-		c, loadErr := config.Load(path)
+		path, pathErr := b.Config(role)
+		if pathErr != nil {
+			continue
+		}
+		c, loadErr := config.LoadRuntime(path)
 		if loadErr != nil {
 			continue
 		}
@@ -302,7 +312,7 @@ func Stop(ctx context.Context, b bundle.Bundle, timeout time.Duration, output io
 
 func validateBundle(b bundle.Bundle) error {
 	for _, path := range []string{b.GatewayConfig, b.AgentConfig} {
-		c, err := config.Load(path)
+		c, err := config.LoadRuntime(path)
 		if err != nil {
 			return fmt.Errorf("validate %s: %w", path, err)
 		}
@@ -314,7 +324,7 @@ func validateBundle(b bundle.Bundle) error {
 }
 
 func waitForManagement(path string, timeout time.Duration) error {
-	c, err := config.Load(path)
+	c, err := config.LoadRuntime(path)
 	if err != nil {
 		return err
 	}
@@ -337,7 +347,7 @@ func stopChildren(ctx context.Context, b bundle.Bundle, children map[string]*chi
 			continue
 		}
 		path := current.config
-		if c, err := config.Load(path); err == nil {
+		if c, err := config.LoadRuntime(path); err == nil {
 			if client, clientErr := managementclient.New(c, managementclient.Admin, timeout); clientErr == nil {
 				requestCtx, cancel := context.WithTimeout(ctx, timeout)
 				response, requestErr := client.Do(requestCtx, "POST", "/v1/actions/shutdown", nil)

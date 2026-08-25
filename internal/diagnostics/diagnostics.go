@@ -75,13 +75,7 @@ func Check(c *config.Config, skipPorts bool) Report {
 	}
 	report.Role = c.Role
 	adminTokenPath := c.Management.Auth.AdminTokenFile
-	if adminTokenPath == "" {
-		adminTokenPath = c.Management.AuthTokenFile
-	}
 	viewerTokenPath := c.Management.Auth.ViewerTokenFile
-	if viewerTokenPath == "" {
-		viewerTokenPath = adminTokenPath
-	}
 	checkSecret(&report, "management.auth.admin_token_file", adminTokenPath, true)
 	if viewerTokenPath != adminTokenPath {
 		checkSecret(&report, "management.auth.viewer_token_file", viewerTokenPath, true)
