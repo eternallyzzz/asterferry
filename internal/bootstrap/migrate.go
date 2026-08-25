@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"asterferry/internal/atomicfile"
 	"asterferry/internal/bundle"
 	"asterferry/internal/config"
 	"gopkg.in/yaml.v3"
@@ -239,14 +240,7 @@ func writeSecretIfMissing(path string) error {
 		return err
 	}
 	encoded := fmt.Sprintf("%x", data)
-	return writePrivateFile(path, []byte(encoded+"\n"))
-}
-
-func writePrivateFile(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
+	return atomicfile.Write(path, []byte(encoded+"\n"), 0o600)
 }
 
 func atomicBackupWrite(path string, data []byte) error {
@@ -258,39 +252,8 @@ func atomicBackupWrite(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(path+".bak", current, info.Mode().Perm()); err != nil {
+	if err := atomicfile.AtomicWrite(path+".bak", current, info.Mode().Perm()); err != nil {
 		return err
 	}
-	return atomicWrite(path, data, info.Mode().Perm())
-}
-
-func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".asterferry-migrate-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err == nil {
-		return nil
-	}
-	if err := os.Remove(path); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return atomicfile.AtomicWrite(path, data, info.Mode().Perm())
 }

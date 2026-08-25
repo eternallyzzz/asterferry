@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"asterferry/internal/config"
+	"asterferry/internal/identity"
 	"asterferry/internal/transport"
 )
 
@@ -233,11 +234,11 @@ func checkCertificatePair(report *Report, prefix, certPath, keyPath string, usag
 		report.add(SeverityWarn, "certificate.eku", prefix, fmt.Sprintf("certificate does not explicitly contain %s", usageName(usage)), "issue the certificate with the required TLS extended key usage")
 	}
 	if expectedAgentID != "" {
-		identity, ok := transport.CertificateAgentID(leaf)
-		if !ok || identity != expectedAgentID {
-			report.add(SeverityError, "certificate.agent_identity", prefix, "Agent certificate does not contain exactly one AsterFerry URI identity", "add URI SAN urn:asterferry:agent:<agent-id>")
+		certAgentID, ok := transport.CertificateAgentID(leaf)
+		if !ok || certAgentID != expectedAgentID {
+			report.add(SeverityError, "certificate.agent_identity", prefix, "Agent certificate does not contain exactly one AsterFerry URI identity", "add URI SAN "+identity.AgentIdentityURI("<agent-id>"))
 		} else {
-			report.add(SeverityOK, "certificate.agent_identity", prefix, fmt.Sprintf("Agent certificate identity is %q", identity), "")
+			report.add(SeverityOK, "certificate.agent_identity", prefix, fmt.Sprintf("Agent certificate identity is %q", certAgentID), "")
 		}
 	} else if len(leaf.DNSNames) == 0 && len(leaf.IPAddresses) == 0 {
 		report.add(SeverityWarn, "certificate.server_san", prefix, "Gateway certificate has no DNS or IP SAN", "include every Agent server_name in the certificate SAN list")
@@ -320,9 +321,9 @@ func VerifyAgentCertificate(cert *x509.Certificate, roots *x509.CertPool, agentI
 	if cert == nil {
 		return errors.New("agent certificate is nil")
 	}
-	identity, ok := transport.CertificateAgentID(cert)
-	if !ok || identity != agentID {
-		return fmt.Errorf("agent certificate identity must be urn:asterferry:agent:%s", agentID)
+	certAgentID, ok := transport.CertificateAgentID(cert)
+	if !ok || certAgentID != agentID {
+		return fmt.Errorf("agent certificate identity must be %s", identity.AgentIdentityURI(agentID))
 	}
 	if roots == nil {
 		return errors.New("agent CA pool is required")

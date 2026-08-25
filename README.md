@@ -89,7 +89,9 @@ stored on disk. The page shows live status, traffic trends, QUIC diagnostics,
 Agent/mapping inventory, and structured runtime events. It is intentionally
 read-only: the Dashboard can validate and preview a redacted configuration
 draft, while configuration writes and runtime actions require the Admin token
-through the CLI or protected management API.
+through the CLI or protected management API. Secret fields such as inbound
+passwords are never changed through that API; edit them in the configuration
+file directly and restart the role through the normal deployment workflow.
 
 The embedded page is controlled by `management.web.enabled` (default `true` for
 legacy/manual configurations; generated production bundles set it to `false`).

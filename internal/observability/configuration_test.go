@@ -92,6 +92,14 @@ func TestManagementConfigurationAPIAndOptionalDashboard(t *testing.T) {
 		t.Fatalf("config validation status = %d %q", response.StatusCode, data)
 	}
 	_ = response.Body.Close()
+	secretCandidate := strings.Replace(snapshot.YAML, configstore.RedactedValue, "new-password", 1)
+	secretBody, _ := json.Marshal(map[string]string{"base_revision": snapshot.Revision, "yaml": secretCandidate})
+	response = authorizedJSON(t, client, http.MethodPost, base+"/v1/config/validate", token, secretBody)
+	data, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(string(data), "secret_field_read_only") || !strings.Contains(string(data), "edit the configuration file directly") {
+		t.Fatalf("secret validation response = %d %q", response.StatusCode, data)
+	}
 	response = authorizedJSON(t, client, http.MethodPost, base+"/v1/config/apply", token, validationBody)
 	if response.StatusCode != http.StatusAccepted {
 		data, _ := io.ReadAll(response.Body)

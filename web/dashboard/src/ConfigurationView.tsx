@@ -83,7 +83,7 @@ export default function ConfigurationView(props: { token: string; onClose: () =>
         <div>
           <p className="eyebrow">CONFIGURATION / {snapshot?.role || "LOADING"}</p>
           <h2>Inspect runtime configuration</h2>
-          <p className="muted">Drafts are validated and previewed here only. Apply changes with the Admin token through the CLI or protected API.</p>
+          <p className="muted">Drafts are validated and previewed here only. Secret fields such as inbound passwords are preserved and cannot be changed here; edit the configuration file directly. Apply other changes with the Admin token through the CLI or protected API.</p>
         </div>
         <div className="topbar-actions">
           <button className="quiet-button" onClick={props.onClose}>Back to dashboard</button>
@@ -120,7 +120,7 @@ export default function ConfigurationView(props: { token: string; onClose: () =>
           <div className="config-actions">
             <button className="secondary-button" onClick={() => void validateCurrent()} disabled={busy}>Validate and preview</button>
           </div>
-          <p className="muted config-hint">The Dashboard never writes configuration. Use <code>asterferry config apply --config … --file … --yes</code> or an Admin-scoped API client.</p>
+          <p className="muted config-hint">The Dashboard never writes configuration. Secret fields such as inbound passwords are read-only here. Use <code>asterferry config apply --config … --file … --yes</code> or an Admin-scoped API client for non-secret changes.</p>
         </>
       ) : !error && <div className="loading-card"><span className="spinner" /> Loading configuration…</div>}
     </section>

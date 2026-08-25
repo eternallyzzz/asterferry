@@ -23,6 +23,7 @@ import (
 	"asterferry/internal/agent"
 	"asterferry/internal/config"
 	"asterferry/internal/gateway"
+	"asterferry/internal/identity"
 	"asterferry/internal/relay"
 )
 
@@ -445,11 +446,11 @@ func makeCertificates(t testing.TB, dir, agentID string) certificateFiles {
 		tmpl := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: name}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 		if client {
 			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
-			identity, parseErr := url.Parse("urn:asterferry:agent:" + agentID)
+			agentIdentity, parseErr := url.Parse(identity.AgentIdentityURI(agentID))
 			if parseErr != nil {
 				t.Fatal(parseErr)
 			}
-			tmpl.URIs = []*url.URL{identity}
+			tmpl.URIs = []*url.URL{agentIdentity}
 		} else {
 			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 			tmpl.DNSNames = []string{"localhost"}

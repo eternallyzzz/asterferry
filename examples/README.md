@@ -109,8 +109,10 @@ current key while inbound packets accept both keys for the overlap window.
   optional trust material for the CLI `status` command.
 - The protected configuration API only accepts non-secret field changes. It
   preserves redacted passwords, validates and previews a diff, writes a `.bak`
-  backup, and requests a graceful supervisor restart. Read-only container and
-  ConfigMap mounts remain read-only.
+  backup, and requests a graceful supervisor restart. To change an inbound
+  password, edit the configuration file directly and restart the role; the
+  API reports secret fields as read-only. Read-only container and ConfigMap
+  mounts remain read-only.
 - `cluster.node_id` is optional identity metadata for future Kubernetes
   coordination. It does not enable multiple Gateway replicas or external
   Redis/etcd coordination.

@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"asterferry/internal/config"
+	"asterferry/internal/identity"
 	"asterferry/internal/transport"
+	"gopkg.in/yaml.v3"
 )
 
 func TestGenerateDevBundleIsRunnableAndPortable(t *testing.T) {
@@ -88,7 +90,7 @@ func TestGenerateProductionBundleCreatesCSRsWithoutCertificates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.URIs) != 1 || request.URIs[0].String() != "urn:asterferry:agent:edge-prod" {
+	if len(request.URIs) != 1 || request.URIs[0].String() != identity.AgentIdentityURI("edge-prod") {
 		t.Fatalf("unexpected agent CSR URI SANs: %#v", request.URIs)
 	}
 	for _, path := range []string{
@@ -150,6 +152,49 @@ func TestGenerateProtectsExistingDirectories(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(root, "important.txt"))
 	if err != nil || string(data) != "keep" {
 		t.Fatalf("unrelated file changed: %q, %v", data, err)
+	}
+}
+
+func TestPruneGeneratedYAMLPreservesExplicitFalseFields(t *testing.T) {
+	var document yaml.Node
+	raw := "management:\n  web:\n    enabled: false\nagent:\n  proxy:\n    sniff:\n      enabled: false\nlogging:\n  sampling:\n    enabled: false\ngateway:\n  agents:\n    - egress:\n        enabled: false\n"
+	if err := yaml.Unmarshal([]byte(raw), &document); err != nil {
+		t.Fatal(err)
+	}
+	if !pruneGeneratedYAML(&document) {
+		t.Fatal("configuration was pruned completely")
+	}
+	data, err := yaml.Marshal(document.Content[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Count(text, "enabled: false") != 3 {
+		t.Fatalf("explicit false fields = %q", text)
+	}
+	if strings.Contains(text, "egress:") {
+		t.Fatalf("ordinary zero-value false field was retained: %q", text)
+	}
+}
+
+func TestRandomTextSupportsEvenAndOddLengths(t *testing.T) {
+	for _, test := range []struct {
+		prefix string
+		length int
+	}{
+		{prefix: "", length: 16},
+		{prefix: "af-", length: 15},
+	} {
+		value, err := randomText(test.prefix, test.length)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(value) != len(test.prefix)+test.length || !strings.HasPrefix(string(value), test.prefix) {
+			t.Fatalf("random text = %q, want prefix %q and length %d", value, test.prefix, len(test.prefix)+test.length)
+		}
+	}
+	if _, err := randomText("", -1); err == nil {
+		t.Fatal("negative random text length should fail")
 	}
 }
 

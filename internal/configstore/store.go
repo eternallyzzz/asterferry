@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"asterferry/internal/atomicfile"
 	"asterferry/internal/config"
 	"asterferry/internal/diagnostics"
 )
@@ -34,7 +35,7 @@ var (
 	ErrReadOnly         = errors.New("configuration file is read-only")
 	ErrNoBackup         = errors.New("no configuration backup is available")
 	ErrInvalid          = errors.New("configuration is invalid")
-	ErrSecretField      = errors.New("secret fields cannot be changed from the web")
+	ErrSecretField      = errors.New("secret fields cannot be changed through the management API; edit the configuration file directly")
 )
 
 type Snapshot struct {
@@ -169,7 +170,7 @@ func (m *Manager) Apply(expectedRevision string, candidate []byte) (ApplyResult,
 	}
 	restored, err := restoreRedactedSecrets(candidate, current)
 	if err != nil {
-		return ApplyResult{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return ApplyResult{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	info, err := os.Stat(m.path)
 	if err != nil {
@@ -179,10 +180,10 @@ func (m *Manager) Apply(expectedRevision string, candidate []byte) (ApplyResult,
 	if mode == 0 {
 		mode = 0o600
 	}
-	if err := writeAtomic(m.backupPath(), current, mode); err != nil {
+	if err := atomicfile.AtomicWrite(m.backupPath(), current, mode); err != nil {
 		return ApplyResult{}, fmt.Errorf("write configuration backup: %w", err)
 	}
-	if err := writeAtomic(m.path, restored, mode); err != nil {
+	if err := atomicfile.AtomicWrite(m.path, restored, mode); err != nil {
 		return ApplyResult{}, fmt.Errorf("write configuration: %w", err)
 	}
 	return ApplyResult{
@@ -227,10 +228,10 @@ func (m *Manager) Rollback(expectedRevision string) (ApplyResult, error) {
 	if mode == 0 {
 		mode = 0o600
 	}
-	if err := writeAtomic(m.backupPath(), current, mode); err != nil {
+	if err := atomicfile.AtomicWrite(m.backupPath(), current, mode); err != nil {
 		return ApplyResult{}, fmt.Errorf("write rollback backup: %w", err)
 	}
-	if err := writeAtomic(m.path, backup, mode); err != nil {
+	if err := atomicfile.AtomicWrite(m.path, backup, mode); err != nil {
 		return ApplyResult{}, fmt.Errorf("restore configuration: %w", err)
 	}
 	return ApplyResult{SchemaVersion: SchemaVersion, Role: m.role, Revision: revision(backup), Backup: true}, nil
@@ -249,7 +250,7 @@ func (m *Manager) validateLocked(current []byte, expectedRevision string, candid
 	}
 	restored, err := restoreRedactedSecrets(candidate, current)
 	if err != nil {
-		return Validation{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return Validation{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	c, err := config.LoadBytes(restored, m.path)
 	if err != nil {
@@ -324,45 +325,6 @@ func probeWritable(path string) bool {
 	_ = tmp.Close()
 	_ = os.Remove(tmpPath)
 	return true
-}
-
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".asterferry-config-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err == nil {
-		return nil
-	} else {
-		// Windows cannot replace an existing file with Rename. The old file is
-		// already protected by the caller's backup; restore is still attempted
-		// if the second rename fails.
-		if removeErr := os.Remove(path); removeErr != nil {
-			return err
-		}
-		if renameErr := os.Rename(tmpPath, path); renameErr != nil {
-			return renameErr
-		}
-	}
-	return nil
 }
 
 func redactYAML(raw []byte) ([]byte, error) {

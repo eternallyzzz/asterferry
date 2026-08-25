@@ -180,6 +180,8 @@ func writeConfigError(w http.ResponseWriter, err error) {
 		status, code, message = http.StatusConflict, "config_read_only", "configuration file is read-only"
 	case errors.Is(err, configstore.ErrNoBackup):
 		status, code, message = http.StatusNotFound, "config_backup_missing", "no configuration backup is available"
+	case errors.Is(err, configstore.ErrSecretField):
+		code, message = "secret_field_read_only", "secret fields cannot be changed through the management API; edit the configuration file directly"
 	}
 	writeActionError(w, status, code, message)
 }

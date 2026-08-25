@@ -4,6 +4,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -518,7 +518,7 @@ func (w *prefixWriter) Write(data []byte) (int, error) {
 			}
 			w.line = true
 		}
-		index := strings.IndexByte(string(data), '\n')
+		index := bytes.IndexByte(data, '\n')
 		if index < 0 {
 			_, err := w.dst.Write(data)
 			return originalLength, err

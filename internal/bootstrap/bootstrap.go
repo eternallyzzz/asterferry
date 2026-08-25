@@ -25,7 +25,9 @@ import (
 	"strings"
 	"time"
 
+	"asterferry/internal/atomicfile"
 	"asterferry/internal/config"
+	"asterferry/internal/identity"
 	"asterferry/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
@@ -213,7 +215,7 @@ func generateBundle(root string, opts Options) (Result, []string, error) {
 	files := make([]string, 0, 20)
 	writeSecret := func(role, name string, data []byte) error {
 		path := filepath.Join(root, "secrets", role, name)
-		if err := writeFile(path, data, 0o600); err != nil {
+		if err := atomicfile.Write(path, data, 0o600); err != nil {
 			return err
 		}
 		files = append(files, filepath.ToSlash(filepath.Join("secrets", role, name)))
@@ -282,7 +284,7 @@ func generateBundle(root string, opts Options) (Result, []string, error) {
 		return Result{}, nil, fmt.Errorf("write agent configuration: %w", err)
 	}
 	files = append(files, "config/gateway.yaml", "config/agent.yaml")
-	if err := writeFile(filepath.Join(root, "README.md"), []byte(bundleREADME(opts)), 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(root, "README.md"), []byte(bundleREADME(opts)), 0o644); err != nil {
 		return Result{}, nil, fmt.Errorf("write bundle README: %w", err)
 	}
 	files = append(files, "README.md")
@@ -331,6 +333,14 @@ func pruneGeneratedYAML(node *yaml.Node) bool {
 	return pruneGeneratedYAMLAt(node, "")
 }
 
+// These pointer booleans carry explicit configuration semantics. Keep a
+// false value for them even though false is otherwise a generated zero value.
+var generatedYAMLFalsePaths = map[string]struct{}{
+	"management.web.enabled":    {},
+	"agent.proxy.sniff.enabled": {},
+	"logging.sampling.enabled":  {},
+}
+
 func pruneGeneratedYAMLAt(node *yaml.Node, path string) bool {
 	if node == nil {
 		return false
@@ -370,7 +380,11 @@ func pruneGeneratedYAMLAt(node *yaml.Node, path string) bool {
 		case "!!int", "!!float":
 			return !zeroNumericScalar(node.Value)
 		case "!!bool":
-			return node.Value != "false" || path == "management.web.enabled"
+			if node.Value != "false" {
+				return true
+			}
+			_, keep := generatedYAMLFalsePaths[path]
+			return keep
 		default:
 			return node.Value != ""
 		}
@@ -495,7 +509,7 @@ func generateDevCertificates(gatewayDir, agentDir string, opts Options) error {
 	}
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
 	for _, path := range []string{filepath.Join(gatewayDir, "ca.crt"), filepath.Join(gatewayDir, "agents-ca.crt"), filepath.Join(agentDir, "gateway-ca.crt")} {
-		if err := writeFile(path, caPEM, 0o644); err != nil {
+		if err := atomicfile.Write(path, caPEM, 0o644); err != nil {
 			return fmt.Errorf("write development CA: %w", err)
 		}
 	}
@@ -534,7 +548,7 @@ func generateProductionCSRs(gatewayDir, agentDir string, opts Options) error {
 	if err := writePrivateKey(filepath.Join(gatewayDir, "server.key"), serverKey); err != nil {
 		return fmt.Errorf("write gateway key: %w", err)
 	}
-	if err := writeFile(filepath.Join(gatewayDir, "server.csr"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: serverCSR}), 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(gatewayDir, "server.csr"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: serverCSR}), 0o644); err != nil {
 		return fmt.Errorf("write gateway CSR: %w", err)
 	}
 
@@ -542,11 +556,11 @@ func generateProductionCSRs(gatewayDir, agentDir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("generate agent key: %w", err)
 	}
-	identity, err := url.Parse("urn:asterferry:agent:" + opts.AgentID)
+	agentURI, err := identity.AgentIdentityURL(opts.AgentID)
 	if err != nil {
 		return fmt.Errorf("create agent identity: %w", err)
 	}
-	clientRequest := &x509.CertificateRequest{Subject: pkix.Name{CommonName: opts.AgentID}, URIs: []*url.URL{identity}, ExtraExtensions: []pkix.Extension{extendedKeyUsageExtension(clientAuthOID)}}
+	clientRequest := &x509.CertificateRequest{Subject: pkix.Name{CommonName: opts.AgentID}, URIs: []*url.URL{agentURI}, ExtraExtensions: []pkix.Extension{extendedKeyUsageExtension(clientAuthOID)}}
 	clientCSR, err := x509.CreateCertificateRequest(rand.Reader, clientRequest, clientKey)
 	if err != nil {
 		return fmt.Errorf("create agent CSR: %w", err)
@@ -554,7 +568,7 @@ func generateProductionCSRs(gatewayDir, agentDir string, opts Options) error {
 	if err := writePrivateKey(filepath.Join(agentDir, opts.AgentID+".key"), clientKey); err != nil {
 		return fmt.Errorf("write agent key: %w", err)
 	}
-	if err := writeFile(filepath.Join(agentDir, opts.AgentID+".csr"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: clientCSR}), 0o644); err != nil {
+	if err := atomicfile.Write(filepath.Join(agentDir, opts.AgentID+".csr"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: clientCSR}), 0o644); err != nil {
 		return fmt.Errorf("write agent CSR: %w", err)
 	}
 	return nil
@@ -588,19 +602,19 @@ func certificateTemplate(commonName string, ca, client bool, dns []string, ips [
 	return template, nil
 }
 
-func createLeaf(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, client bool, identity string) (*ecdsa.PrivateKey, []byte, error) {
+func createLeaf(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string, client bool, agentID string) (*ecdsa.PrivateKey, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	dns := dnsNames(identity)
-	ips := ipNames(identity)
+	dns := dnsNames(agentID)
+	ips := ipNames(agentID)
 	template, err := certificateTemplate(commonName, false, client, dns, ips)
 	if err != nil {
 		return nil, nil, err
 	}
 	if client {
-		uri, err := url.Parse("urn:asterferry:agent:" + identity)
+		uri, err := identity.AgentIdentityURL(agentID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -613,7 +627,7 @@ func createLeaf(ca *x509.Certificate, caKey *ecdsa.PrivateKey, commonName string
 }
 
 func writeKeyPair(certPath, keyPath string, certDER []byte, key *ecdsa.PrivateKey) error {
-	if err := writeFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o644); err != nil {
+	if err := atomicfile.Write(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o644); err != nil {
 		return err
 	}
 	return writePrivateKey(keyPath, key)
@@ -624,18 +638,24 @@ func writePrivateKey(path string, key *ecdsa.PrivateKey) error {
 	if err != nil {
 		return err
 	}
-	return writeFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
+	return atomicfile.Write(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
 }
 
 func randomSecret() ([]byte, error) { return randomText("", 64) }
 
 func randomText(prefix string, hexChars int) ([]byte, error) {
+	if hexChars < 0 {
+		return nil, errors.New("random text length must not be negative")
+	}
 	buf := make([]byte, (hexChars+1)/2)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
 	}
 	value := prefix + hex.EncodeToString(buf)
-	return []byte(value[:len(prefix)+hexChars]), nil
+	if hexChars%2 != 0 {
+		value = value[:len(prefix)+hexChars]
+	}
+	return []byte(value), nil
 }
 
 func writeGeneratedYAML(path string, value any) error {
@@ -643,7 +663,7 @@ func writeGeneratedYAML(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	return writeFile(path, b, 0o644)
+	return atomicfile.Write(path, b, 0o644)
 }
 
 func portableConfigPaths(c *config.Config) {
@@ -677,20 +697,7 @@ func writeJSON(path string, value any, mode os.FileMode) error {
 		return err
 	}
 	b = append(b, '\n')
-	return writeFile(path, b, mode)
-}
-
-func writeFile(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, data, mode); err != nil {
-		return err
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		return err
-	}
-	return nil
+	return atomicfile.Write(path, b, mode)
 }
 
 func readManifest(root string) (manifest, error) {

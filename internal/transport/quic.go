@@ -9,13 +9,13 @@ import (
 	"io"
 	"net"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
 
 	"asterferry/internal/config"
+	"asterferry/internal/identity"
 )
 
 const closeErrorCode quic.ApplicationErrorCode = 0x100
@@ -300,9 +300,9 @@ func ValidateAgentCredentials(cfg *config.AgentOptions) error {
 	if err != nil {
 		return fmt.Errorf("parse agent certificate: %w", err)
 	}
-	identity, ok := CertificateAgentID(leaf)
-	if !ok || identity != cfg.Agent.ID {
-		return fmt.Errorf("agent certificate URI SAN must be %q", AgentIdentityURI(cfg.Agent.ID))
+	certAgentID, ok := CertificateAgentID(leaf)
+	if !ok || certAgentID != cfg.Agent.ID {
+		return fmt.Errorf("agent certificate URI SAN must be %q", identity.AgentIdentityURI(cfg.Agent.ID))
 	}
 	if len(cfg.Token) < 32 {
 		return errors.New("agent token must contain at least 32 bytes")
@@ -397,10 +397,6 @@ func quicConfigWithObfuscation(cfg config.TransportConfig, obfs config.Transport
 	return q
 }
 
-const agentIdentityPrefix = "urn:asterferry:agent:"
-
-func AgentIdentityURI(agentID string) string { return agentIdentityPrefix + agentID }
-
 // CertificateAgentID extracts the single AsterFerry URI identity. Other URI
 // SANs are permitted for certificate tooling, but multiple AsterFerry
 // identities are rejected to prevent ambiguous binding.
@@ -408,18 +404,18 @@ func CertificateAgentID(cert *x509.Certificate) (string, bool) {
 	if cert == nil {
 		return "", false
 	}
-	identity := ""
+	agentID := ""
 	for _, uri := range cert.URIs {
-		if uri == nil || !strings.HasPrefix(uri.String(), agentIdentityPrefix) {
+		candidate, ok := identity.ParseAgentIdentityURI(uri)
+		if !ok {
 			continue
 		}
-		candidate := strings.TrimPrefix(uri.String(), agentIdentityPrefix)
-		if candidate == "" || strings.ContainsAny(candidate, "\r\n") || identity != "" {
+		if agentID != "" {
 			return "", false
 		}
-		identity = candidate
+		agentID = candidate
 	}
-	return identity, identity != ""
+	return agentID, agentID != ""
 }
 
 func configureUDPBuffers(conn *net.UDPConn, cfg config.TransportConfig) error {
