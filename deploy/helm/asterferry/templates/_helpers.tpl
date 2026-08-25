@@ -69,5 +69,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Image reference. */}}
 {{- define "asterferry.image" -}}
-{{- printf "%s:%s" .Values.image.repository (default "latest" .Values.image.tag) }}
+{{- if .Values.image.digest }}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" .Values.image.digest) }}
+{{- fail "image.digest must match sha256:<64 lowercase hexadecimal characters>" }}
+{{- end }}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- end }}
 {{- end }}

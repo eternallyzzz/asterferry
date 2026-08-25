@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
@@ -224,6 +225,11 @@ func resolveManagement(raw ManagementConfig) (ManagementConfig, error) {
 	token, err := ReadToken(raw.AuthTokenFile)
 	if err != nil {
 		return ManagementConfig{}, fmt.Errorf("management authentication token: %w", err)
+	}
+	if raw.TLS.CertFile != "" {
+		if _, err := tls.LoadX509KeyPair(raw.TLS.CertFile, raw.TLS.KeyFile); err != nil {
+			return ManagementConfig{}, fmt.Errorf("management TLS certificate: %w", err)
+		}
 	}
 	raw.AuthToken = append([]byte(nil), token...)
 	return raw, nil

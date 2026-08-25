@@ -47,6 +47,9 @@ func TestV3DefaultsAndRoleValidation(t *testing.T) {
 	if c.Management.Listen != "127.0.0.1:9090" || c.Shutdown.GracePeriodSec != 30 || c.Limits.MaxFrameBytes == 0 || c.Obfuscation.ProxyProfile != ProfileBalanced {
 		t.Fatal("defaults were not applied")
 	}
+	if c.Management.Web.Enabled == nil || !*c.Management.Web.Enabled {
+		t.Fatal("management web should be enabled by default")
+	}
 	bad := gatewayConfig()
 	bad.Gateway.Agents[0].Reverse = ReverseACL{}
 	if err := bad.Validate(); err == nil {
@@ -56,6 +59,33 @@ func TestV3DefaultsAndRoleValidation(t *testing.T) {
 	bad.Agent = &AgentConfig{}
 	if err := bad.Validate(); err == nil {
 		t.Fatal("mixed role sections should be rejected")
+	}
+}
+
+func TestManagementListenSecurityDefaults(t *testing.T) {
+	c := gatewayConfig()
+	c.Management.Listen = "0.0.0.0:9090"
+	if err := c.Validate(); err == nil {
+		t.Fatal("non-loopback management listener without TLS should fail")
+	}
+	c.Management.TLS.CertFile = "management.crt"
+	c.Management.TLS.KeyFile = "management.key"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("non-loopback management listener with TLS rejected: %v", err)
+	}
+	c.Management.TLS.CertFile = ""
+	c.Management.TLS.KeyFile = "management.key"
+	if err := c.Validate(); err == nil {
+		t.Fatal("management TLS certificate/key mismatch should fail")
+	}
+	c = gatewayConfig()
+	disabled := false
+	c.Management.Web.Enabled = &disabled
+	if err := c.Validate(); err != nil {
+		t.Fatalf("explicit Dashboard disable rejected: %v", err)
+	}
+	if c.Management.Web.Enabled == nil || *c.Management.Web.Enabled {
+		t.Fatal("explicit Dashboard disable was not retained")
 	}
 }
 

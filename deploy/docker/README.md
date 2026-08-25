@@ -19,6 +19,16 @@ The default image target is Linux. BuildKit can produce multi-platform images:
 docker buildx build --platform linux/amd64,linux/arm64 -t asterferry:local .
 ```
 
+Tagged releases are published as `ghcr.io/eternallyzzz/asterferry:<version>`
+and expose their immutable digest in the release manifest. Verify the
+checksum and signature material from the GitHub Release before using a
+production image, then prefer the digest form:
+
+```sh
+docker pull ghcr.io/eternallyzzz/asterferry:0.1.0
+docker inspect ghcr.io/eternallyzzz/asterferry:0.1.0 --format '{{index .RepoDigests 0}}'
+```
+
 ## Compose layout
 
 `compose.yaml` starts one Gateway and one Agent. It expects this local layout:
@@ -101,13 +111,40 @@ The final image is a digest-pinned distroless runtime with no shell, wget, or
 package manager. Compose healthchecks invoke the embedded
 `asterferry healthcheck` command directly.
 
-The Compose healthchecks call the loopback-only management endpoints. They do
-not publish management ports to the host.
+The Compose healthchecks call the default loopback HTTP management endpoints.
+They do not publish management ports to the host. If a configuration enables
+management TLS, change the corresponding healthcheck URL to `https://...` and
+add `--insecure-tls` only when the probe is strictly against `127.0.0.1` and
+the container does not trust the management CA.
 
 The image also contains the embedded Dashboard at `/dashboard/` on each
-service's loopback management listener. The default Compose file does not
-publish those listeners. Use `docker compose exec gateway asterferry status
---config /etc/asterferry/config.yaml` for a container-side check, or place an
-authenticated local-only reverse proxy beside the service if a browser view
-is required. Do not change the application management bind address to a
-public interface.
+service's management listener. Set `management.web.enabled: false` to omit the
+page while retaining the protected API. The default Compose file does not
+publish management listeners and mounts configuration read-only, so the
+protected configuration API reports read-only and changes must be made in the
+host file. Use `docker compose exec gateway asterferry status --config
+/etc/asterferry/config.yaml` for a container-side check, or publish a narrowly
+scoped local port/reverse proxy if a browser view is required. A public bind
+requires built-in management TLS and the management Bearer token.
+
+## Release upgrades and rollback
+
+Set `ASTERFERRY_IMAGE` to the release digest recorded in
+`release-manifest.json`, verify the configuration first, and recreate both
+roles together because the v5 protocol is not compatible with v4:
+
+```sh
+export ASTERFERRY_IMAGE=ghcr.io/eternallyzzz/asterferry@sha256:<image-digest>
+asterferry validate --config ./config/gateway.yaml
+asterferry doctor --config ./config/gateway.yaml --skip-ports
+asterferry validate --config ./config/agent.yaml
+asterferry doctor --config ./config/agent.yaml --skip-ports
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+Keep the previous digest until the new `/readyz` checks and application logs
+are healthy. To roll back, restore the previous `ASTERFERRY_IMAGE` digest and
+run `docker compose up -d` again. The Compose stop window remains 35 seconds
+for the default 30-second application drain.

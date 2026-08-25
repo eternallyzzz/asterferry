@@ -243,3 +243,16 @@ func TestHealthcheckCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthcheckHTTPSInsecureOption(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := runHealthcheckWithOptions(&bytes.Buffer{}, server.URL, time.Second, false); err == nil {
+		t.Fatal("untrusted HTTPS healthcheck should fail without explicit opt-in")
+	}
+	if err := runHealthcheckWithOptions(&bytes.Buffer{}, server.URL, time.Second, true); err != nil {
+		t.Fatalf("insecure HTTPS healthcheck failed: %v", err)
+	}
+}

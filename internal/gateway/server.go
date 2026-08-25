@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"sort"
 	"strconv"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"asterferry/internal/cluster"
 	"asterferry/internal/config"
+	"asterferry/internal/configstore"
 	"asterferry/internal/dashboard"
 	"asterferry/internal/lifecycle"
 	"asterferry/internal/observability"
@@ -34,6 +36,7 @@ type Gateway struct {
 	life            *lifecycle.Gate
 	events          *observability.EventHub
 	shutdownTrigger *lifecycle.ShutdownTrigger
+	configManager   *configstore.Manager
 
 	sessions  sessionDirectory
 	mappings  mappingDirectory
@@ -83,6 +86,7 @@ type RuntimeOptions struct {
 	Logger          *slog.Logger
 	Events          *observability.EventHub
 	ShutdownTrigger *lifecycle.ShutdownTrigger
+	Config          *configstore.Manager
 }
 
 func New(cfg *config.GatewayOptions, loggerOpt ...*slog.Logger) (*Gateway, error) {
@@ -107,7 +111,7 @@ func NewWithOptions(cfg *config.GatewayOptions, runtime RuntimeOptions) (*Gatewa
 		logger = slog.Default()
 	}
 	owners := cluster.NewLocalOwnerStore()
-	s := &Gateway{cfg: cfg, nodeID: nodeID, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, life: lifecycle.NewGate(), owners: owners, sessions: newSessionRegistry(nodeID, owners), acl: map[string]*credential{}, admission: newHandshakeAdmission(cfg.Limits.MaxPendingHandshakes), events: runtime.Events, shutdownTrigger: runtime.ShutdownTrigger}
+	s := &Gateway{cfg: cfg, nodeID: nodeID, ctx: ctx, cancel: cancel, logger: logger, metrics: &observability.Metrics{}, life: lifecycle.NewGate(), owners: owners, sessions: newSessionRegistry(nodeID, owners), acl: map[string]*credential{}, admission: newHandshakeAdmission(cfg.Limits.MaxPendingHandshakes), events: runtime.Events, shutdownTrigger: runtime.ShutdownTrigger, configManager: runtime.Config}
 	s.mappings = newMappingManager(s)
 	s.egress = newEgressProxy(s)
 	for _, agent := range cfg.Agents {
@@ -130,10 +134,25 @@ func (s *Gateway) Start() error {
 	}
 	s.ep = ep
 	mgmt, err := observability.Start(s.cfg.Management.Listen, s.metrics, s, s.cfg.Management.AuthToken, observability.ServerOptions{
-		Events:    s.events,
-		Actions:   s,
-		Dashboard: dashboard.Handler(),
-		Logger:    s.logger,
+		Events:  s.events,
+		Actions: s,
+		Dashboard: func() http.Handler {
+			if s.cfg.Management.Web.Enabled != nil && !*s.cfg.Management.Web.Enabled {
+				return nil
+			}
+			return dashboard.Handler()
+		}(),
+		TLS: func() *observability.TLSServerOptions {
+			if s.cfg.Management.TLS.CertFile == "" {
+				return nil
+			}
+			return &observability.TLSServerOptions{CertFile: s.cfg.Management.TLS.CertFile, KeyFile: s.cfg.Management.TLS.KeyFile}
+		}(),
+		Config: s.configManager,
+		Restart: func() bool {
+			return s.shutdownTrigger != nil && s.shutdownTrigger.RequestRestart()
+		},
+		Logger: s.logger,
 	})
 	if err != nil {
 		_ = ep.Close()
@@ -207,7 +226,13 @@ func (s *Gateway) Shutdown(ctx context.Context) error {
 		s.metrics.RecordShutdown(forced)
 	}
 	if s.shutdownTrigger != nil && s.shutdownTrigger.Requested() {
-		s.logger.Info("dashboard shutdown completed", "event", "management.action.completed", "action", "shutdown", "security_audit", true)
+		action := "shutdown"
+		message := "management shutdown completed"
+		if s.shutdownTrigger.RestartRequested() {
+			action = "configuration_restart"
+			message = "management configuration restart completed"
+		}
+		s.logger.Info(message, "event", "management.action.completed", "action", action, "security_audit", true)
 	}
 	closeErr := s.Close()
 	if closeErr != nil {

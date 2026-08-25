@@ -96,6 +96,15 @@ current key while inbound packets accept both keys for the overlap window.
   `SIGTERM`/`SIGINT` (30 seconds by default). The first signal rejects new
   traffic while admitted streams finish; a second signal forces close. Config
   changes take effect after validation and restart, not through SIGHUP.
+- The embedded Dashboard is enabled by default. Set
+  `management.web.enabled: false` to retain the protected API without serving
+  the page. A non-loopback management listener requires
+  `management.tls.cert_file` and `management.tls.key_file`; `ca_file` is
+  optional trust material for the CLI `status` command.
+- The protected configuration API only accepts non-secret field changes. It
+  preserves redacted passwords, validates and previews a diff, writes a `.bak`
+  backup, and requests a graceful supervisor restart. Read-only container and
+  ConfigMap mounts remain read-only.
 - `cluster.node_id` is optional identity metadata for future Kubernetes
   coordination. It does not enable multiple Gateway replicas or external
   Redis/etcd coordination.

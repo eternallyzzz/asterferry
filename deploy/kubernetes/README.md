@@ -18,7 +18,15 @@ gateway:
     key_file: /etc/asterferry/secrets/server.key
     client_ca_file: /etc/asterferry/secrets/agents-ca.crt
 management:
+  # The page is enabled by default; set false to keep only the protected API.
+  web:
+    enabled: true
   auth_token_file: /etc/asterferry/secrets/management.token
+  # Non-loopback management.listen requires both TLS files.
+  # tls:
+  #   cert_file: /etc/asterferry/secrets/management.crt
+  #   key_file: /etc/asterferry/secrets/management.key
+  #   ca_file: /etc/asterferry/secrets/management-ca.crt
 obfuscation:
   transport:
     mode: camouflage
@@ -64,12 +72,39 @@ After rollout, use the Kubernetes readiness probe for availability and query
 `asterferry status --config ...` from an administrative context when the
 loopback management endpoint is reachable.
 
-Each role also serves the embedded Dashboard from its loopback management
-listener. When the pod runtime permits an administrative port-forward, use
+Each role also serves the embedded Dashboard from its management listener.
+When the pod runtime permits an administrative port-forward, use
 `kubectl port-forward` to the role's management port and open `/dashboard/`;
 otherwise keep using the CLI or an internal authenticated proxy. The chart
 does not publish management ports through a Service, and the Dashboard token
-is entered in memory rather than placed in a URL.
+is entered in memory rather than placed in a URL. The ConfigMap volume is
+read-only, so the protected configuration API is read-only; update the ConfigMap
+and roll out the Deployment when changing configuration.
+
+## Install a tagged release from OCI
+
+Release Charts are available from GHCR. Authenticate with a token that can
+read packages, then install the same chart version for both roles. Pin the
+image digest from the release `release-manifest.json` instead of relying on a
+mutable tag:
+
+```sh
+helm registry login ghcr.io
+
+helm upgrade --install asterferry-gateway \
+  oci://ghcr.io/eternallyzzz/charts/asterferry \
+  --version 0.1.0 \
+  --namespace asterferry \
+  --set role=gateway \
+  --set config.existingConfigMap=asterferry-gateway-config \
+  --set secret.existingSecret=asterferry-gateway-secrets \
+  --set image.digest=sha256:<image-digest> \
+  --atomic --wait --timeout 5m
+```
+
+Install the Agent with the same `--version` and image digest, changing only
+the role-specific ConfigMap and Secret names. Verify the published checksum,
+SBOM, and GitHub build attestation before promoting the release to a cluster.
 
 ## Install Gateway
 
@@ -174,8 +209,12 @@ helm upgrade --install asterferry-gateway ./deploy/helm/asterferry \
 The chart runs as UID/GID 10001, drops all capabilities, disables privilege
 escalation, uses a read-only root filesystem, disables ServiceAccount token
 automounting, and uses the RuntimeDefault seccomp profile. Management endpoints
-remain loopback-only; probes execute the embedded `asterferry healthcheck`
-command inside the tool-free container against `/healthz` and `/readyz`. On
+are loopback-only by default. A non-loopback listener requires built-in TLS;
+mount the management certificate and key through the existing Secret. Probes
+execute the embedded `asterferry healthcheck` command inside the tool-free
+container against `/healthz` and `/readyz`. Set `probes.scheme=https` when
+management TLS is enabled; set `probes.insecureTLS=true` only for a
+loopback-local probe using a certificate the container cannot verify. On
 the first termination signal, AsterFerry marks
 `/readyz` unavailable while keeping `/healthz` healthy, stops new admissions,
 and drains existing streams for `shutdown.grace_period_seconds` (30 seconds by
@@ -188,6 +227,21 @@ updating the Secret and restarting the release after validating the updated
 configuration. The default single-replica Gateway topology is intentional;
 multiple replicas require a separate shared-port and session-coordination
 design.
+
+For a production upgrade, run `validate` and `doctor` against the exact
+configuration and secrets, then use the OCI command with the new version and
+`--atomic --wait`. Upgrade Gateway and Agent together because v5 is a breaking
+protocol generation. Check `kubectl rollout status` and the readiness probe
+before removing the previous release. If the new release is unhealthy, inspect
+`helm history` and roll back both roles with:
+
+```sh
+helm rollback asterferry-gateway <revision> --namespace asterferry --wait
+helm rollback asterferry-agent <revision> --namespace asterferry --wait
+```
+
+Only roll back to a release with a compatible configuration and the same v5
+protocol generation; v4 is not a valid rollback target.
 
 ## Cluster readiness boundary
 

@@ -150,6 +150,9 @@ func TestManagementServerProtectsSensitiveEndpoints(t *testing.T) {
 }
 
 func TestManagementServerNilProviderAndInvalidListen(t *testing.T) {
+	if _, err := Start("0.0.0.0:0", nil, nil, []byte(testManagementToken)); err == nil {
+		t.Fatal("non-loopback management listener without TLS should fail")
+	}
 	if _, err := Start("not-an-address", nil, nil, []byte(testManagementToken)); err == nil {
 		t.Fatal("invalid management address should fail")
 	}

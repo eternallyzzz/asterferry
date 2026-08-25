@@ -48,7 +48,8 @@ build and protocol versions without loading a configuration file.
 ## Dashboard
 
 Running roles serve an embedded operations dashboard from their existing
-loopback-only management listener:
+management listener. The Dashboard is enabled by default but can be disabled
+without disabling the protected management API:
 
 ```text
 Gateway: http://127.0.0.1:9090/dashboard/
@@ -60,7 +61,16 @@ a Bearer header, is held in browser memory, and is never put in a URL or
 stored on disk. The page shows live status, traffic trends, QUIC diagnostics,
 Agent/mapping inventory, and structured runtime events. It can request an
 asynchronous graceful stop; the Agent page also has an explicit reconnect
-action.
+action. The protected configuration API validates and previews non-secret role
+configuration, then atomically saves it and requests a supervisor restart. A
+browser-based configuration page is deferred; use the protected management API
+or CLI for administration.
+
+The embedded page is controlled by `management.web.enabled` (default `true`).
+The management listener remains available when the page is disabled. It binds
+to loopback and uses HTTP by default. A non-loopback `management.listen`
+requires `management.tls.cert_file` and `management.tls.key_file`; configure a
+`ca_file` when the CLI must verify a private management certificate.
 
 For a remote host, keep the management listener on loopback and use an
 administrative port forward, for example:
@@ -69,9 +79,10 @@ administrative port forward, for example:
 ssh -N -L 9090:127.0.0.1:9090 operator@example-host
 ```
 
-The dashboard does not expose management ports publicly, provide SSO, or
-persist event history. Use the existing JSON logs or an external log system
-for long-term audit retention.
+The default deployment does not expose management ports publicly, provide SSO,
+or persist event history. Use the existing JSON logs or an external log system
+for long-term audit retention. If a public management listener is required,
+use built-in TLS and a narrowly scoped firewall policy.
 
 ## Traffic model
 
@@ -179,7 +190,9 @@ Container deployment guides are available for
 [Docker](deploy/docker/README.md) and
 [Kubernetes](deploy/kubernetes/README.md). The Kubernetes package is a
 role-selectable [Helm Chart](deploy/helm/asterferry), and container images are
-published to `ghcr.io/eternallyzzz/asterferry` for version tags.
+published to `ghcr.io/eternallyzzz/asterferry` for version tags. Release
+versions also publish native CLI archives, an OCI Helm Chart, checksums, an
+SBOM, and signed build provenance.
 
 The Gateway firewall must allow the QUIC UDP port and the configured reverse
 TCP/UDP ports. Management endpoints bind to loopback by default: Gateway uses
@@ -208,12 +221,16 @@ Agent session; existing QUIC streams cannot be migrated between nodes.
   ACLs. Special-use, private, loopback, link-local, metadata, and reserved
   addresses are denied by default; use narrow `allow_special_cidrs` entries
   only for explicitly approved exceptions.
-- Management endpoints must not be exposed to the public network.
+- Non-loopback management endpoints require built-in TLS and the management
+  Bearer token. Loopback plus SSH/Kubernetes port forwarding remains the
+  preferred deployment.
 - Logs do not record tokens, private keys, proxy payloads, cookies, credentials,
   or plaintext destinations by default.
 
-Container probes use `asterferry healthcheck --url ...`; the production image
-does not include a shell or general-purpose network tools.
+Container probes use `asterferry healthcheck --url ...`; HTTPS probes with a
+private certificate may add `--insecure-tls` when the request is strictly
+loopback-local. The production image does not include a shell or
+general-purpose network tools.
 
 ### Runtime log overrides
 
@@ -234,6 +251,54 @@ ASTERFERRY_SNIFF_ENABLED=true
 ASTERFERRY_SNIFF_MAX_BYTES=16384
 ASTERFERRY_SNIFF_TIMEOUT_MS=250
 ```
+
+## Releases, verification, and upgrades
+
+The first product release is `v0.1.0`. Product versions use SemVer without
+changing the independent v5 wire-protocol identifier. A release tag on `main`
+publishes the following immutable release material:
+
+- Linux amd64/arm64 and Windows amd64 CLI archives.
+- A multi-platform GHCR image at `ghcr.io/eternallyzzz/asterferry`.
+- An OCI Chart at `oci://ghcr.io/eternallyzzz/charts/asterferry`.
+- `SHA256SUMS`, an SPDX JSON SBOM, `release-manifest.json`, and GitHub build
+  attestations.
+
+Run the local release preflight before creating a tag:
+
+```powershell
+.\scripts\release-check.ps1 -Version 0.1.0
+```
+
+For a container deployment, prefer the image digest recorded in
+`release-manifest.json` over a mutable tag:
+
+```text
+ghcr.io/eternallyzzz/asterferry@sha256:<image-digest>
+```
+
+Verify downloaded release files and attestations before deployment:
+
+```sh
+sha256sum -c SHA256SUMS
+gh attestation verify asterferry_0.1.0_linux_amd64.tar.gz \
+  --repo eternallyzzz/asterferry
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/eternallyzzz/asterferry/.github/workflows/container.yml@refs/tags/v0.1.0' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/eternallyzzz/asterferry@sha256:<image-digest>
+```
+
+For Kubernetes, install the signed Chart by version and set `image.digest` to
+the matching image digest. Run `validate` and `doctor` against the exact
+configuration and secrets before upgrading. Use an atomic Helm upgrade and
+keep the previous release available for rollback. For Compose, pull the pinned
+image, run `docker compose config`, then recreate both roles together.
+
+The v5 protocol is a breaking generation, so Gateway and Agent upgrades must
+be coordinated. A rollback is supported only between releases that share the
+same compatible configuration and protocol generation; do not use a v4
+binary or configuration as a v5 rollback target.
 
 ## Verification
 

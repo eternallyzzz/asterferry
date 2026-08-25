@@ -7,12 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"sync"
 	"time"
 
 	"asterferry/internal/cluster"
 	"asterferry/internal/config"
+	"asterferry/internal/configstore"
 	"asterferry/internal/dashboard"
 	"asterferry/internal/lifecycle"
 	"asterferry/internal/observability"
@@ -36,6 +38,7 @@ type Agent struct {
 	life            *lifecycle.Gate
 	events          *observability.EventHub
 	shutdownTrigger *lifecycle.ShutdownTrigger
+	configManager   *configstore.Manager
 
 	sessions  *sessionManager
 	mappings  map[string]config.Tunnel
@@ -74,6 +77,7 @@ type RuntimeOptions struct {
 	Logger          *slog.Logger
 	Events          *observability.EventHub
 	ShutdownTrigger *lifecycle.ShutdownTrigger
+	Config          *configstore.Manager
 }
 
 func New(cfg *config.AgentOptions, loggerOpt ...*slog.Logger) (*Agent, error) {
@@ -115,6 +119,7 @@ func NewWithOptions(cfg *config.AgentOptions, runtime RuntimeOptions) (*Agent, e
 		life:            lifecycle.NewGate(),
 		events:          runtime.Events,
 		shutdownTrigger: runtime.ShutdownTrigger,
+		configManager:   runtime.Config,
 		mappings:        map[string]config.Tunnel{},
 	}
 	a.outbound = agentOutbound{agent: a}
@@ -137,10 +142,25 @@ func (a *Agent) Start() error {
 		return err
 	}
 	mgmt, err := observability.Start(a.cfg.Management.Listen, a.metrics, a, a.cfg.Management.AuthToken, observability.ServerOptions{
-		Events:    a.events,
-		Actions:   a,
-		Dashboard: dashboard.Handler(),
-		Logger:    a.logger,
+		Events:  a.events,
+		Actions: a,
+		Dashboard: func() http.Handler {
+			if a.cfg.Management.Web.Enabled != nil && !*a.cfg.Management.Web.Enabled {
+				return nil
+			}
+			return dashboard.Handler()
+		}(),
+		TLS: func() *observability.TLSServerOptions {
+			if a.cfg.Management.TLS.CertFile == "" {
+				return nil
+			}
+			return &observability.TLSServerOptions{CertFile: a.cfg.Management.TLS.CertFile, KeyFile: a.cfg.Management.TLS.KeyFile}
+		}(),
+		Config: a.configManager,
+		Restart: func() bool {
+			return a.shutdownTrigger != nil && a.shutdownTrigger.RequestRestart()
+		},
+		Logger: a.logger,
 	})
 	if err != nil {
 		_ = a.proxy.Close()
@@ -209,7 +229,13 @@ func (a *Agent) Shutdown(ctx context.Context) error {
 		a.metrics.RecordShutdown(forced)
 	}
 	if a.shutdownTrigger != nil && a.shutdownTrigger.Requested() {
-		a.logger.Info("dashboard shutdown completed", "event", "management.action.completed", "action", "shutdown", "security_audit", true)
+		action := "shutdown"
+		message := "management shutdown completed"
+		if a.shutdownTrigger.RestartRequested() {
+			action = "configuration_restart"
+			message = "management configuration restart completed"
+		}
+		a.logger.Info(message, "event", "management.action.completed", "action", action, "security_audit", true)
 	}
 	closeErr := a.Close()
 	if closeErr != nil {

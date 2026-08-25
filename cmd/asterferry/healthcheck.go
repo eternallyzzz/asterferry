@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,10 @@ import (
 )
 
 func runHealthcheck(out io.Writer, target string, timeout time.Duration) error {
+	return runHealthcheckWithOptions(out, target, timeout, false)
+}
+
+func runHealthcheckWithOptions(out io.Writer, target string, timeout time.Duration, insecureTLS bool) error {
 	if timeout <= 0 {
 		return fmt.Errorf("healthcheck timeout must be positive")
 	}
@@ -17,8 +22,13 @@ func runHealthcheck(out io.Writer, target string, timeout time.Duration) error {
 	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return fmt.Errorf("healthcheck URL must be an absolute http or https URL")
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if parsed.Scheme == "https" && insecureTLS {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true} //nolint:gosec // explicitly requested for local probes
+	}
 	client := &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: transport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

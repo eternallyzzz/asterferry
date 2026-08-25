@@ -74,6 +74,22 @@ func TestWaitSignalsManagementRequestStartsGracefulShutdown(t *testing.T) {
 	}
 }
 
+func TestWaitForTriggerReturnsRestartExitCode(t *testing.T) {
+	trigger := lifecycle.NewShutdownTrigger()
+	if !trigger.RequestRestart() {
+		t.Fatal("restart request was not accepted")
+	}
+	err := waitForTrigger(time.Second, func(context.Context) error {
+		return nil
+	}, func() error {
+		t.Fatal("restart request must not force close")
+		return nil
+	}, trigger)
+	if exitCode(err) != restartRequestedExitCode {
+		t.Fatalf("restart exit code = %d, err=%v", exitCode(err), err)
+	}
+}
+
 func TestIntentionalShutdownError(t *testing.T) {
 	if got := intentionalShutdownError(context.DeadlineExceeded); got != nil {
 		t.Fatal("deadline should be treated as intentional shutdown")

@@ -36,12 +36,14 @@
 
    Use `asterferry-agent.service` on internal nodes. The Gateway firewall
    should allow only the QUIC UDP port and explicitly configured reverse
-   TCP/UDP ports. Keep the 9090/9091 management endpoints on loopback.
+   TCP/UDP ports. Keep the 9090/9091 management endpoints on loopback unless
+   a narrowly scoped remote administration path is needed.
 
    The embedded Dashboard is available at `http://127.0.0.1:9090/dashboard/`
    for Gateway or `http://127.0.0.1:9091/dashboard/` for Agent. For remote
    administration, use an SSH port forward rather than changing the
-   management listener to a public address:
+   management listener to a public address. A non-loopback listener requires
+   `management.tls.cert_file` and `management.tls.key_file`:
 
    ```sh
    ssh -N -L 9090:127.0.0.1:9090 operator@example-host
@@ -50,7 +52,17 @@
    Enter the matching management token in the browser. It is held in memory
    only; Dashboard event history is intentionally not persisted.
 
+   Set `management.web.enabled: false` when only the protected API and CLI
+   status/health endpoints are wanted. The protected configuration API can
+   validate and atomically update a normal writable file. Read-only-mounted
+   files remain read-only and must be changed by the deployment owner.
+
 5. Rotate certificates or configuration using a validate-then-restart process.
+   The protected configuration API requests the same supervisor restart with
+   exit code 75 after a successful write; systemd's `Restart=on-failure` then
+   reloads the file. With `ProtectSystem=strict`, add a service drop-in
+   containing `ReadWritePaths=/etc/asterferry` only when API-based file updates
+   are explicitly required.
    Agents reconnect automatically with exponential backoff. On the first
    `SIGTERM`/`SIGINT`, the service marks itself unready, rejects new traffic,
    and drains admitted connections for `shutdown.grace_period_seconds` (30

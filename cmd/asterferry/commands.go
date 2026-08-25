@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"asterferry/internal/bootstrap"
 	"asterferry/internal/buildinfo"
 	"asterferry/internal/config"
+	"asterferry/internal/configstore"
 	"asterferry/internal/diagnostics"
 	"asterferry/internal/gateway"
 	"asterferry/internal/lifecycle"
@@ -223,8 +226,9 @@ func newStatusCommand() *cobra.Command {
 
 func newHealthcheckCommand() *cobra.Command {
 	var (
-		target  string
-		timeout time.Duration
+		target      string
+		timeout     time.Duration
+		insecureTLS bool
 	)
 	cmd := &cobra.Command{
 		Use:   "healthcheck",
@@ -234,11 +238,12 @@ func newHealthcheckCommand() *cobra.Command {
 			if !healthcheckURLIsSafe(target) {
 				return &codedError{code: 2, err: errors.New("--url must be an absolute http or https URL")}
 			}
-			return runHealthcheck(cmd.OutOrStdout(), target, timeout)
+			return runHealthcheckWithOptions(cmd.OutOrStdout(), target, timeout, insecureTLS)
 		},
 	}
 	cmd.Flags().StringVar(&target, "url", "", "health endpoint URL")
 	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Second, "HTTP request timeout")
+	cmd.Flags().BoolVar(&insecureTLS, "insecure-tls", false, "skip HTTPS certificate verification for a local probe")
 	_ = cmd.MarkFlagRequired("url")
 	return cmd
 }
@@ -263,12 +268,16 @@ func newGatewayCommand() *cobra.Command {
 			}
 			events := observability.NewEventHub(0)
 			trigger := lifecycle.NewShutdownTrigger()
+			configManager, err := configstore.New(path)
+			if err != nil {
+				return fmt.Errorf("prepare configuration manager: %w", err)
+			}
 			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr(), events)
 			if err != nil {
 				return err
 			}
 			defer closeLog()
-			s, err := gateway.NewWithOptions(opts, gateway.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger})
+			s, err := gateway.NewWithOptions(opts, gateway.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger, Config: configManager})
 			if err != nil {
 				return err
 			}
@@ -276,7 +285,7 @@ func newGatewayCommand() *cobra.Command {
 				return err
 			}
 			logGatewayStarted(logger, path, opts)
-			return wait(opts.Shutdown.GracePeriod, s.Shutdown, s.Close, trigger.C())
+			return waitForTrigger(opts.Shutdown.GracePeriod, s.Shutdown, s.Close, trigger)
 		},
 	}
 	addConfigFlag(cmd, &path)
@@ -303,12 +312,16 @@ func newAgentCommand() *cobra.Command {
 			}
 			events := observability.NewEventHub(0)
 			trigger := lifecycle.NewShutdownTrigger()
+			configManager, err := configstore.New(path)
+			if err != nil {
+				return fmt.Errorf("prepare configuration manager: %w", err)
+			}
 			logger, closeLog, err := logging.New(opts.Logging, c.Role, cmd.ErrOrStderr(), events)
 			if err != nil {
 				return err
 			}
 			defer closeLog()
-			a, err := agent.NewWithOptions(opts, agent.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger})
+			a, err := agent.NewWithOptions(opts, agent.RuntimeOptions{Logger: logger, Events: events, ShutdownTrigger: trigger, Config: configManager})
 			if err != nil {
 				return err
 			}
@@ -316,7 +329,7 @@ func newAgentCommand() *cobra.Command {
 				return err
 			}
 			logAgentStarted(logger, path, opts)
-			return wait(opts.Shutdown.GracePeriod, a.Shutdown, a.Close, trigger.C())
+			return waitForTrigger(opts.Shutdown.GracePeriod, a.Shutdown, a.Close, trigger)
 		},
 	}
 	addConfigFlag(cmd, &path)
@@ -386,12 +399,31 @@ func queryStatus(w io.Writer, path string, jsonOutput bool, timeout time.Duratio
 	if err != nil {
 		return fmt.Errorf("read management token: %w; run asterferry doctor --config %q", err, path)
 	}
-	req, err := http.NewRequest(http.MethodGet, "http://"+c.Management.Listen+"/v1/status", nil)
+	scheme := "http"
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if c.Management.TLS.CertFile != "" {
+		scheme = "https"
+		roots, rootErr := x509.SystemCertPool()
+		if rootErr != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if c.Management.TLS.CAFile != "" {
+			caBytes, readErr := os.ReadFile(c.Management.TLS.CAFile)
+			if readErr != nil {
+				return fmt.Errorf("read management TLS CA: %w", readErr)
+			}
+			if !roots.AppendCertsFromPEM(caBytes) {
+				return errors.New("management.tls.ca_file does not contain a certificate")
+			}
+		}
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}
+	}
+	req, err := http.NewRequest(http.MethodGet, scheme+"://"+c.Management.Listen+"/v1/status", nil)
 	if err != nil {
 		return fmt.Errorf("build status request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+string(token))
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: timeout, Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("status endpoint %s is unavailable: %w; ensure the role is running", c.Management.Listen, err)

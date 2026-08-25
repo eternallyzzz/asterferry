@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const restartRequestedExitCode = 75
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -39,6 +41,19 @@ func wait(grace time.Duration, shutdown func(context.Context) error, closeFn fun
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	return waitSignals(grace, shutdown, closeFn, signals, requests...)
+}
+
+func waitForTrigger(grace time.Duration, shutdown func(context.Context) error, closeFn func() error, trigger interface {
+	C() <-chan struct{}
+	RestartRequested() bool
+}) error {
+	if err := wait(grace, shutdown, closeFn, trigger.C()); err != nil {
+		return err
+	}
+	if trigger.RestartRequested() {
+		return &codedError{code: restartRequestedExitCode, err: errors.New("configuration restart requested")}
+	}
+	return nil
 }
 
 func waitSignals(grace time.Duration, shutdown func(context.Context) error, closeFn func() error, signals <-chan os.Signal, requests ...<-chan struct{}) error {

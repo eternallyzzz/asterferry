@@ -5,9 +5,15 @@ mounted from {{ .Values.secret.mountPath }}. Ensure the referenced ConfigMap
 and Secret exist before starting the workload.
 
 Run `asterferry doctor --config /etc/asterferry/config.yaml --skip-ports`
-against the same mounted files before rollout. The management endpoint remains
-loopback-only; use the readiness probe or a local administrative shell for
-runtime status.
+against the same mounted files before rollout. The default management endpoint
+is loopback-only and HTTP; use the readiness probe or a local administrative
+shell for runtime status. If `management.listen` uses a non-loopback address,
+configure its built-in TLS certificate and key, set `probes.scheme=https`, and
+mount the certificate files through the existing Secret.
+
+The ConfigMap-backed configuration is read-only inside the pod, so the
+protected configuration API is intentionally read-only. Update the ConfigMap
+and restart the release for configuration changes.
 
 {{- if eq .Values.role "gateway" }}
 The Gateway Service is {{ .Values.gateway.service.type }}. Keep its configured

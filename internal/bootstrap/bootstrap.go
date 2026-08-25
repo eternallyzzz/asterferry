@@ -285,7 +285,7 @@ func gatewayConfig(opts Options, alpn string) config.Config {
 			IdleTimeoutSec:       1800,
 			KeepAliveSec:         20,
 		},
-		Management: config.ManagementConfig{Listen: "127.0.0.1:9090", AuthTokenFile: "../secrets/gateway/management.token"},
+		Management: config.ManagementConfig{Listen: "127.0.0.1:9090", AuthTokenFile: "../secrets/gateway/management.token", Web: config.ManagementWebConfig{Enabled: boolPtr(true)}},
 		Shutdown:   config.ShutdownConfig{GracePeriodSec: 30},
 		Limits: config.Limits{
 			MaxFrameBytes:      16 << 20,
@@ -335,7 +335,7 @@ func agentConfig(opts Options, alpn string) config.Config {
 			IdleTimeoutSec:       1800,
 			KeepAliveSec:         20,
 		},
-		Management: config.ManagementConfig{Listen: "127.0.0.1:9091", AuthTokenFile: "../secrets/agent/management.token"},
+		Management: config.ManagementConfig{Listen: "127.0.0.1:9091", AuthTokenFile: "../secrets/agent/management.token", Web: config.ManagementWebConfig{Enabled: boolPtr(true)}},
 		Shutdown:   config.ShutdownConfig{GracePeriodSec: 30},
 		Limits: config.Limits{
 			MaxFrameBytes:      16 << 20,
@@ -751,7 +751,9 @@ Start locally:
     asterferry agent --config config/agent.yaml
 
 The Agent proxy listens on 127.0.0.1:1080 (SOCKS5) and 127.0.0.1:8080
-(HTTP). Management endpoints remain on loopback and require the generated
-management token for status and metrics. Keep every file in secrets/ private.
+(HTTP). Management endpoints remain on loopback by default and require the
+generated management token for status, metrics, and configuration management.
+The embedded Dashboard can be disabled with management.web.enabled: false.
+Keep every file in secrets/ private.
 `, opts.Profile, opts.AgentID, opts.GatewayHost, opts.GatewayPort, profileWarning)
 }

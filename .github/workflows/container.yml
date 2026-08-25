@@ -1,15 +1,18 @@
-name: Container
+name: CI and Release
 
 on:
   pull_request:
     paths:
       - ".github/workflows/container.yml"
-      - "Dockerfile"
       - ".dockerignore"
+      - ".goreleaser.yaml"
+      - "CHANGELOG.md"
+      - "Dockerfile"
       - "deploy/docker/**"
       - "deploy/helm/**"
       - "go.mod"
       - "go.sum"
+      - "scripts/release-check.ps1"
       - "web/dashboard/**"
       - "cmd/**"
       - "internal/**"
@@ -20,7 +23,7 @@ on:
       - "v*"
 
 concurrency:
-  group: container-${{ github.workflow }}-${{ github.ref }}
+  group: ci-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -75,20 +78,160 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
       - name: Lint Helm chart
-        run: helm lint deploy/helm/asterferry
+        run: |
+          helm lint deploy/helm/asterferry --set role=gateway
+          helm lint deploy/helm/asterferry --set role=agent
       - name: Render Gateway chart
         run: helm template gateway deploy/helm/asterferry --set role=gateway
       - name: Render Agent chart
         run: helm template agent deploy/helm/asterferry --set role=agent
+      - name: Package Helm chart
+        shell: bash
+        run: |
+          mkdir -p tmp/ci-chart
+          helm package deploy/helm/asterferry --destination tmp/ci-chart
 
   image:
-    name: Build and publish image
+    name: Build development image
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/eternallyzzz/asterferry
+          tags: |
+            type=sha
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=dev
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release_build:
+    name: Build release artifacts
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.7"
+          cache: true
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.x"
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+      - name: Set up Helm
+        uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release tags must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "release tag must point at a commit reachable from main" >&2
+            exit 1
+          }
+          version="${GITHUB_REF_NAME#v}"
+          chart_version="$(sed -n 's/^version:[[:space:]]*//p' deploy/helm/asterferry/Chart.yaml)"
+          app_version="$(grep '^appVersion:' deploy/helm/asterferry/Chart.yaml | sed 's/^appVersion:[[:space:]]*//' | tr -d '\"')"
+          [[ "$chart_version" == "$version" && "$app_version" == "$version" ]] || {
+            echo "Chart.yaml must use version=$version and appVersion=$version" >&2
+            exit 1
+          }
+      - name: Verify dashboard assets
+        run: |
+          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard run build
+          git diff --exit-code -- internal/dashboard/dist
+      - name: Build native release archives
+        uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0
+        with:
+          distribution: goreleaser
+          version: v2.9.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package release Helm chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          helm package deploy/helm/asterferry --destination dist --version "$version" --app-version "$version"
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@da167eac915b4e86f08b264dbdbc867b61be6f0c # v0.20.5
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/asterferry-${{ github.ref_name }}-source.spdx.json
+          artifact-name: asterferry-${{ github.ref_name }}-source-sbom
+          syft-version: v1.51.0
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Create release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.tgz' -o -name '*.spdx.json' \) -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Upload release build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  release_image:
+    name: Publish release image
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release_build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
       packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -97,7 +240,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to GHCR
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -112,19 +254,143 @@ jobs:
             type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
-      - name: Build image
+            type=raw,value=latest
+      - name: Set build metadata
+        id: build-meta
+        shell: bash
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build and publish image
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
-          platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          platforms: linux/amd64,linux/arm64
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.meta.outputs.version || 'dev' }}
+            VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+            BUILD_DATE=${{ steps.build-meta.outputs.date }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: v2.6.5
+      - name: Sign image
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/eternallyzzz/asterferry@${IMAGE_DIGEST}"
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-name: ghcr.io/eternallyzzz/asterferry
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release_publish:
+    name: Publish GitHub Release and Helm Chart
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - release_build
+      - release_image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download release build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Set up Helm
+        uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: v2.6.5
+      - name: Push and sign Helm Chart
+        id: chart
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          chart_file="$(find dist -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          [[ -n "$chart_file" ]] || { echo "packaged Helm chart not found" >&2; exit 1; }
+          helm push "$chart_file" oci://ghcr.io/eternallyzzz/charts | tee chart-push.log
+          chart_digest="$(sed -n 's/^Digest:[[:space:]]*//p' chart-push.log | tail -n 1)"
+          [[ "$chart_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "Helm push did not return a digest" >&2; exit 1; }
+          echo "digest=$chart_digest" >> "$GITHUB_OUTPUT"
+          cosign sign --yes "ghcr.io/eternallyzzz/charts/asterferry@${chart_digest}"
+      - name: Create release manifest
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ needs.release_image.outputs.image_digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path("dist")
+          artifacts = []
+          for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+              digest, name = line.split(maxsplit=1)
+              artifacts.append({"name": name, "sha256": digest})
+
+          version = os.environ["GITHUB_REF_NAME"][1:]
+          manifest = {
+              "version": version,
+              "tag": os.environ["GITHUB_REF_NAME"],
+              "commit": os.environ["GITHUB_SHA"],
+              "protocol": 5,
+              "image": {
+                  "repository": "ghcr.io/eternallyzzz/asterferry",
+                  "digest": os.environ["IMAGE_DIGEST"],
+              },
+              "chart": {
+                  "repository": "ghcr.io/eternallyzzz/charts/asterferry",
+                  "version": version,
+                  "digest": os.environ["CHART_DIGEST"],
+              },
+              "artifacts": artifacts,
+          }
+          (dist / "release-manifest.json").write_text(
+              json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Attest release files
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.tgz
+            dist/*.spdx.json
+            dist/SHA256SUMS
+            dist/release-manifest.json
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AsterFerry $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

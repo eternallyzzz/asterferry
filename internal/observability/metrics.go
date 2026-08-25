@@ -2,6 +2,7 @@ package observability
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"asterferry/internal/configstore"
 	"asterferry/internal/transport"
 )
 
@@ -126,7 +128,15 @@ type ServerOptions struct {
 	Events    *EventHub
 	Actions   ActionProvider
 	Dashboard http.Handler
+	TLS       *TLSServerOptions
+	Config    *configstore.Manager
+	Restart   func() bool
 	Logger    *slog.Logger
+}
+
+type TLSServerOptions struct {
+	CertFile string
+	KeyFile  string
 }
 
 func Start(listen string, metrics *Metrics, provider StatusProvider, authToken []byte, options ...ServerOptions) (*Server, error) {
@@ -139,6 +149,9 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 	var serverOptions ServerOptions
 	if len(options) > 0 {
 		serverOptions = options[0]
+	}
+	if !managementListenIsLoopback(listen) && serverOptions.TLS == nil {
+		return nil, errors.New("non-loopback management listener requires TLS")
 	}
 	auth := newAuthGuard(time.Now)
 	mux := http.NewServeMux()
@@ -186,6 +199,20 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 			_, _ = w.Write([]byte("unauthorized\n"))
 		})
 	}
+	if serverOptions.Config != nil {
+		mux.Handle("/v1/config", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveConfigSnapshot(w, r, serverOptions.Config)
+		}))
+		mux.Handle("/v1/config/validate", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveConfigValidate(w, r, serverOptions.Config, serverOptions.Logger)
+		}))
+		mux.Handle("/v1/config/apply", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveConfigApply(w, r, serverOptions.Config, serverOptions.Restart, serverOptions.Logger)
+		}))
+		mux.Handle("/v1/config/rollback", protected(func(w http.ResponseWriter, r *http.Request) {
+			serveConfigRollback(w, r, serverOptions.Config, serverOptions.Restart, serverOptions.Logger)
+		}))
+	}
 	mux.Handle("/metrics", protected(func(w http.ResponseWriter, _ *http.Request) { writeMetrics(w, metrics) }))
 	mux.Handle("/v1/status", protected(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -222,6 +249,16 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 	if err != nil {
 		return nil, err
 	}
+	if serverOptions.TLS != nil {
+		if strings.TrimSpace(serverOptions.TLS.CertFile) == "" || strings.TrimSpace(serverOptions.TLS.KeyFile) == "" {
+			_ = ln.Close()
+			return nil, errors.New("management TLS requires both certificate and key files")
+		}
+		if _, err := tls.LoadX509KeyPair(serverOptions.TLS.CertFile, serverOptions.TLS.KeyFile); err != nil {
+			_ = ln.Close()
+			return nil, fmt.Errorf("load management TLS certificate: %w", err)
+		}
+	}
 	hs := &http.Server{
 		Addr:              listen,
 		Handler:           withManagementHeaders(mux),
@@ -234,8 +271,25 @@ func Start(listen string, metrics *Metrics, provider StatusProvider, authToken [
 		MaxHeaderBytes: 64 << 10,
 	}
 	s := &Server{httpServer: hs, listener: ln, Metrics: metrics}
-	go func() { _ = hs.Serve(ln) }()
+	if serverOptions.TLS != nil {
+		hs.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+		go func() { _ = hs.ServeTLS(ln, serverOptions.TLS.CertFile, serverOptions.TLS.KeyFile) }()
+	} else {
+		go func() { _ = hs.Serve(ln) }()
+	}
 	return s, nil
+}
+
+func managementListenIsLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func withManagementHeaders(next http.Handler) http.Handler {

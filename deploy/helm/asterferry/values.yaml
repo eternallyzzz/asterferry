@@ -2,7 +2,10 @@ role: gateway
 
 image:
   repository: ghcr.io/eternallyzzz/asterferry
-  tag: latest
+  # Empty selects the chart application version. Set this explicitly for
+  # local images or use digest to pin an immutable registry artifact.
+  tag: ""
+  digest: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -75,6 +78,11 @@ env: []
 
 probes:
   enabled: true
+  # Match management.tls: use https when the management listener has TLS.
+  scheme: http
+  # Only use this for a loopback probe when the management certificate is not
+  # trusted by the container's system roots.
+  insecureTLS: false
   initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 3

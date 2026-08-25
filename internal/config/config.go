@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -91,9 +92,27 @@ type TransportConfig struct {
 }
 
 type ManagementConfig struct {
-	Listen        string `yaml:"listen"`
-	AuthTokenFile string `yaml:"auth_token_file"`
-	AuthToken     []byte `yaml:"-"`
+	Listen        string              `yaml:"listen"`
+	AuthTokenFile string              `yaml:"auth_token_file"`
+	AuthToken     []byte              `yaml:"-"`
+	Web           ManagementWebConfig `yaml:"web"`
+	TLS           ManagementTLSConfig `yaml:"tls"`
+}
+
+// ManagementWebConfig controls the optional embedded Dashboard. A pointer is
+// used so old configurations which omit the section retain the historical
+// enabled-by-default behavior.
+type ManagementWebConfig struct {
+	Enabled *bool `yaml:"enabled"`
+}
+
+// ManagementTLSConfig configures TLS for the management listener. The CA is
+// used by local CLI clients when they need to verify a private management
+// certificate; it is not a client-authentication CA.
+type ManagementTLSConfig struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	CAFile   string `yaml:"ca_file"`
 }
 
 // ShutdownConfig bounds the graceful drain performed after SIGTERM/SIGINT.
@@ -245,8 +264,16 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	return LoadBytes(b, cleanPath)
+}
+
+// LoadBytes parses a configuration document as if it had been read from
+// path. This is used by the management plane to validate a pending document
+// before it is written to disk.
+func LoadBytes(b []byte, path string) (*Config, error) {
+	cleanPath := filepath.Clean(path)
 	var c Config
-	dec := yaml.NewDecoder(strings.NewReader(string(b)))
+	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -287,6 +314,9 @@ func resolveFilePaths(c *Config, baseDir string) {
 		return filepath.Clean(filepath.Join(baseDir, path))
 	}
 	c.Management.AuthTokenFile = resolve(c.Management.AuthTokenFile)
+	c.Management.TLS.CertFile = resolve(c.Management.TLS.CertFile)
+	c.Management.TLS.KeyFile = resolve(c.Management.TLS.KeyFile)
+	c.Management.TLS.CAFile = resolve(c.Management.TLS.CAFile)
 	c.Obfuscation.Transport.KeyFile = resolve(c.Obfuscation.Transport.KeyFile)
 	c.Obfuscation.Transport.PreviousKeyFile = resolve(c.Obfuscation.Transport.PreviousKeyFile)
 	if c.Gateway != nil {
@@ -474,13 +504,31 @@ func (c *Config) Validate() error {
 			c.Management.Listen = "127.0.0.1:9091"
 		}
 	}
-	if !isLoopbackListen(c.Management.Listen) {
-		return errors.New("management.listen must bind to loopback")
+	if err := validateEndpoint(c.Management.Listen, "management.listen"); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Management.AuthTokenFile) == "" {
 		return errors.New("management.auth_token_file is required")
 	}
 	c.Management.AuthTokenFile = filepath.Clean(strings.TrimSpace(c.Management.AuthTokenFile))
+	if c.Management.Web.Enabled == nil {
+		enabled := true
+		c.Management.Web.Enabled = &enabled
+	}
+	c.Management.TLS.CertFile = strings.TrimSpace(c.Management.TLS.CertFile)
+	c.Management.TLS.KeyFile = strings.TrimSpace(c.Management.TLS.KeyFile)
+	c.Management.TLS.CAFile = strings.TrimSpace(c.Management.TLS.CAFile)
+	hasCert := c.Management.TLS.CertFile != ""
+	hasKey := c.Management.TLS.KeyFile != ""
+	if hasCert != hasKey {
+		return errors.New("management.tls.cert_file and key_file must be configured together")
+	}
+	if c.Management.TLS.CAFile != "" && !hasCert {
+		return errors.New("management.tls.ca_file requires management.tls.cert_file and key_file")
+	}
+	if !isLoopbackListen(c.Management.Listen) && !hasCert {
+		return errors.New("management.tls.cert_file and key_file are required for non-loopback management.listen")
+	}
 	if c.Shutdown.GracePeriodSec == 0 {
 		c.Shutdown.GracePeriodSec = 30
 	}

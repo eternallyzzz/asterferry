@@ -75,6 +75,7 @@ func Check(c *config.Config, skipPorts bool) Report {
 	}
 	report.Role = c.Role
 	checkSecret(&report, "management.auth_token_file", c.Management.AuthTokenFile, true)
+	checkManagementTLS(&report, c)
 	checkObfuscation(&report, c)
 	if c.Role == config.RoleGateway && c.Gateway != nil {
 		checkGateway(&report, c, skipPorts)
@@ -83,6 +84,21 @@ func Check(c *config.Config, skipPorts bool) Report {
 		checkAgent(&report, c, skipPorts)
 	}
 	return report
+}
+
+func checkManagementTLS(report *Report, c *config.Config) {
+	if c == nil {
+		return
+	}
+	certPath := c.Management.TLS.CertFile
+	keyPath := c.Management.TLS.KeyFile
+	if certPath == "" && keyPath == "" {
+		return
+	}
+	checkCertificatePair(report, "management.tls", certPath, keyPath, x509.ExtKeyUsageServerAuth, "")
+	if c.Management.TLS.CAFile != "" {
+		checkCA(report, "management.tls.ca_file", c.Management.TLS.CAFile)
+	}
 }
 
 func checkObfuscation(report *Report, c *config.Config) {

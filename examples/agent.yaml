@@ -21,6 +21,13 @@ transport:
 management:
   listen: "127.0.0.1:9091"
   auth_token_file: "/etc/asterferry/management.token"
+  web:
+    enabled: true
+  # Non-loopback management.listen requires both TLS files.
+  # tls:
+  #   cert_file: "/etc/asterferry/management.crt"
+  #   key_file: "/etc/asterferry/management.key"
+  #   ca_file: "/etc/asterferry/management-ca.crt"
 
 shutdown:
   # On SIGTERM/SIGINT, stop new traffic and wait up to this long for active
