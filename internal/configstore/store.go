@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -135,7 +136,53 @@ func JSONToYAML(raw []byte) ([]byte, error) {
 	if _, ok := value.(map[string]any); !ok {
 		return nil, errors.New("structured configuration must be a JSON object")
 	}
-	return yaml.Marshal(value)
+	normalized, err := normalizeJSONNumbers(value)
+	if err != nil {
+		return nil, err
+	}
+	return yaml.Marshal(normalized)
+}
+
+func normalizeJSONNumbers(value any) (any, error) {
+	switch value := value.(type) {
+	case json.Number:
+		literal := value.String()
+		if strings.ContainsAny(literal, ".eE") {
+			parsed, err := strconv.ParseFloat(literal, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse JSON number %q: %w", literal, err)
+			}
+			return parsed, nil
+		}
+		if parsed, err := strconv.ParseInt(literal, 10, 64); err == nil {
+			return parsed, nil
+		}
+		parsed, err := strconv.ParseUint(literal, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse JSON number %q: %w", literal, err)
+		}
+		return parsed, nil
+	case map[string]any:
+		for key, child := range value {
+			normalized, err := normalizeJSONNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			value[key] = normalized
+		}
+		return value, nil
+	case []any:
+		for index, child := range value {
+			normalized, err := normalizeJSONNumbers(child)
+			if err != nil {
+				return nil, err
+			}
+			value[index] = normalized
+		}
+		return value, nil
+	default:
+		return value, nil
+	}
 }
 
 func (m *Manager) Validate(expectedRevision string, candidate []byte) (Validation, error) {

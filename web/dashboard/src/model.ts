@@ -43,7 +43,28 @@ export function snapshotErrorTotal(metrics: MetricsSnapshot): number {
 }
 
 export function statusLabel(snapshot: { ready: boolean; state: string }): string {
-  if (snapshot.state === "draining") return "Draining";
-  if (snapshot.state === "stopped") return "Stopped";
-  return snapshot.ready ? "Operational" : "Degraded";
+  if (snapshot.state === "draining") return "正在排空";
+  if (snapshot.state === "stopped") return "已停止";
+  return snapshot.ready ? "运行正常" : "状态降级";
+}
+
+export function stateTone(snapshot: { ready: boolean; state: string }): "green" | "orange" | "red" {
+  if (snapshot.state === "stopped") return "red";
+  if (snapshot.state === "draining" || !snapshot.ready) return "orange";
+  return "green";
+}
+
+export function mappingStateLabel(state: string): string {
+  switch (state) {
+    case "active": return "在线";
+    case "pending": return "等待连接";
+    case "closed": return "已关闭";
+    case "failed": return "失败";
+    default: return state || "未知";
+  }
+}
+
+export function formatTime(value: string | number | Date): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN", { hour12: false });
 }

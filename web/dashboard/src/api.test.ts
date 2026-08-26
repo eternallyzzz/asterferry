@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { APIError, consumeEventStream, fetchConfig, validateConfig } from "./api";
+import { APIError, applyConfig, consumeEventStream, fetchConfig, rollbackConfig, validateConfig } from "./api";
 
 describe("dashboard API", () => {
   beforeEach(() => {
@@ -57,5 +57,20 @@ describe("dashboard API", () => {
     expect(headers.get("Authorization")).toBe("Bearer secret-token");
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(String(request.body)).toContain("base_revision");
+  });
+
+  it("uses the Admin token only for configuration writes", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schema_version: 1, role: "agent", revision: "next", backup: true, state: "restart_requested" }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schema_version: 1, role: "agent", revision: "rolled", backup: true, state: "restart_requested" }), { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const payload = { base_revision: "abc", config: { role: "agent" } };
+    await applyConfig("admin-token", payload);
+    await rollbackConfig("admin-token", "next");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("POST");
+    expect(((fetchMock.mock.calls[0][1] as RequestInit).headers as Headers).get("Authorization")).toBe("Bearer admin-token");
+    expect(fetchMock.mock.calls[0][0]).toBe("/v1/config/apply");
+    expect(fetchMock.mock.calls[1][0]).toBe("/v1/config/rollback");
+    expect(String((fetchMock.mock.calls[1][1] as RequestInit).body)).toContain('"base_revision":"next"');
   });
 });

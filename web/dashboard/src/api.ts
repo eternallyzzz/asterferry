@@ -59,6 +59,7 @@ export interface DashboardSnapshot {
       agent_id: string;
       protocol: string;
       gateway_port: number;
+      gateway_bind: string;
       profile: string;
       state: string;
     }>;
@@ -69,7 +70,7 @@ export interface DashboardSnapshot {
     session_id?: string;
     reconnects: number;
     inbounds: Array<{ tag: string; protocol: string; listen: string }>;
-    reverse_mappings: Array<{ name: string; protocol: string; gateway_port: number; local: string }>;
+    reverse_mappings: Array<{ name: string; protocol: string; gateway_port: number; gateway_bind: string; local: string }>;
   };
 }
 
@@ -105,6 +106,14 @@ export interface ConfigValidation {
   changed: boolean;
   diff?: string;
   warnings?: string[];
+}
+
+export interface ConfigApplyResult {
+  schema_version: number;
+  role: Role;
+  revision: string;
+  backup: boolean;
+  state: "restart_requested";
 }
 
 export class APIError extends Error {
@@ -159,6 +168,14 @@ async function postConfig<T>(token: string, path: string, payload: ConfigPayload
 
 export function validateConfig(token: string, payload: ConfigPayload): Promise<ConfigValidation> {
   return postConfig<ConfigValidation>(token, "/v1/config/validate", payload);
+}
+
+export function applyConfig(token: string, payload: ConfigPayload): Promise<ConfigApplyResult> {
+  return postConfig<ConfigApplyResult>(token, "/v1/config/apply", payload);
+}
+
+export function rollbackConfig(token: string, baseRevision: string): Promise<ConfigApplyResult> {
+  return postConfig<ConfigApplyResult>(token, "/v1/config/rollback", { base_revision: baseRevision });
 }
 
 export interface EventCallbacks {

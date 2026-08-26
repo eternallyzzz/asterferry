@@ -23,8 +23,8 @@ describe("dashboard model", () => {
   });
 
   it("labels lifecycle state before readiness", () => {
-    expect(statusLabel({ ready: true, state: "running" })).toBe("Operational");
-    expect(statusLabel({ ready: false, state: "running" })).toBe("Degraded");
-    expect(statusLabel({ ready: true, state: "draining" })).toBe("Draining");
+    expect(statusLabel({ ready: true, state: "running" })).toBe("运行正常");
+    expect(statusLabel({ ready: false, state: "running" })).toBe("状态降级");
+    expect(statusLabel({ ready: true, state: "draining" })).toBe("正在排空");
   });
 });

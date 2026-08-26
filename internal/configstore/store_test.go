@@ -75,9 +75,12 @@ func TestManagerRedactsAppliesAndRollsBack(t *testing.T) {
 }
 
 func TestJSONToYAMLAndSecretProtection(t *testing.T) {
-	data, err := JSONToYAML([]byte(`{"version":6,"role":"agent","agent":{"proxy":{"inbounds":[{"password":"changed"}]}}}`))
+	data, err := JSONToYAML([]byte(`{"version":6,"role":"agent","transport":{"handshake_timeout_seconds":12},"agent":{"proxy":{"inbounds":[{"password":"changed"}]}}}`))
 	if err != nil || !strings.Contains(string(data), "password: changed") {
 		t.Fatalf("JSONToYAML = %q, err=%v", data, err)
+	}
+	if strings.Contains(string(data), `version: "6"`) || strings.Contains(string(data), `handshake_timeout_seconds: "12"`) {
+		t.Fatalf("JSON numeric values were quoted: %q", data)
 	}
 	current := []byte("agent:\n  proxy:\n    inbounds:\n      - password: original\n")
 	candidate, err := restoreRedactedSecrets([]byte("agent:\n  proxy:\n    inbounds:\n      - password: <redacted>\n"), current)
