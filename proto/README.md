@@ -1,18 +1,15 @@
-# AsterFerry protocol notes
+# AsterFerry wire schemas
 
-AsterFerry v6 uses a small deterministic binary codec instead of a generated
-protobuf runtime. The v6 envelope is a fixed 16-byte header followed by a
-typed payload:
+The current control plane is defined by [`control/v1/control.proto`](control/v1/control.proto).
+It is a bidirectional gRPC service over TLS 1.3. Node enrollment uses a
+single-use, role-bound token and a CSR; all subsequent node traffic requires
+Controller-issued mTLS credentials.
 
-```text
-version:uint8 type:uint8 flags:uint16 length:uint32 request_id:uint64 payload
-```
+The data plane is AFDP/1 (`asterferry-data/1`) over QUIC. Its protobuf open
+metadata is defined by [`data/v1/data.proto`](data/v1/data.proto). TCP streams
+switch to raw bytes after the bounded Open exchange. UDP payloads use QUIC
+DATAGRAM with the fixed AFDP/1 version/flow/sequence/fragment header.
 
-All integer fields are big-endian in the envelope. Typed payloads use
-uvarint lengths and values, fixed field order, and reject trailing bytes. The
-relay data stream uses the separate 12-byte record format implemented in
-`internal/relay`.
-
-The checked-in Go codec is the protocol source of truth. The former v4
-protobuf wire files are intentionally removed: v6 has no v5 fallback or
-downgrade path.
+There is no fallback or compatibility codec. Unknown schema versions,
+stale generations, bad checksums, malformed frames, and resource-limit
+violations are rejected before allocation or state mutation.

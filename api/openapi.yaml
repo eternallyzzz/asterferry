@@ -1,0 +1,401 @@
+openapi: 3.0.3
+info:
+  title: AsterFerry Controller API
+  version: 1.0.0
+  description: Authoritative control-plane API. Gateway and Agent business traffic never traverses this API.
+servers:
+  - url: /api/v1
+tags:
+  - name: auth
+  - name: nodes
+  - name: resources
+  - name: operations
+  - name: audit
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      servers: [{ url: / }]
+      responses: { '200': { description: Controller is healthy } }
+  /readyz:
+    get:
+      operationId: readyz
+      servers: [{ url: / }]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Controller is ready }, '503': { description: Database unavailable } }
+  /metrics:
+    get:
+      operationId: metrics
+      servers: [{ url: / }]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Prometheus metrics } }
+  /openapi.yaml:
+    get:
+      operationId: openapi
+      servers: [{ url: / }]
+      responses: { '200': { description: OpenAPI document } }
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } }
+      responses:
+        '200': { description: Authenticated, content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Logged out }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /me:
+    get:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Current user, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } } }
+  /nodes:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: role, in: query, schema: { type: string, enum: [gateway, agent] } }]
+      responses: { '200': { description: Nodes, content: { application/json: { schema: { $ref: '#/components/schemas/NodeList' } } } } }
+    post:
+      tags: [nodes]
+      operationId: createNode
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeInput' } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Node, content: { application/json: { schema: { $ref: '#/components/schemas/Node' } } } } }
+    patch:
+      tags: [nodes]
+      operationId: updateNode
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodePatch' } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/snapshot:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Current desired snapshot }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/desired:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Current desired snapshot }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/observed:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Latest observed state }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/actions/{action}:
+    post:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/NodeId' }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [drain, reconnect, resync] } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/CSRF' }
+      responses: { '202': { description: Action accepted } }
+  /gateways:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Gateway resources } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GatewaySpec' } } } }
+      responses: { '201': { description: Created } }
+  /gateways/{nodeId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Gateway spec } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GatewaySpec' } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted } }
+  /gateways/{nodeId}/egress:
+    get:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Gateway egress policy } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
+      responses: { '200': { description: Updated gateway egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
+      responses: { '200': { description: Updated gateway egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+  /agents:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent resources } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentSpec' } } } }
+      responses: { '201': { description: Created } }
+  /agents/{nodeId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent spec } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AgentSpec' } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted } }
+  /agents/{nodeId}/egress:
+    get:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Agent egress policy } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
+      responses: { '200': { description: Updated agent egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
+      responses: { '200': { description: Updated agent egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+  /agents/{nodeId}/actions/schedule:
+    post:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '202': { description: Assignment scheduled }, '409': { $ref: '#/components/responses/Conflict' } }
+  /agents/{nodeId}/proxies:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ $ref: '#/components/parameters/NodeId' }], responses: { '200': { description: Proxy entrances } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '201': { description: Created proxy entrance }, '409': { $ref: '#/components/responses/Conflict' } }
+  /agents/{nodeId}/proxies/{proxyId}:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: proxyId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Proxy entrance } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: proxyId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Updated proxy entrance } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: proxyId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted proxy entrance } }
+  /agents/{nodeId}/routes:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ $ref: '#/components/parameters/NodeId' }], responses: { '200': { description: Route rules } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '201': { description: Created route rule }, '409': { $ref: '#/components/responses/Conflict' } }
+  /agents/{nodeId}/routes/{routeName}:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: routeName, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Route rule } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: routeName, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Updated route rule } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: routeName, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted route rule } }
+  /services:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Services } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+  /services/{serviceId}:
+    parameters: [{ name: serviceId, in: path, required: true, schema: { type: string } }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Service } } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted } }
+  /assignments:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignments } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+  /assignments/{assignmentId}:
+    parameters: [{ name: assignmentId, in: path, required: true, schema: { type: string } }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignment } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted } }
+  /enrollment-tokens:
+    get: { tags: [operations], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Enrollment tokens without plaintext secrets } } }
+    post:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentTokenRequest' } } } }
+      responses: { '201': { description: Plaintext is returned once } }
+  /enrollment-tokens/{tokenId}:
+    delete:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Revoked } }
+  /users:
+    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Users } } }
+    post:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserInput' } } } }
+      responses: { '201': { description: Created } }
+  /users/{userId}/tokens:
+    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ name: userId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Token metadata } } }
+    post:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/APITokenRequest' } } } }
+      responses: { '201': { description: Plaintext token returned once } }
+  /users/{userId}:
+    parameters: [{ name: userId, in: path, required: true, schema: { type: string } }]
+    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: User } } }
+    patch:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserInput' } } } }
+      responses: { '200': { description: Updated user } }
+    delete:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted user } }
+  /users/{userId}/tokens/{tokenId}:
+    delete:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Revoked } }
+  /audit:
+    get:
+      tags: [audit]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }]
+      responses: { '200': { description: Audit records } }
+  /events:
+    get:
+      tags: [audit]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Event records } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+    cookieAuth: { type: apiKey, in: cookie, name: af_session }
+  parameters:
+    NodeId: { name: nodeId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+    IfMatch: { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^[1-9][0-9]*$' } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
+    CSRF: { name: X-CSRF-Token, in: header, required: false, schema: { type: string, minLength: 32 } }
+  responses:
+    Unauthorized: { description: Authentication required }
+    Conflict: { description: Revision or unique binding conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties: { username: { type: string }, password: { type: string, format: password } }
+    LoginResponse:
+      type: object
+      properties: { user: { $ref: '#/components/schemas/User' }, csrf_token: { type: string } }
+    User:
+      type: object
+      properties: { id: { type: string }, username: { type: string }, role: { type: string, enum: [viewer, operator, admin] }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    UserInput:
+      type: object
+      properties: { username: { type: string }, password: { type: string, format: password }, role: { type: string, enum: [viewer, operator, admin] } }
+    NodeInput:
+      type: object
+      required: [id, role, name]
+      properties: { id: { type: string }, role: { type: string, enum: [gateway, agent] }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean } }
+    NodePatch:
+      type: object
+      properties: { role: { type: string, enum: [gateway, agent] }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean }, certificate_state: { type: string }, certificate_serial: { type: string } }
+    Node:
+      allOf:
+        - $ref: '#/components/schemas/NodeInput'
+        - type: object
+          properties: { certificate_state: { type: string }, certificate_serial: { type: string }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    NodeList: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Node' } } } }
+    GatewaySpec: { type: object, required: [node_id, public_endpoints], properties: { node_id: { type: string }, public_endpoints: { type: array, items: { type: string } }, listeners: { type: array, items: { type: object } }, capacity: { type: object }, port_pool: { type: object }, transport: { type: object }, obfuscation: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, revision: { type: integer, format: int64 } } }
+    AgentSpec: { type: object, required: [node_id], properties: { node_id: { type: string }, gateway_selector: { type: object }, proxies: { type: array, items: { type: object } }, routes: { type: array, items: { type: object } }, limits: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, logging: { type: object }, revision: { type: integer, format: int64 } } }
+    EgressPolicy: { type: object, properties: { enabled: { type: boolean }, tcp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, udp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, allow_cidrs: { type: array, items: { type: string } }, allow_special_cidrs: { type: array, items: { type: string } }, max_connections: { type: integer, minimum: 0, maximum: 1048576 } } }
+    Service: { type: object, required: [id, agent_id, protocol, local_target, public_bind], properties: { id: { type: string }, agent_id: { type: string }, protocol: { type: string, enum: [tcp, udp] }, local_target: { type: string }, public_bind: { type: string }, public_port: { type: integer, minimum: 0, maximum: 65535 }, gateway_selector: { type: object }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
+    Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
+    EnrollmentTokenRequest: { type: object, required: [role], properties: { role: { type: string, enum: [gateway, agent] }, ttl_seconds: { type: integer, minimum: 1, maximum: 900 } } }
+    APITokenRequest: { type: object, required: [name], properties: { name: { type: string }, expires_at: { type: string, format: date-time } } }
+    ErrorResponse: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, path: { type: string }, retryable: { type: boolean } } } } }

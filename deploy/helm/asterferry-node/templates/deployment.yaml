@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "asterferry-node.fullname" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: {{ include "asterferry-node.name" . }} }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: {{ include "asterferry-node.name" . }} }
+    spec:
+      # Secret volumes are immutable/read-only. Copy the enrollment seed into
+      # the node state PVC once so Runtime can atomically persist certificate
+      # rotations without ever exposing the Secret as a writable mount.
+      initContainers:
+        - name: install-bootstrap
+          image: "{{ .Values.bootstrapInitImage }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              set -eu;
+              if [ ! -s /var/lib/asterferry/state/bootstrap.json ]; then
+                cp /var/lib/asterferry/bootstrap-source/{{ .Values.bootstrapKey }} /var/lib/asterferry/state/bootstrap.json;
+                chmod 600 /var/lib/asterferry/state/bootstrap.json;
+              fi
+          volumeMounts:
+            - name: bootstrap-source
+              mountPath: /var/lib/asterferry/bootstrap-source
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/asterferry/state
+      containers:
+        - name: {{ .Values.role }}
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /var/lib/asterferry
+          args: ["{{ .Values.role }}", "run", "--bootstrap", "/var/lib/asterferry/state/bootstrap.json"]
+          ports:
+            - name: data
+              containerPort: {{ .Values.dataPort }}
+              protocol: UDP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/asterferry/state
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: bootstrap-source
+          secret:
+            secretName: {{ .Values.bootstrapSecret }}
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "asterferry-node.fullname" . }}-state

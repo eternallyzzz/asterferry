@@ -42,7 +42,7 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "asterferry",
 		Short:         "secure Gateway-Agent relay",
-		Long:          "AsterFerry provides authenticated QUIC proxying and reverse mappings between a Gateway and Agents.",
+		Long:          "AsterFerry separates the Controller control plane from Gateway/Agent data-plane nodes.",
 		Version:       info.Version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -56,12 +56,10 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &codedError{code: 2, err: fmt.Errorf("%w; run %q for help", err, "asterferry "+cmd.Name()+" --help")}
 	})
-	root.Example = `  asterferry init ./asterferry --profile dev
-  asterferry up ./asterferry
-  asterferry status ./asterferry
-  asterferry doctor ./asterferry
-  asterferry config show ./asterferry --role gateway
-  asterferry gateway --config ./asterferry/config/gateway.yaml`
+	root.Example = `  asterferry controller init --dir ./controller
+  asterferry enroll-token create --config ./controller/controller.json --role gateway
+  asterferry gateway enroll --controller controller.example:9443 --token <one-time-token> --node-id <node-id> --ca ca.crt
+  asterferry gateway run --bootstrap <node-id>-bootstrap.json`
 
 	root.AddCommand(
 		newVersionCommand(),
@@ -75,6 +73,8 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 		newStatusCommand(),
 		newConfigCommand(),
 		newHealthcheckCommand(),
+		newControllerCommand(),
+		newEnrollTokenCommand(),
 		newGatewayCommand(),
 		newAgentCommand(),
 		newSupervisorCommand(),
@@ -294,6 +294,7 @@ func newGatewayCommand() *cobra.Command {
 		},
 	}
 	addConfigFlag(cmd, &path)
+	cmd.AddCommand(newNodeEnrollCommand(config.RoleGateway), newGatewayRunCommand(&path))
 	return cmd
 }
 
@@ -308,6 +309,7 @@ func newAgentCommand() *cobra.Command {
 		},
 	}
 	addConfigFlag(cmd, &path)
+	cmd.AddCommand(newNodeEnrollCommand(config.RoleAgent), newAgentRunCommand(&path))
 	return cmd
 }
 

@@ -1,24 +1,22 @@
 [Unit]
-Description=AsterFerry Agent
-Wants=network-online.target
+Description=AsterFerry Agent data-plane node
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStart=/usr/local/bin/asterferry agent run --bootstrap /var/lib/asterferry/agent-bootstrap.json
+WorkingDirectory=/var/lib/asterferry
 User=asterferry
 Group=asterferry
-ExecStart=/usr/local/bin/asterferry agent --config /etc/asterferry/agent.yaml
-Restart=on-failure
-RestartSec=3s
-KillSignal=SIGTERM
-TimeoutStopSec=35s
 UMask=0077
+Restart=on-failure
+RestartSec=2s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-LimitNOFILE=65536
+ReadWritePaths=/var/lib/asterferry
 
 [Install]
 WantedBy=multi-user.target

@@ -1,72 +1,92 @@
-# Linux production deployment
+# AsterFerry deployment
 
-1. Create a dedicated service account and directories:
+AsterFerry is deployed as one Controller and independently managed Gateway and
+Agent data-plane nodes. The Controller owns SQLite state, PKI, scheduling, RBAC
+and audit. Nodes receive typed snapshots and never expose a management HTTP API
+or read business YAML.
 
-   ```sh
-   useradd --system --home-dir /var/lib/asterferry --shell /usr/sbin/nologin asterferry
-   install -d -o asterferry -g asterferry -m 0750 /etc/asterferry /var/lib/asterferry
-   install -o root -g asterferry -m 0750 asterferry /usr/local/bin/asterferry
-   ```
+## Controller
 
-2. Place configuration, CA files, certificates, private keys, and tokens in
-   `/etc/asterferry`. Private keys and tokens should be mode `0600` and owned
-   by `asterferry`. The Gateway and Agent `transport.alpn` values must match,
-   but do not use the repository example value.
+```sh
+asterferry controller init --dir /var/lib/asterferry
+asterferry controller run --config /var/lib/asterferry/controller.json
+```
 
-3. Validate before replacing a running configuration:
+The generated CA, Controller certificate, master key, database and first Admin
+account are owner-readable. Back up the complete installation before changes:
 
-   ```sh
-   /usr/local/bin/asterferry validate --config /etc/asterferry/gateway.yaml
-   /usr/local/bin/asterferry validate --config /etc/asterferry/agent.yaml
-   /usr/local/bin/asterferry doctor --config /etc/asterferry/gateway.yaml --skip-ports
-   /usr/local/bin/asterferry doctor --config /etc/asterferry/agent.yaml --skip-ports
-   ```
+```sh
+asterferry controller backup \
+  --config /var/lib/asterferry/controller.json \
+  --output /var/backups/asterferry
+```
 
-   `status --config ...` queries one running role with its Viewer token;
-   `status /path/to/bundle` queries both roles. Admin-scoped actions use the
-   Admin token automatically.
+`deploy/asterferry-controller.service` is a single-replica systemd unit; the
+Controller is not advertised as highly available. Nodes retain their encrypted
+last-known-good snapshot while it is unavailable.
 
-4. Install and start the appropriate service:
+## Node enrollment
 
-   ```sh
-   install -m 0644 deploy/asterferry-gateway.service /etc/systemd/system/
-   systemctl daemon-reload
-   systemctl enable --now asterferry-gateway
-   systemctl status asterferry-gateway
-   ```
+Register a Node (role and labels) through the Controller API or Dashboard,
+create a role-bound enrollment token, and use it once to create bootstrap
+material:
 
-   Use `asterferry-agent.service` on internal nodes. The Gateway firewall
-   should allow only the QUIC UDP port and explicitly configured reverse
-   TCP/UDP ports. Keep the 9090/9091 management endpoints on loopback unless
-   a narrowly scoped remote administration path is needed.
+```sh
+asterferry enroll-token create --config /var/lib/asterferry/controller.json --role gateway
+asterferry gateway enroll --controller controller.example:9443 \
+  --token <one-time-token> --node-id gw-east \
+  --ca /var/lib/asterferry/ca/ca.crt \
+  --output /var/lib/asterferry/gateway-bootstrap.json
+asterferry gateway run --bootstrap /var/lib/asterferry/gateway-bootstrap.json
+```
 
-   The embedded Dashboard is available at `http://127.0.0.1:9090/dashboard/`
-   for Gateway or `http://127.0.0.1:9091/dashboard/` for Agent. For remote
-   administration, use an SSH port forward rather than changing the
-   management listener to a public address. A non-loopback listener requires
-   `management.tls.cert_file` and `management.tls.key_file`:
+Repeat with `agent enroll` and `agent run` for Agents. A bootstrap file holds
+only Controller address, node identity, certificate/key, CA and cache/logging
+settings. Protect it as a secret. Certificate renewal is automatic seven days
+before expiry and is persisted atomically by the node runtime.
 
-   ```sh
-   ssh -N -L 9090:127.0.0.1:9090 operator@example-host
-   ```
+## Linux service units
 
-   Enter the generated Viewer token in the browser. It is held in memory
-   only; Dashboard event history is intentionally not persisted.
+Install the binary and create a dedicated `asterferry` account, then place each
+node's bootstrap file and writable state directory under its service account:
 
-   Set `management.web.enabled: false` when only the protected API and CLI
-   status/health endpoints are wanted. The protected configuration API can
-   validate and atomically update a normal writable file. Read-only-mounted
-   files remain read-only and must be changed by the deployment owner.
+```sh
+install -m 0644 deploy/asterferry-gateway.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now asterferry-gateway
+```
 
-5. Rotate certificates or configuration using a validate-then-restart process.
-   The protected configuration API requests the same supervisor restart with
-   exit code 75 after a successful write; systemd's `Restart=on-failure` then
-   reloads the file. With `ProtectSystem=strict`, add a service drop-in
-   containing `ReadWritePaths=/etc/asterferry` only when API-based file updates
-   are explicitly required.
-   Agents reconnect automatically with exponential backoff. On the first
-   `SIGTERM`/`SIGINT`, the service marks itself unready, rejects new traffic,
-   and drains admitted connections for `shutdown.grace_period_seconds` (30
-   seconds by default). The bundled unit uses `TimeoutStopSec=35s`; increase it
-   if the configuration uses a longer drain period. A second signal forces an
-   immediate close.
+Use `asterferry-agent.service` on an Agent host and
+`asterferry-controller.service` for the Controller. Nodes need only their
+AFDP/1 QUIC endpoint (Gateway) and outbound Controller/data connectivity; all
+business changes go through the Controller API.
+
+## Docker Compose and Helm
+
+`deploy/docker/compose.yaml` runs the Controller, Gateway and Agent as separate
+services. The Controller directory is writable; node bootstrap/state mounts are
+isolated from it. Bootstrap mounts are writable because certificate rotation
+atomically replaces the file. `deploy/helm/asterferry-controller` creates a
+single-replica StatefulSet with a PVC. `deploy/helm/asterferry-node` copies the
+Secret-provided enrollment seed into its state PVC with an init container so
+rotation never mutates the Kubernetes Secret.
+
+Each Gateway must have its own reachable public endpoint. Shared VIP takeover,
+transparent connection migration and Controller HA are outside the first
+release.
+
+## Operations and verification
+
+The REST API is rooted at `/api/v1`; `/healthz` is anonymous while readiness,
+metrics and resource operations require a Viewer, Operator or Admin role.
+Mutating requests use `If-Match` revisions and may include an `Idempotency-Key`.
+Use the Dashboard only as a Controller client.
+
+```sh
+go test ./...
+go vet ./...
+npm --prefix web/dashboard test -- --run
+npm --prefix web/dashboard run build
+helm lint deploy/helm/asterferry-controller deploy/helm/asterferry-node
+docker compose -f deploy/docker/compose.yaml config
+```

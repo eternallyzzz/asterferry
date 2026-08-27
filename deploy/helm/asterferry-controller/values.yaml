@@ -1,0 +1,13 @@
+image:
+  repository: ghcr.io/eternallyzzz/asterferry
+  tag: ""
+  pullPolicy: IfNotPresent
+controller:
+  configPath: /var/lib/asterferry/controller.json
+  httpsPort: 8443
+  grpcPort: 9443
+  dataSize: 10Gi
+service:
+  type: ClusterIP
+  annotations: {}
+resources: {}

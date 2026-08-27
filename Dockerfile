@@ -35,5 +35,5 @@ COPY --from=build /out/asterferry /usr/local/bin/asterferry
 USER 10001:10001
 WORKDIR /etc/asterferry
 
-EXPOSE 4433/udp 9090/tcp 9091/tcp
+EXPOSE 8443/tcp 9443/tcp 4433/udp
 ENTRYPOINT ["/usr/local/bin/asterferry"]

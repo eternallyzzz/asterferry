@@ -1,0 +1,453 @@
+package controller
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"database/sql"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"asterferry/internal/domain"
+)
+
+const (
+	EnrollmentTTL           = 15 * time.Minute
+	NodeCertificateTTL      = 30 * 24 * time.Hour
+	CertificateRotateBefore = 7 * 24 * time.Hour
+)
+
+type EnrollmentToken struct {
+	ID        string     `json:"id"`
+	Role      string     `json:"role"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type Certificate struct {
+	CertificatePEM []byte    `json:"certificate_pem"`
+	CAPEM          []byte    `json:"ca_pem"`
+	Serial         string    `json:"serial"`
+	NotBefore      time.Time `json:"not_before"`
+	NotAfter       time.Time `json:"not_after"`
+}
+
+func (s *Store) CreateEnrollmentToken(ctx context.Context, role string, ttl time.Duration) (string, EnrollmentToken, error) {
+	return s.CreateEnrollmentTokenWithOptions(ctx, role, ttl, WriteOptions{Actor: "system"})
+}
+
+func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+	if role != domain.RoleGateway && role != domain.RoleAgent {
+		return "", EnrollmentToken{}, errors.New("enrollment token role must be gateway or agent")
+	}
+	if ttl <= 0 {
+		ttl = EnrollmentTTL
+	}
+	if ttl > EnrollmentTTL {
+		return "", EnrollmentToken{}, errors.New("enrollment token lifetime cannot exceed 15 minutes")
+	}
+	now := time.Now().UTC()
+	expires := now.Add(ttl)
+	request := map[string]any{"role": role, "ttl_seconds": int64(ttl / time.Second)}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	defer tx.Rollback()
+	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
+	if err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	if hit {
+		var response []byte
+		if err := tx.QueryRowContext(ctx, `SELECT response_json FROM idempotency_keys WHERE key=?`, strings.TrimSpace(options.IdempotencyKey)).Scan(&response); err != nil {
+			return "", EnrollmentToken{}, err
+		}
+		var metadata struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(response, &metadata); err != nil || metadata.ID == "" {
+			return "", EnrollmentToken{}, errors.New("idempotency response is invalid")
+		}
+		var token EnrollmentToken
+		var expiry, created string
+		var used sqlNullString
+		if err := tx.QueryRowContext(ctx, `SELECT id,role,expires_at,used_at,created_at FROM enrollment_tokens WHERE id=?`, metadata.ID).Scan(&token.ID, &token.Role, &expiry, &used, &created); err != nil {
+			return "", EnrollmentToken{}, err
+		}
+		token.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expiry)
+		token.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if used.Valid {
+			value, parseErr := time.Parse(time.RFC3339Nano, used.String)
+			if parseErr == nil {
+				token.UsedAt = &value
+			}
+		}
+		return "", token, tx.Commit()
+	}
+	plain, digest, err := NewAPIToken()
+	if err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	// Enrollment tokens use the same one-way digest format as API tokens. The
+	// plaintext is returned exactly once and is never persisted.
+	id, err := randomID()
+	if err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO enrollment_tokens(id,token_hash,role,expires_at,created_at) VALUES(?,?,?,?,?)`, id, digest, role, expires.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	if err := insertAudit(ctx, tx, options.Actor, "create", "enrollment_token", id, 1, map[string]string{"role": role}); err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	return plain, EnrollmentToken{ID: id, Role: role, ExpiresAt: expires, CreatedAt: now}, nil
+}
+
+func (s *Store) ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,role,expires_at,used_at,created_at FROM enrollment_tokens ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []EnrollmentToken{}
+	for rows.Next() {
+		var token EnrollmentToken
+		var expires, created string
+		var used sqlNullString
+		if err := rows.Scan(&token.ID, &token.Role, &expires, &used, &created); err != nil {
+			return nil, err
+		}
+		token.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
+		token.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		if used.Valid {
+			if value, err := time.Parse(time.RFC3339Nano, used.String); err == nil {
+				token.UsedAt = &value
+			}
+		}
+		result = append(result, token)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RevokeEnrollmentToken(ctx context.Context, id string) error {
+	return s.RevokeEnrollmentTokenWithOptions(ctx, id, WriteOptions{Actor: "system"})
+}
+
+func (s *Store) RevokeEnrollmentTokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	request := map[string]string{"id": strings.TrimSpace(id)}
+	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
+	if err != nil {
+		return err
+	}
+	if hit {
+		return tx.Commit()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at=? WHERE id=? AND used_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return errors.New("enrollment token not found or already revoked")
+	}
+	if err := insertAudit(ctx, tx, options.Actor, "revoke", "enrollment_token", id, 1, nil); err != nil {
+		return err
+	}
+	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) consumeEnrollmentToken(ctx context.Context, plain, role string) error {
+	if strings.TrimSpace(plain) == "" {
+		return errors.New("enrollment token is required")
+	}
+	digest := HashToken(plain)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := consumeEnrollmentTokenTx(ctx, tx, digest, role); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest, role string) error {
+	var id, storedRole, expires string
+	var used sqlNullString
+	if err := tx.QueryRowContext(ctx, `SELECT id,role,expires_at,used_at FROM enrollment_tokens WHERE token_hash=?`, digest).Scan(&id, &storedRole, &expires, &used); err != nil {
+		return errors.New("invalid enrollment token")
+	}
+	if used.Valid {
+		return errors.New("enrollment token has already been used or revoked")
+	}
+	expiry, err := time.Parse(time.RFC3339Nano, expires)
+	if err != nil || !time.Now().Before(expiry) {
+		return errors.New("enrollment token has expired")
+	}
+	if storedRole != role {
+		return errors.New("enrollment token role does not match node role")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at=? WHERE id=? AND used_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return errors.New("enrollment token has already been used or revoked")
+	}
+	return nil
+}
+
+// sqlNullString is kept local to avoid leaking database/sql implementation
+// details into the public enrollment model.
+type sqlNullString struct {
+	String string
+	Valid  bool
+}
+
+func (v *sqlNullString) Scan(src any) error {
+	switch value := src.(type) {
+	case nil:
+		v.String, v.Valid = "", false
+	case string:
+		v.String, v.Valid = value, true
+	case []byte:
+		v.String, v.Valid = string(value), true
+	default:
+		return fmt.Errorf("unsupported nullable value %T", src)
+	}
+	return nil
+}
+
+func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, role, nodeID string, csrDER []byte) (Certificate, error) {
+	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
+		return Certificate{}, err
+	}
+	if role != domain.RoleGateway && role != domain.RoleAgent {
+		return Certificate{}, errors.New("node role must be gateway or agent")
+	}
+	node, err := s.GetNode(ctx, nodeID)
+	if err != nil {
+		return Certificate{}, errors.New("node must be registered before enrollment")
+	}
+	if node.Role != role || !node.Enabled || node.CertificateState == domain.CertificateRevoked {
+		return Certificate{}, errors.New("node is disabled or role does not match")
+	}
+	request, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return Certificate{}, fmt.Errorf("parse enrollment CSR: %w", err)
+	}
+	if err := request.CheckSignature(); err != nil {
+		return Certificate{}, errors.New("enrollment CSR signature is invalid")
+	}
+	if _, ok := request.PublicKey.(ed25519.PublicKey); !ok {
+		return Certificate{}, errors.New("enrollment CSR key must be Ed25519")
+	}
+	if err := validateCSRIdentity(request, nodeID, role); err != nil {
+		return Certificate{}, err
+	}
+	certificate, err := signNodeCertificate(config, nodeID, role, request.PublicKey)
+	if err != nil {
+		return Certificate{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Certificate{}, err
+	}
+	defer tx.Rollback()
+	if err := consumeEnrollmentTokenTx(ctx, tx, HashToken(token), role); err != nil {
+		return Certificate{}, err
+	}
+	var revision int64
+	var currentRole, certificateState string
+	var enabled int
+	if err := tx.QueryRowContext(ctx, `SELECT revision,role,enabled,certificate_state FROM nodes WHERE id=?`, nodeID).Scan(&revision, &currentRole, &enabled, &certificateState); err != nil {
+		return Certificate{}, err
+	}
+	// Re-check mutable enrollment preconditions inside the write transaction.
+	// The initial GetNode call is only a fast rejection path; an administrator
+	// can revoke/disable a node while CSR parsing and signing are in progress.
+	if currentRole != role || enabled == 0 || certificateState == domain.CertificateRevoked {
+		return Certificate{}, errors.New("node is disabled or role does not match")
+	}
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND role=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, role, domain.CertificateRevoked)
+	if err != nil {
+		return Certificate{}, err
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		return Certificate{}, errors.New("node enrollment state changed during certificate issuance")
+	}
+	if err := insertAudit(ctx, tx, "system", "enroll", "node_certificate", nodeID, revision+1, map[string]string{"serial": certificate.Serial}); err != nil {
+		return Certificate{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Certificate{}, err
+	}
+	return certificate, nil
+}
+
+// RenewNodeCertificate issues a fresh certificate for an already enrolled
+// node. The gRPC control stream authenticates the caller with its current
+// mTLS certificate before invoking this method, so no enrollment token is
+// needed for the rotation path.
+func (s *Store) RenewNodeCertificate(ctx context.Context, config Config, nodeID string, csrDER []byte) (Certificate, error) {
+	node, err := s.GetNode(ctx, nodeID)
+	if err != nil {
+		return Certificate{}, errors.New("node is not enrolled")
+	}
+	if !node.Enabled || node.CertificateState == domain.CertificateRevoked {
+		return Certificate{}, errors.New("node is disabled or certificate is revoked")
+	}
+	request, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return Certificate{}, fmt.Errorf("parse renewal CSR: %w", err)
+	}
+	if err := request.CheckSignature(); err != nil {
+		return Certificate{}, errors.New("renewal CSR signature is invalid")
+	}
+	if _, ok := request.PublicKey.(ed25519.PublicKey); !ok {
+		return Certificate{}, errors.New("renewal CSR key must be Ed25519")
+	}
+	if err := validateCSRIdentity(request, node.ID, node.Role); err != nil {
+		return Certificate{}, err
+	}
+	certificate, err := signNodeCertificate(config, node.ID, node.Role, request.PublicKey)
+	if err != nil {
+		return Certificate{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Certificate{}, err
+	}
+	defer tx.Rollback()
+	var revision int64
+	var role, certificateState string
+	var enabled int
+	if err := tx.QueryRowContext(ctx, `SELECT revision,role,enabled,certificate_state FROM nodes WHERE id=?`, nodeID).Scan(&revision, &role, &enabled, &certificateState); err != nil {
+		return Certificate{}, err
+	}
+	if role != node.Role || enabled == 0 || certificateState == domain.CertificateRevoked {
+		return Certificate{}, errors.New("node is disabled or certificate is revoked")
+	}
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND role=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, node.Role, domain.CertificateRevoked)
+	if err != nil {
+		return Certificate{}, err
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		return Certificate{}, errors.New("node state changed during certificate renewal")
+	}
+	if err := insertAudit(ctx, tx, "system", "renew", "node_certificate", nodeID, revision+1, map[string]string{"serial": certificate.Serial}); err != nil {
+		return Certificate{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Certificate{}, err
+	}
+	return certificate, nil
+}
+
+func validateCSRIdentity(request *x509.CertificateRequest, nodeID, role string) error {
+	if request == nil || request.Subject.CommonName != nodeID {
+		return errors.New("CSR common name does not match node identity")
+	}
+	// The organization is informational, but when a caller supplies it we
+	// require the role marker used by our own CSR generator.  This prevents a
+	// valid node key from being accidentally enrolled for the other role while
+	// still accepting CSRs produced by external clients that omit Organization.
+	if len(request.Subject.Organization) > 0 {
+		matched := false
+		for _, value := range request.Subject.Organization {
+			if value == role {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return errors.New("CSR organization does not match node role")
+		}
+	}
+	return nil
+}
+
+func signNodeCertificate(config Config, nodeID, role string, publicKey any) (Certificate, error) {
+	caCert, caKey, err := readCA(config.CACertPath, config.CAKeyPath)
+	if err != nil {
+		return Certificate{}, err
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return Certificate{}, err
+	}
+	now := time.Now().UTC()
+	uri, _ := url.Parse("spiffe://asterferry/node/" + nodeID)
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, template, caCert, publicKey, caKey)
+	if err != nil {
+		return Certificate{}, err
+	}
+	caPEM, err := os.ReadFile(config.CACertPath)
+	if err != nil {
+		return Certificate{}, err
+	}
+	serialText := serial.Text(16)
+	return Certificate{CertificatePEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), CAPEM: caPEM, Serial: serialText, NotBefore: template.NotBefore, NotAfter: template.NotAfter}, nil
+}
+
+func CertificateNeedsRotation(notAfter, now time.Time) bool {
+	if notAfter.IsZero() {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return !notAfter.After(now.Add(CertificateRotateBefore))
+}
+
+func GenerateNodeCSR(nodeID string, role string) (csrDER, keyPEM []byte, err error) {
+	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
+		return nil, nil, err
+	}
+	if role != domain.RoleGateway && role != domain.RoleAgent {
+		return nil, nil, errors.New("node role must be gateway or agent")
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}}, private)
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = public
+	key, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return nil, nil, err
+	}
+	return request, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), nil
+}

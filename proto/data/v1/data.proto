@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package asterferry.data.v1;
+
+option go_package = "asterferry/internal/data/v1;datav1";
+
+message SessionHello {
+  string assignment_id = 1;
+  uint64 generation = 2;
+  string agent_id = 3;
+  repeated string capabilities = 4;
+}
+
+message SessionAccept {
+  string assignment_id = 1;
+  uint64 generation = 2;
+  repeated string capabilities = 3;
+  repeated string service_ids = 4;
+}
+
+message OpenMetadata {
+  string protocol = 1;
+  string service_id = 2;
+  string target = 3;
+  uint64 flow_id = 4;
+  // Egress opens are Agent proxy streams that must be authorized by the
+  // assignment but are not tied to a reverse Service document.  They are
+  // explicitly marked so a peer cannot smuggle an arbitrary target through a
+  // reverse-service identifier.
+  bool egress = 5;
+}

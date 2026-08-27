@@ -1,24 +1,22 @@
 [Unit]
-Description=AsterFerry Gateway
-Wants=network-online.target
+Description=AsterFerry Gateway data-plane node
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStart=/usr/local/bin/asterferry gateway run --bootstrap /var/lib/asterferry/gateway-bootstrap.json
+WorkingDirectory=/var/lib/asterferry
 User=asterferry
 Group=asterferry
-ExecStart=/usr/local/bin/asterferry gateway --config /etc/asterferry/gateway.yaml
-Restart=on-failure
-RestartSec=3s
-KillSignal=SIGTERM
-TimeoutStopSec=35s
 UMask=0077
+Restart=on-failure
+RestartSec=2s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-LimitNOFILE=65536
+ReadWritePaths=/var/lib/asterferry
 
 [Install]
 WantedBy=multi-user.target
