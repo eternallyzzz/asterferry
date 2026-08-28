@@ -11,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 	controlwire "asterferry/internal/controlwire"
 	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
+	"asterferry/internal/jsonutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -212,15 +212,10 @@ func LoadBootstrap(path string) (Bootstrap, error) {
 		return Bootstrap{}, err
 	}
 	var bootstrap Bootstrap
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&bootstrap); err != nil {
-		return Bootstrap{}, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
-		return Bootstrap{}, errors.New("node bootstrap contains trailing JSON")
-	} else if !errors.Is(err, io.EOF) {
+	if err := jsonutil.DecodeStrict(data, &bootstrap); err != nil {
+		if errors.Is(err, jsonutil.ErrTrailingJSON) {
+			return Bootstrap{}, errors.New("node bootstrap contains trailing JSON")
+		}
 		return Bootstrap{}, err
 	}
 	if err := validateBootstrap(bootstrap); err != nil {

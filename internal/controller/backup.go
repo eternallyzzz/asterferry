@@ -30,7 +30,11 @@ func Backup(ctx context.Context, config Config, destination string) (string, err
 	if err := os.MkdirAll(destination, 0o700); err != nil {
 		return "", err
 	}
-	store, err := OpenStore(config.DatabasePath)
+	masterKey, err := LoadOrCreateMasterKey(config.MasterKeyPath)
+	if err != nil {
+		return "", err
+	}
+	store, err := OpenStore(config.DatabasePath, masterKey)
 	if err != nil {
 		return "", err
 	}

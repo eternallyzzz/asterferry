@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -23,7 +24,7 @@ func TestOpenStoreRejectsDatabaseWithoutGenerationMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := OpenStore(path)
+	store, err := openTestStore(path)
 	if store != nil {
 		_ = store.Close()
 	}
@@ -40,7 +41,7 @@ func TestOpenStoreRejectsWrongGenerationFingerprint(t *testing.T) {
 	}
 	for _, statement := range []string{
 		`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-		`INSERT INTO schema_meta(key,value) VALUES ('schema_version','2'),('fingerprint','asterferry-controller-sqlite-v1')`,
+		`INSERT INTO schema_meta(key,value) VALUES ('schema_version','2'),('fingerprint','asterferry-controller-sqlite-v2')`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			_ = db.Close()
@@ -51,7 +52,7 @@ func TestOpenStoreRejectsWrongGenerationFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := OpenStore(path)
+	store, err := openTestStore(path)
 	if store != nil {
 		_ = store.Close()
 	}
@@ -62,7 +63,7 @@ func TestOpenStoreRejectsWrongGenerationFingerprint(t *testing.T) {
 
 func TestOpenStoreCreatesCurrentGenerationMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "current.db")
-	store, err := OpenStore(path)
+	store, err := openTestStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,7 @@ func TestOpenStoreCreatesCurrentGenerationMarker(t *testing.T) {
 	if err := store.DB().QueryRow(`SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
 		t.Fatal(err)
 	}
-	if version != "2" || fingerprint != dbSchemaFingerprint {
+	if version != strconv.Itoa(currentDBSchema) || fingerprint != dbSchemaFingerprint {
 		t.Fatalf("unexpected schema marker version=%q fingerprint=%q", version, fingerprint)
 	}
 }

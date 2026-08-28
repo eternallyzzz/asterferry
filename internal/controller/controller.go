@@ -29,7 +29,11 @@ func New(config Config) (*Controller, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	store, err := OpenStore(config.DatabasePath)
+	masterKey, err := LoadOrCreateMasterKey(config.MasterKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	store, err := OpenStore(config.DatabasePath, masterKey)
 	if err != nil {
 		return nil, err
 	}

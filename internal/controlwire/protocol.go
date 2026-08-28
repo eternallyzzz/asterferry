@@ -4,7 +4,6 @@
 package controlwire
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -16,6 +15,7 @@ import (
 
 	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
+	"asterferry/internal/jsonutil"
 	"asterferry/internal/wireio"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -78,7 +78,7 @@ func SnapshotFromProto(value *v1.DesiredSnapshot) (domain.DesiredSnapshot, error
 		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "invalid_snapshot", Path: "document_json", Message: "snapshot document is empty or too large"}
 	}
 	var snapshot domain.DesiredSnapshot
-	if err := decodeStrictJSON(value.DocumentJson, &snapshot); err != nil {
+	if err := jsonutil.DecodeStrict(value.DocumentJson, &snapshot); err != nil {
 		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "invalid_snapshot", Path: "document_json", Message: "snapshot document is not valid JSON"}
 	}
 	if snapshot.SchemaVersion != uint32(domain.SchemaVersion) || snapshot.SchemaVersion != value.SchemaVersion || snapshot.NodeID != value.NodeId || snapshot.Generation != value.Generation || !strings.EqualFold(snapshot.Checksum, value.Checksum) {
@@ -140,7 +140,7 @@ func ObservedFromProto(value *v1.ObservedState) (domain.ObservedState, error) {
 		return domain.ObservedState{}, ErrUnknownSchema
 	}
 	var state domain.ObservedState
-	if err := decodeStrictJSON(value.DocumentJson, &state); err != nil {
+	if err := jsonutil.DecodeStrict(value.DocumentJson, &state); err != nil {
 		return domain.ObservedState{}, fmt.Errorf("decode observed state: %w", err)
 	}
 	if state.SchemaVersion != value.SchemaVersion || state.NodeID != value.NodeId || state.AppliedGeneration != value.AppliedGeneration || state.Healthy != value.Healthy || state.Degraded != value.Degraded {
@@ -172,21 +172,6 @@ func ObservedFromProto(value *v1.ObservedState) (domain.ObservedState, error) {
 		return domain.ObservedState{}, err
 	}
 	return state, nil
-}
-
-func decodeStrictJSON(data []byte, value any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(value); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
-		return errors.New("trailing JSON")
-	} else if !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
 }
 
 // GenerationGate rejects every generation that is not strictly newer than

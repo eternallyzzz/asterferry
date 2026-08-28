@@ -405,7 +405,7 @@ func signNodeCertificate(config Config, nodeID, role string, publicKey any) (Cer
 		return Certificate{}, err
 	}
 	now := time.Now().UTC()
-	uri, _ := url.Parse("spiffe://asterferry/node/" + nodeID)
+	uri := domain.NodeIdentityURI(nodeID)
 	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, publicKey, caKey)
 	if err != nil {
@@ -436,7 +436,7 @@ func GenerateNodeCSR(nodeID string, role string) (csrDER, keyPEM []byte, err err
 	if role != domain.RoleGateway && role != domain.RoleAgent {
 		return nil, nil, errors.New("node role must be gateway or agent")
 	}
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -444,7 +444,6 @@ func GenerateNodeCSR(nodeID string, role string) (csrDER, keyPEM []byte, err err
 	if err != nil {
 		return nil, nil, err
 	}
-	_ = public
 	key, err := x509.MarshalPKCS8PrivateKey(private)
 	if err != nil {
 		return nil, nil, err

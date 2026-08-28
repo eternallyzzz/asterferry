@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/tls"
 	"database/sql"
@@ -19,6 +18,7 @@ import (
 
 	"asterferry/internal/dashboard"
 	"asterferry/internal/domain"
+	"asterferry/internal/jsonutil"
 )
 
 type Server struct {
@@ -1519,15 +1519,10 @@ func decodeJSON(r *http.Request, value any, max int64) error {
 	if int64(len(data)) > max {
 		return errors.New("request body is too large")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(value); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
-		return errors.New("request contains trailing JSON")
-	} else if !errors.Is(err, io.EOF) {
+	if err := jsonutil.DecodeStrict(data, value); err != nil {
+		if errors.Is(err, jsonutil.ErrTrailingJSON) {
+			return errors.New("request contains trailing JSON")
+		}
 		return err
 	}
 	return nil

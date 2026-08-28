@@ -15,12 +15,24 @@ func runHealthcheck(out io.Writer, target string, timeout time.Duration) error {
 }
 
 func runHealthcheckWithOptions(out io.Writer, target string, timeout time.Duration, insecureTLS bool) error {
+	parsed, err := parseHealthcheckURL(target)
+	if err != nil {
+		return err
+	}
+	return runHealthcheckURL(out, parsed, timeout, insecureTLS)
+}
+
+func parseHealthcheckURL(target string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("healthcheck URL must be an absolute http or https URL")
+	}
+	return parsed, nil
+}
+
+func runHealthcheckURL(out io.Writer, parsed *url.URL, timeout time.Duration, insecureTLS bool) error {
 	if timeout <= 0 {
 		return fmt.Errorf("healthcheck timeout must be positive")
-	}
-	parsed, err := url.Parse(target)
-	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return fmt.Errorf("healthcheck URL must be an absolute http or https URL")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if parsed.Scheme == "https" && insecureTLS {
@@ -52,6 +64,6 @@ func runHealthcheckWithOptions(out io.Writer, target string, timeout time.Durati
 }
 
 func healthcheckURLIsSafe(target string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(target))
-	return err == nil && parsed.Host != "" && parsed.User == nil && (parsed.Scheme == "http" || parsed.Scheme == "https")
+	_, err := parseHealthcheckURL(target)
+	return err == nil
 }

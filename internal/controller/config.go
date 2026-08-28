@@ -1,11 +1,9 @@
 package controller
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +11,7 @@ import (
 	"strings"
 
 	"asterferry/internal/atomicfile"
+	"asterferry/internal/jsonutil"
 )
 
 // Config is intentionally small: business state belongs in SQLite and is
@@ -72,15 +71,10 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, err
 	}
 	var config Config
-	decoder := json.NewDecoder(bytes.NewReader(b))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
-		return Config{}, fmt.Errorf("decode controller config: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err == nil {
-		return Config{}, errors.New("decode controller config: trailing JSON")
-	} else if !errors.Is(err, io.EOF) {
+	if err := jsonutil.DecodeStrict(b, &config); err != nil {
+		if errors.Is(err, jsonutil.ErrTrailingJSON) {
+			return Config{}, errors.New("decode controller config: trailing JSON")
+		}
 		return Config{}, fmt.Errorf("decode controller config: %w", err)
 	}
 	if err := config.Validate(); err != nil {

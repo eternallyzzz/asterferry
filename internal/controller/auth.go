@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -84,7 +85,7 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 		Username       string `json:"username"`
 		Role           string `json:"role"`
 		PasswordDigest string `json:"password_digest"`
-	}{Username: username, Role: role, PasswordDigest: passwordDigest(password)}
+	}{Username: username, Role: role, PasswordDigest: passwordDigest(s.masterKey, password)}
 	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
 	if err != nil {
 		return User{}, err
@@ -108,21 +109,31 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 	return User{ID: id, Username: username, Role: role, Enabled: true, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func passwordDigest(password string) string {
-	digest := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(digest[:])
+func passwordDigest(key [masterKeyBytes]byte, password string) string {
+	digest := hmac.New(sha256.New, key[:])
+	_, _ = digest.Write([]byte(password))
+	return hex.EncodeToString(digest.Sum(nil))
 }
+
+// dummyPasswordHash is a fixed, valid Argon2id value used for failed logins
+// where the username does not exist. Running the same verifier in that case
+// prevents the database lookup result from becoming a username timing oracle.
+const dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$YXN0ZXJmZXJyeS1kdW1teSE$PcdkQIKcsmT6A6y+xYGrZHtf7nOnuwy4AX8onzMTER0"
 
 func (s *Store) Authenticate(ctx context.Context, username, password string) (User, error) {
 	var user User
 	var hash, created, updated string
 	var enabled int
 	err := s.db.QueryRowContext(ctx, `SELECT id,username,password_hash,role,enabled,revision,created_at,updated_at FROM users WHERE username=?`, strings.TrimSpace(username)).Scan(&user.ID, &user.Username, &hash, &user.Role, &enabled, &user.Revision, &created, &updated)
-	if errors.Is(err, sql.ErrNoRows) || !VerifyPassword(hash, password) {
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = VerifyPassword(dummyPasswordHash, password)
 		return User{}, errors.New("invalid credentials")
 	}
 	if err != nil {
 		return User{}, err
+	}
+	if !VerifyPassword(hash, password) {
+		return User{}, errors.New("invalid credentials")
 	}
 	if enabled == 0 {
 		return User{}, errors.New("user is disabled")
@@ -191,7 +202,7 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 	}
 	passwordMarker := ""
 	if update.Password != nil {
-		passwordMarker = passwordDigest(*update.Password)
+		passwordMarker = passwordDigest(s.masterKey, *update.Password)
 	}
 	request := map[string]any{"id": id, "username": update.Username, "password_digest": passwordMarker, "role": update.Role, "enabled": update.Enabled, "if_match": options.IfMatch}
 	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"asterferry/internal/domain"
 	"asterferry/internal/wireio"
 	"github.com/quic-go/quic-go"
 )
@@ -234,11 +235,12 @@ func authorizePeerIdentity(conn Conn, agentID string) error {
 	if certificate.Subject.CommonName == agentID {
 		return nil
 	}
+	expected := domain.NodeIdentityURI(agentID)
 	for _, uri := range certificate.URIs {
 		// The identity URI is issued as spiffe://asterferry/node/<agent-id>.
 		// Compare the parsed path exactly; a suffix check would let an URI such
 		// as /node/other-agent authenticate as /node/agent.
-		if uri != nil && uri.Scheme == "spiffe" && uri.Host == "asterferry" && strings.TrimSuffix(uri.Path, "/") == "/node/"+agentID {
+		if uri != nil && uri.Scheme == expected.Scheme && uri.Host == expected.Host && strings.TrimSuffix(uri.Path, "/") == expected.Path {
 			return nil
 		}
 	}

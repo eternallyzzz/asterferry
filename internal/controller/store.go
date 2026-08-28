@@ -23,8 +23,8 @@ import (
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 2
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v2"
+	currentDBSchema     = 3
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v3"
 	maxSnapshotDocument = 16 << 20
 )
 
@@ -37,6 +37,7 @@ var ErrIncompatibleDatabase = errors.New("controller database belongs to an inco
 type Store struct {
 	db         *sql.DB
 	path       string
+	masterKey  [masterKeyBytes]byte
 	close      sync.Once
 	err        error
 	actionMu   sync.Mutex
@@ -481,7 +482,10 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 	return tx.Commit()
 }
 
-func OpenStore(path string) (*Store, error) {
+func OpenStore(path string, masterKey []byte) (*Store, error) {
+	if len(masterKey) != masterKeyBytes {
+		return nil, errors.New("master key must contain exactly 32 bytes")
+	}
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, errors.New("database path is required")
@@ -504,6 +508,7 @@ func OpenStore(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	store := &Store{db: db, path: path}
+	copy(store.masterKey[:], masterKey)
 	if err := store.configure(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -515,7 +520,7 @@ func OpenStore(path string) (*Store, error) {
 	return store, nil
 }
 
-func NewStore(path string) (*Store, error) { return OpenStore(path) }
+func NewStore(path string, masterKey []byte) (*Store, error) { return OpenStore(path, masterKey) }
 
 func (s *Store) DB() *sql.DB  { return s.db }
 func (s *Store) Path() string { return s.path }

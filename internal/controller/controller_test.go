@@ -12,7 +12,7 @@ import (
 )
 
 func TestStoreRevisionAndAtomicSnapshot(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestCryptoAndEnrollmentToken(t *testing.T) {
 	if err != nil || !VerifyPassword(hash, "a-very-long-admin-password") || VerifyPassword(hash, "wrong-password") {
 		t.Fatalf("password crypto failed: %v", err)
 	}
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestCryptoAndEnrollmentToken(t *testing.T) {
 }
 
 func TestUserRevisionAndIdempotency(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestUserRevisionAndIdempotency(t *testing.T) {
 }
 
 func TestSnapshotPersistenceRejectsStaleOrConflictingGeneration(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestSnapshotPersistenceRejectsStaleOrConflictingGeneration(t *testing.T) {
 }
 
 func TestScheduleAgentUpdatesBothNodeSnapshots(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestScheduleAgentUpdatesBothNodeSnapshots(t *testing.T) {
 }
 
 func TestAssignmentRequiresBothNodeAcks(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestAssignmentRequiresBothNodeAcks(t *testing.T) {
 }
 
 func TestServiceUpdateReopensAssignmentGeneration(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestServiceUpdateReopensAssignmentGeneration(t *testing.T) {
 }
 
 func TestPutAssignmentCannotBypassAcknowledgementBarrier(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestPutAssignmentCannotBypassAcknowledgementBarrier(t *testing.T) {
 }
 
 func TestApplySnapshotCannotPublishAppliedAssignment(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestApplySnapshotCannotPublishAppliedAssignment(t *testing.T) {
 }
 
 func TestAssignmentUpdateReleasesRemovedBinding(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestSchedulePreservesHealthyAssignmentAndPort(t *testing.T) {
 }
 
 func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

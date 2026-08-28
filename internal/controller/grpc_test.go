@@ -19,7 +19,7 @@ func (p *closeProbeGRPC) Stop()         { p.stopped = true }
 func (p *closeProbeGRPC) GracefulStop() { p.graceful = true }
 
 func TestControllerCloseForcesGRPCStop(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "controller.db"))
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,11 @@ func TestEnrollmentOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStore(result.Config.DatabasePath)
+	masterKey, err := LoadOrCreateMasterKey(result.Config.MasterKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(result.Config.DatabasePath, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}

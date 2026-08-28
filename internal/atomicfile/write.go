@@ -30,32 +30,11 @@ func Write(path string, data []byte, mode os.FileMode) error {
 // removing the old target. The temporary file is removed on every failure
 // path.
 func AtomicWrite(path string, data []byte, mode os.FileMode) error {
-	if err := ensureParent(path); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), tempPrefix)
+	tmpPath, err := WriteTemp(path, tempPrefix, data, mode)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-
-	permissions := mode.Perm()
-	if err := tmp.Chmod(permissions); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := wireio.WriteFull(tmp, data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
 	if err := os.Rename(tmpPath, path); err == nil {
 		return nil
 	}
@@ -66,6 +45,45 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 		return renameErr
 	}
 	return nil
+}
+
+// WriteTemp writes and syncs data to a temporary file in path's directory,
+// returning the temporary pathname for a caller that needs a custom publish
+// or fallback strategy. The temporary file is removed when writing fails.
+func WriteTemp(path, pattern string, data []byte, mode os.FileMode) (string, error) {
+	if err := ensureParent(path); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	closed := false
+	keep := false
+	defer func() {
+		if !closed {
+			_ = tmp.Close()
+		}
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(mode.Perm()); err != nil {
+		return "", err
+	}
+	if err := wireio.WriteFull(tmp, data); err != nil {
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	closed = true
+	keep = true
+	return tmpPath, nil
 }
 
 func ensureParent(path string) error {

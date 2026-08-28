@@ -96,10 +96,11 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if err := writeServerCertificate(config, options.Now); err != nil {
 		return InitResult{}, err
 	}
-	if _, err := LoadOrCreateMasterKey(config.MasterKeyPath); err != nil {
+	masterKey, err := LoadOrCreateMasterKey(config.MasterKeyPath)
+	if err != nil {
 		return InitResult{}, err
 	}
-	store, err := OpenStore(config.DatabasePath)
+	store, err := OpenStore(config.DatabasePath, masterKey)
 	if err != nil {
 		return InitResult{}, err
 	}

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"asterferry/internal/atomicfile"
 	controlwire "asterferry/internal/controlwire"
 	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/dataplane"
@@ -490,31 +491,12 @@ func loadOrCreateNodeKey(path string) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".node-key-*")
+	tmpPath, err := atomicfile.WriteTemp(path, ".node-key-*", key, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	if _, err := tmp.Write(key); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	if err := tmp.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(name, path); err != nil {
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := os.Rename(tmpPath, path); err != nil {
 		if existing, readErr := os.ReadFile(path); readErr == nil && len(existing) == 32 {
 			return existing, nil
 		}

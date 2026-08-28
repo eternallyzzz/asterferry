@@ -152,7 +152,11 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := controller.OpenStore(config.DatabasePath)
+		masterKey, err := controller.LoadOrCreateMasterKey(config.MasterKeyPath)
+		if err != nil {
+			return err
+		}
+		store, err := controller.OpenStore(config.DatabasePath, masterKey)
 		if err != nil {
 			return err
 		}
@@ -178,7 +182,11 @@ func newEnrollTokenRevokeCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := controller.OpenStore(config.DatabasePath)
+		masterKey, err := controller.LoadOrCreateMasterKey(config.MasterKeyPath)
+		if err != nil {
+			return err
+		}
+		store, err := controller.OpenStore(config.DatabasePath, masterKey)
 		if err != nil {
 			return err
 		}

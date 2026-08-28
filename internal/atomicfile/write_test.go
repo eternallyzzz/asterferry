@@ -48,3 +48,26 @@ func TestAtomicWriteReplacesAndCleansTemporaryFile(t *testing.T) {
 		t.Fatalf("temporary files remain: %#v", matches)
 	}
 }
+
+func TestWriteTempPublishesSyncedFileForCaller(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nested", "secret")
+	tmpPath, err := WriteTemp(path, ".test-temp-*", []byte("secret"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpPath)
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || string(data) != "secret" {
+		t.Fatalf("temporary data = %q, err=%v", data, err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(tmpPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("temporary file mode = %o, want 600", got)
+		}
+	}
+}

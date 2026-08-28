@@ -578,11 +578,12 @@ func verifyPeerIdentity(ctx context.Context, nodeID string) error {
 	if err != nil {
 		return err
 	}
+	expected := domain.NodeIdentityURI(nodeID)
 	for _, uri := range certificate.URIs {
 		// Node certificates use the exact SPIFFE path
 		// spiffe://asterferry/node/<node-id>. Do not use a generic suffix check:
 		// /node/evil-<node-id> must not authenticate as <node-id>.
-		if uri != nil && uri.Scheme == "spiffe" && uri.Host == "asterferry" && strings.TrimSuffix(uri.Path, "/") == "/node/"+nodeID {
+		if uri != nil && uri.Scheme == expected.Scheme && uri.Host == expected.Host && strings.TrimSuffix(uri.Path, "/") == expected.Path {
 			return nil
 		}
 	}

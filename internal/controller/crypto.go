@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"asterferry/internal/atomicfile"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -49,30 +50,11 @@ func LoadOrCreateMasterKey(path string) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("generate master key: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("create master key directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".master-key-*")
+	tmpName, err := atomicfile.WriteTemp(path, ".master-key-*", key, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	if _, err := tmp.Write(key); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	if err := tmp.Close(); err != nil {
-		return nil, err
-	}
 	if err := os.Rename(tmpName, path); err != nil {
 		if existing, readErr := os.ReadFile(path); readErr == nil && len(existing) == masterKeyBytes {
 			return existing, nil
