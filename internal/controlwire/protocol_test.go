@@ -2,6 +2,7 @@ package controlwire
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -23,9 +24,41 @@ func TestSnapshotProtoRoundTripAndChecksum(t *testing.T) {
 	if decoded.NodeID != snapshot.NodeID || decoded.Generation != snapshot.Generation || decoded.Checksum == "" {
 		t.Fatalf("unexpected decoded snapshot: %#v", decoded)
 	}
+	originalDocument := append([]byte(nil), encoded.DocumentJson...)
 	encoded.DocumentJson[0] ^= 1
 	if _, err := SnapshotFromProto(encoded); err == nil {
 		t.Fatal("tampered snapshot accepted")
+	}
+
+	topLevelTampered := &v1.DesiredSnapshot{
+		SchemaVersion: encoded.SchemaVersion,
+		NodeId:        encoded.NodeId,
+		Generation:    encoded.Generation,
+		Checksum:      "tampered",
+		DocumentJson:  append([]byte(nil), originalDocument...),
+	}
+	if _, err := SnapshotFromProto(topLevelTampered); err == nil {
+		t.Fatal("tampered top-level checksum accepted")
+	}
+
+	var document domain.DesiredSnapshot
+	if err := json.Unmarshal(originalDocument, &document); err != nil {
+		t.Fatal(err)
+	}
+	document.Checksum = "tampered"
+	tamperedDocument, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	documentTampered := &v1.DesiredSnapshot{
+		SchemaVersion: encoded.SchemaVersion,
+		NodeId:        encoded.NodeId,
+		Generation:    encoded.Generation,
+		Checksum:      encoded.Checksum,
+		DocumentJson:  tamperedDocument,
+	}
+	if _, err := SnapshotFromProto(documentTampered); err == nil {
+		t.Fatal("tampered document checksum accepted")
 	}
 }
 

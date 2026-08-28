@@ -36,6 +36,8 @@ const (
 	maxServiceIDBytes      = 128
 	maxTargetBytes         = 2048
 	datagramHeaderBytes    = 24
+	maxDatagramPayload     = 1<<16 - 1
+	maxDatagramFragments   = 1024
 )
 
 var (
@@ -356,38 +358,45 @@ const (
 // without allowing callers to mutate the protocol constant.
 func DatagramHeaderSize() int { return datagramHeaderBytes }
 
+func validateDatagramHeader(header DatagramHeader) error {
+	switch {
+	case header.FlowID == 0:
+		return ErrMalformedFrame
+	case header.FragmentCount == 0:
+		return ErrMalformedFrame
+	case header.FragmentCount == 1 && header.FragmentIndex != 0:
+		return ErrMalformedFrame
+	case header.FragmentIndex >= header.FragmentCount:
+		return ErrMalformedFrame
+	case header.FragmentCount > maxDatagramFragments:
+		return ErrFrameTooLarge
+	case header.FragmentCount == 1 && header.Flags&DatagramFlagFragmented != 0:
+		return ErrMalformedFrame
+	case header.FragmentCount > 1 && header.Flags&DatagramFlagFragmented == 0:
+		return ErrMalformedFrame
+	case header.Flags&^byte(DatagramFlagFragmented|DatagramFlagFin) != 0:
+		return ErrMalformedFrame
+	case header.FragmentIndex == header.FragmentCount-1 && header.Flags&DatagramFlagFin == 0:
+		return ErrMalformedFrame
+	case header.FragmentIndex != header.FragmentCount-1 && header.Flags&DatagramFlagFin != 0:
+		return ErrMalformedFrame
+	default:
+		return nil
+	}
+}
+
+func normalizeDatagramPayloadLimit(maxPayload int) int {
+	if maxPayload <= 0 || maxPayload > maxDatagramPayload {
+		return maxDatagramPayload
+	}
+	return maxPayload
+}
+
 func EncodeDatagram(header DatagramHeader, payload []byte, maxPayload int) ([]byte, error) {
-	if header.FlowID == 0 {
-		return nil, ErrMalformedFrame
+	if err := validateDatagramHeader(header); err != nil {
+		return nil, err
 	}
-	if header.FragmentCount == 0 || header.FragmentIndex >= header.FragmentCount {
-		return nil, ErrMalformedFrame
-	}
-	if header.FragmentCount > 1024 {
-		return nil, ErrFrameTooLarge
-	}
-	if header.FragmentCount == 1 && header.FragmentIndex != 0 {
-		return nil, ErrMalformedFrame
-	}
-	if header.FragmentCount == 1 && header.Flags&DatagramFlagFragmented != 0 {
-		return nil, ErrMalformedFrame
-	}
-	if header.FragmentCount > 1 && header.Flags&DatagramFlagFragmented == 0 {
-		return nil, ErrMalformedFrame
-	}
-	if header.Flags & ^byte(DatagramFlagFragmented|DatagramFlagFin) != 0 {
-		return nil, ErrMalformedFrame
-	}
-	if header.FragmentIndex == header.FragmentCount-1 && header.Flags&DatagramFlagFin == 0 {
-		return nil, ErrMalformedFrame
-	}
-	if header.FragmentIndex != header.FragmentCount-1 && header.Flags&DatagramFlagFin != 0 {
-		return nil, ErrMalformedFrame
-	}
-	if maxPayload <= 0 {
-		maxPayload = 64 << 10
-	}
-	if len(payload) > maxPayload || len(payload) > 0xffff {
+	if len(payload) > normalizeDatagramPayloadLimit(maxPayload) {
 		return nil, ErrFrameTooLarge
 	}
 	result := make([]byte, datagramHeaderBytes+len(payload))
@@ -418,21 +427,13 @@ func DecodeDatagram(data []byte, maxPayload int) (DatagramHeader, []byte, error)
 	if payloadLength != len(data)-datagramHeaderBytes {
 		return DatagramHeader{}, nil, ErrMalformedFrame
 	}
-	if maxPayload <= 0 {
-		maxPayload = 64 << 10
+	maxPayload = normalizeDatagramPayloadLimit(maxPayload)
+	header := DatagramHeader{Flags: data[1], FlowID: binary.BigEndian.Uint64(data[4:12]), Sequence: binary.BigEndian.Uint32(data[12:16]), FragmentIndex: binary.BigEndian.Uint16(data[16:18]), FragmentCount: binary.BigEndian.Uint16(data[18:20])}
+	if err := validateDatagramHeader(header); err != nil {
+		return DatagramHeader{}, nil, err
 	}
 	if payloadLength > maxPayload {
 		return DatagramHeader{}, nil, ErrFrameTooLarge
-	}
-	header := DatagramHeader{Flags: data[1], FlowID: binary.BigEndian.Uint64(data[4:12]), Sequence: binary.BigEndian.Uint32(data[12:16]), FragmentIndex: binary.BigEndian.Uint16(data[16:18]), FragmentCount: binary.BigEndian.Uint16(data[18:20])}
-	if header.FlowID == 0 {
-		return DatagramHeader{}, nil, ErrMalformedFrame
-	}
-	if header.FragmentCount == 0 || header.FragmentIndex >= header.FragmentCount || header.FragmentCount > 1024 || header.FragmentCount == 1 && header.Flags&DatagramFlagFragmented != 0 || header.FragmentCount > 1 && header.Flags&DatagramFlagFragmented == 0 || header.Flags & ^byte(DatagramFlagFragmented|DatagramFlagFin) != 0 {
-		return DatagramHeader{}, nil, ErrMalformedFrame
-	}
-	if header.FragmentIndex == header.FragmentCount-1 && header.Flags&DatagramFlagFin == 0 || header.FragmentIndex != header.FragmentCount-1 && header.Flags&DatagramFlagFin != 0 {
-		return DatagramHeader{}, nil, ErrMalformedFrame
 	}
 	return header, append([]byte(nil), data[datagramHeaderBytes:]...), nil
 }
@@ -466,7 +467,7 @@ func NewReassembler(maxFlows, maxBytes, maxPayload int, timeout time.Duration) (
 	if maxFlows <= 0 || maxBytes <= 0 || maxPayload <= 0 || timeout <= 0 {
 		return nil, errors.New("reassembler limits must be positive")
 	}
-	if maxFlows > 1<<20 || maxBytes > 64<<20 || maxPayload > 64<<10 || timeout > 24*time.Hour {
+	if maxFlows > 1<<20 || maxBytes > 64<<20 || maxPayload > maxDatagramPayload || timeout > 24*time.Hour {
 		return nil, errors.New("reassembler limits exceed the supported maximum")
 	}
 	return &Reassembler{flows: make(map[flowKey]*fragmentSet), completed: make(map[flowKey]time.Time), maxFlows: maxFlows, maxBytes: maxBytes, maxPayload: maxPayload, timeout: timeout}, nil
@@ -587,7 +588,7 @@ func Fragments(flowID uint64, sequence uint32, payload []byte, mtu int) ([][]byt
 	if count == 0 {
 		count = 1
 	}
-	if count > 1024 {
+	if count > maxDatagramFragments {
 		return nil, ErrFrameTooLarge
 	}
 	result := make([][]byte, 0, count)
