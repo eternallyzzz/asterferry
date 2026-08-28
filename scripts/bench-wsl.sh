@@ -14,9 +14,9 @@ if [ -n "${ASTERFERRY_BENCHREGEX_B64:-}" ]; then
   bench_regex="$(printf '%s' "$ASTERFERRY_BENCHREGEX_B64" | base64 -d)"
 else
   if [ "$suite" = "full" ]; then
-    default_regex='Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)'
+    default_regex='Benchmark(.*)'
   else
-    default_regex='Benchmark(ConnRoundTrip|AsterFerryProxyLatency)|AsterFerryProxy/mode=(standard|camouflage)/profile=balanced/payload=65536/streams=8'
+    default_regex='Benchmark(.*)'
   fi
   bench_regex="${ASTERFERRY_BENCHREGEX:-$default_regex}"
 fi
@@ -24,17 +24,16 @@ output_dir="$root/tmp/perf/wsl"
 mkdir -p "$output_dir"
 
 if command -v go >/dev/null 2>&1; then
-  bench_cmd=(go test ./internal/transport ./internal/relay ./internal/integration -run '^$' -bench "$bench_regex" -benchmem "-benchtime=$bench_time" "-count=$count")
+  bench_cmd=(go test ./internal/afdp ./internal/dataplane -run '^$' -bench "$bench_regex" -benchmem "-benchtime=$bench_time" "-count=$count")
   go_version="$(go version)"
   goos="$(go env GOOS)"
   goarch="$(go env GOARCH)"
   gomaxprocs="$(go env GOMAXPROCS)"
 else
   binary_dir="${ASTERFERRY_BENCH_BINARY_DIR:-$root/tmp/perf/wsl/bin}"
-  transport_bin="$binary_dir/transport.test"
-  relay_bin="$binary_dir/relay.test"
-  integration_bin="$binary_dir/integration.test"
-  for binary in "$transport_bin" "$relay_bin" "$integration_bin"; do
+  afdp_bin="$binary_dir/afdp.test"
+  dataplane_bin="$binary_dir/dataplane.test"
+  for binary in "$afdp_bin" "$dataplane_bin"; do
     if [ ! -x "$binary" ]; then
       echo "Go is unavailable and benchmark binary is missing: $binary" >&2
       exit 1
@@ -57,7 +56,7 @@ if [ ${#bench_cmd[@]} -gt 0 ]; then
   "${bench_cmd[@]}" 2>&1 | tee "$output_dir/bench.txt"
 else
   : > "$output_dir/bench.txt"
-  for binary in "$transport_bin" "$relay_bin" "$integration_bin"; do
+  for binary in "$afdp_bin" "$dataplane_bin"; do
     "$binary" -test.run '^$' -test.bench "$bench_regex" -test.benchmem \
       "-test.benchtime=$bench_time" "-test.count=$count" 2>&1 | tee -a "$output_dir/bench.txt"
   done

@@ -125,6 +125,25 @@ type ObfuscationPolicy struct {
 	HandshakeShaping bool   `json:"handshake_shaping"`
 }
 
+func (o ObfuscationPolicy) Validate(path string) error {
+	if path == "" {
+		path = "obfuscation"
+	}
+	if o.Mode != "" && o.Mode != "standard" && o.Mode != "camouflage" {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".mode", Message: "obfuscation mode must be standard or camouflage"}
+	}
+	if o.Mode == "camouflage" && len(o.KeyCiphertext) == 0 {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".key_ciphertext", Message: "camouflage mode requires an encrypted key"}
+	}
+	if o.MaxPaddingBytes < 0 || o.MaxPaddingBytes > 64<<10 {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".max_padding_bytes", Message: "obfuscation padding limit is out of range"}
+	}
+	if len(o.KeyCiphertext) > 128<<10 {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".key_ciphertext", Message: "obfuscation key ciphertext is too large"}
+	}
+	return nil
+}
+
 type Listener struct {
 	Protocol string `json:"protocol"`
 	Bind     string `json:"bind"`
@@ -185,6 +204,7 @@ type RouteRule struct {
 	Name        string   `json:"name"`
 	CIDRs       []string `json:"cidrs,omitempty"`
 	Domains     []string `json:"domains,omitempty"`
+	GeoIP       []string `json:"geoip,omitempty"`
 	Destination string   `json:"destination"`
 	Enabled     bool     `json:"enabled"`
 }
@@ -270,11 +290,13 @@ func validateEgressPortRanges(values []string, path string) error {
 		max := min
 		if len(parts) == 2 {
 			max, err = strconv.Atoi(parts[1])
-			if err != nil || max < min || max > 65535 {
+			if err != nil || max > 65535 {
 				return &ApplyError{Code: "invalid_egress", Path: path, Message: "egress port range is invalid"}
 			}
 		}
-		_ = max
+		if max < min {
+			return &ApplyError{Code: "invalid_egress", Path: path, Message: "egress port range is invalid"}
+		}
 	}
 	return nil
 }
@@ -309,16 +331,17 @@ type Service struct {
 }
 
 type Assignment struct {
-	ID             string    `json:"id"`
-	GatewayID      string    `json:"gateway_id"`
-	AgentID        string    `json:"agent_id"`
-	ServiceIDs     []string  `json:"service_ids"`
-	Bindings       []Binding `json:"bindings,omitempty"`
-	Generation     uint64    `json:"generation"`
-	State          string    `json:"state"`
-	PublicEndpoint string    `json:"public_endpoint,omitempty"`
-	Revision       int64     `json:"revision,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string            `json:"id"`
+	GatewayID      string            `json:"gateway_id"`
+	AgentID        string            `json:"agent_id"`
+	ServiceIDs     []string          `json:"service_ids"`
+	Bindings       []Binding         `json:"bindings,omitempty"`
+	Generation     uint64            `json:"generation"`
+	State          string            `json:"state"`
+	PublicEndpoint string            `json:"public_endpoint,omitempty"`
+	Obfuscation    ObfuscationPolicy `json:"obfuscation,omitempty"`
+	Revision       int64             `json:"revision,omitempty"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 type Binding struct {
@@ -344,6 +367,111 @@ type DesiredSnapshot struct {
 	Agent         *AgentSpec   `json:"agent,omitempty"`
 	Services      []Service    `json:"services,omitempty"`
 	Assignments   []Assignment `json:"assignments,omitempty"`
+}
+
+// SnapshotIntent is the immutable, data-plane-facing part of a desired
+// snapshot.  Controller revisions and timestamps intentionally do not exist
+// in this type; they belong to the repository records returned by the API.
+// Keeping an explicit projection makes checksum construction inclusion-based
+// instead of relying on a fragile list of metadata fields to clear.
+type SnapshotIntent struct {
+	SchemaVersion uint32             `json:"schema_version"`
+	NodeID        string             `json:"node_id"`
+	Generation    uint64             `json:"generation"`
+	Gateway       *GatewayIntent     `json:"gateway,omitempty"`
+	Agent         *AgentIntent       `json:"agent,omitempty"`
+	Services      []ServiceIntent    `json:"services,omitempty"`
+	Assignments   []AssignmentIntent `json:"assignments,omitempty"`
+}
+
+type GatewayIntent struct {
+	NodeID          string            `json:"node_id"`
+	PublicEndpoints []string          `json:"public_endpoints"`
+	Listeners       []Listener        `json:"listeners,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Capacity        Capacity          `json:"capacity"`
+	PortPool        PortPool          `json:"port_pool"`
+	Transport       TransportPolicy   `json:"transport"`
+	Obfuscation     ObfuscationPolicy `json:"obfuscation"`
+	Egress          EgressPolicy      `json:"egress"`
+}
+
+type AgentIntent struct {
+	NodeID          string        `json:"node_id"`
+	GatewaySelector Selector      `json:"gateway_selector"`
+	Proxies         []ProxySpec   `json:"proxies,omitempty"`
+	Routes          []RouteRule   `json:"routes,omitempty"`
+	Limits          AgentLimits   `json:"limits"`
+	Egress          EgressPolicy  `json:"egress"`
+	Logging         LoggingPolicy `json:"logging"`
+}
+
+type ServiceIntent struct {
+	ID              string   `json:"id"`
+	AgentID         string   `json:"agent_id"`
+	Protocol        string   `json:"protocol"`
+	LocalTarget     string   `json:"local_target"`
+	PublicBind      string   `json:"public_bind"`
+	PublicPort      uint16   `json:"public_port"`
+	GatewaySelector Selector `json:"gateway_selector"`
+	Enabled         bool     `json:"enabled"`
+}
+
+type AssignmentIntent struct {
+	ID             string            `json:"id"`
+	GatewayID      string            `json:"gateway_id"`
+	AgentID        string            `json:"agent_id"`
+	ServiceIDs     []string          `json:"service_ids"`
+	Bindings       []Binding         `json:"bindings,omitempty"`
+	Generation     uint64            `json:"generation"`
+	State          string            `json:"state"`
+	PublicEndpoint string            `json:"public_endpoint,omitempty"`
+	Obfuscation    ObfuscationPolicy `json:"obfuscation,omitempty"`
+}
+
+// Intent projects repository records into a canonical checksum document.
+func (s DesiredSnapshot) Intent() SnapshotIntent {
+	canonical := s.Normalize()
+	intent := SnapshotIntent{SchemaVersion: canonical.SchemaVersion, NodeID: canonical.NodeID, Generation: canonical.Generation}
+	if canonical.Gateway != nil {
+		g := canonical.Gateway
+		intent.Gateway = &GatewayIntent{NodeID: g.NodeID, PublicEndpoints: append([]string(nil), g.PublicEndpoints...), Listeners: append([]Listener(nil), g.Listeners...), Labels: cloneLabels(g.Labels), Capacity: g.Capacity, PortPool: PortPool{TCP: append([]PortRange(nil), g.PortPool.TCP...), UDP: append([]PortRange(nil), g.PortPool.UDP...)}, Transport: g.Transport, Obfuscation: ObfuscationPolicy{Mode: g.Obfuscation.Mode, KeyCiphertext: append([]byte(nil), g.Obfuscation.KeyCiphertext...), MaxPaddingBytes: g.Obfuscation.MaxPaddingBytes, HandshakeShaping: g.Obfuscation.HandshakeShaping}, Egress: cloneEgress(g.Egress)}
+	}
+	if canonical.Agent != nil {
+		a := canonical.Agent
+		intent.Agent = &AgentIntent{NodeID: a.NodeID, GatewaySelector: Selector{MatchLabels: cloneLabels(a.GatewaySelector.MatchLabels)}, Proxies: append([]ProxySpec(nil), a.Proxies...), Routes: append([]RouteRule(nil), a.Routes...), Limits: a.Limits, Egress: cloneEgress(a.Egress), Logging: a.Logging}
+		for i := range intent.Agent.Routes {
+			intent.Agent.Routes[i].CIDRs = append([]string(nil), intent.Agent.Routes[i].CIDRs...)
+			intent.Agent.Routes[i].Domains = append([]string(nil), intent.Agent.Routes[i].Domains...)
+			intent.Agent.Routes[i].GeoIP = append([]string(nil), intent.Agent.Routes[i].GeoIP...)
+		}
+	}
+	for _, service := range canonical.Services {
+		intent.Services = append(intent.Services, ServiceIntent{ID: service.ID, AgentID: service.AgentID, Protocol: service.Protocol, LocalTarget: service.LocalTarget, PublicBind: service.PublicBind, PublicPort: service.PublicPort, GatewaySelector: Selector{MatchLabels: cloneLabels(service.GatewaySelector.MatchLabels)}, Enabled: service.Enabled})
+	}
+	for _, assignment := range canonical.Assignments {
+		intent.Assignments = append(intent.Assignments, AssignmentIntent{ID: assignment.ID, GatewayID: assignment.GatewayID, AgentID: assignment.AgentID, ServiceIDs: append([]string(nil), assignment.ServiceIDs...), Bindings: append([]Binding(nil), assignment.Bindings...), Generation: assignment.Generation, State: assignment.State, PublicEndpoint: assignment.PublicEndpoint, Obfuscation: ObfuscationPolicy{Mode: assignment.Obfuscation.Mode, KeyCiphertext: append([]byte(nil), assignment.Obfuscation.KeyCiphertext...), MaxPaddingBytes: assignment.Obfuscation.MaxPaddingBytes, HandshakeShaping: assignment.Obfuscation.HandshakeShaping}})
+	}
+	return intent
+}
+
+func cloneLabels(value map[string]string) map[string]string {
+	if value == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(value))
+	for key, item := range value {
+		clone[key] = item
+	}
+	return clone
+}
+
+func cloneEgress(value EgressPolicy) EgressPolicy {
+	value.TCPPorts = append([]string(nil), value.TCPPorts...)
+	value.UDPPorts = append([]string(nil), value.UDPPorts...)
+	value.AllowCIDRs = append([]string(nil), value.AllowCIDRs...)
+	value.AllowSpecialCIDRs = append([]string(nil), value.AllowSpecialCIDRs...)
+	return value
 }
 
 type SessionSummary struct {
@@ -669,17 +797,8 @@ func (g GatewaySpec) Validate() error {
 	if g.Transport.ALPN != "" && g.Transport.ALPN != DataALPN || len(g.Transport.ALPN) > 255 || containsControl(g.Transport.ALPN) {
 		return &ApplyError{Code: "invalid_transport", Path: "gateway.transport.alpn", Message: "transport ALPN is invalid"}
 	}
-	if g.Obfuscation.Mode != "" && g.Obfuscation.Mode != "standard" && g.Obfuscation.Mode != "camouflage" {
-		return &ApplyError{Code: "invalid_obfuscation", Path: "gateway.obfuscation.mode", Message: "obfuscation mode must be standard or camouflage"}
-	}
-	if g.Obfuscation.Mode == "camouflage" && len(g.Obfuscation.KeyCiphertext) == 0 {
-		return &ApplyError{Code: "invalid_obfuscation", Path: "gateway.obfuscation.key_ciphertext", Message: "camouflage mode requires an encrypted key"}
-	}
-	if g.Obfuscation.MaxPaddingBytes < 0 || g.Obfuscation.MaxPaddingBytes > 64<<10 {
-		return &ApplyError{Code: "invalid_obfuscation", Path: "gateway.obfuscation.max_padding_bytes", Message: "obfuscation padding limit is out of range"}
-	}
-	if len(g.Obfuscation.KeyCiphertext) > 128<<10 {
-		return &ApplyError{Code: "invalid_obfuscation", Path: "gateway.obfuscation.key_ciphertext", Message: "obfuscation key ciphertext is too large"}
+	if err := g.Obfuscation.Validate("gateway.obfuscation"); err != nil {
+		return err
 	}
 	if err := g.Egress.Validate("gateway.egress"); err != nil {
 		return err
@@ -752,7 +871,7 @@ func (a AgentSpec) Validate() error {
 		if route.Destination != "direct" && route.Destination != "gateway" {
 			return &ApplyError{Code: "invalid_route", Path: fmt.Sprintf("agent.routes[%d].destination", i), Message: "route destination must be direct or gateway"}
 		}
-		if len(route.CIDRs) > 1024 || len(route.Domains) > 1024 {
+		if len(route.CIDRs) > 1024 || len(route.Domains) > 1024 || len(route.GeoIP) > 256 {
 			return &ApplyError{Code: "invalid_route", Path: fmt.Sprintf("agent.routes[%d]", i), Message: "route contains too many match entries"}
 		}
 		for _, cidr := range route.CIDRs {
@@ -763,6 +882,15 @@ func (a AgentSpec) Validate() error {
 		for _, domainName := range route.Domains {
 			if strings.TrimSpace(domainName) == "" || strings.TrimSpace(domainName) != domainName || len(domainName) > 253 || containsControl(domainName) || strings.ContainsAny(domainName, " \t") {
 				return &ApplyError{Code: "invalid_route", Path: fmt.Sprintf("agent.routes[%d].domains", i), Message: "route domain is invalid"}
+			}
+		}
+		for _, country := range route.GeoIP {
+			country = strings.TrimSpace(country)
+			if country != strings.ToLower(country) || country == "" || len(country) > 16 || country != strings.TrimSpace(country) || containsControl(country) {
+				return &ApplyError{Code: "invalid_route", Path: fmt.Sprintf("agent.routes[%d].geoip", i), Message: "route GeoIP code is invalid"}
+			}
+			if country != "private" && (len(country) != 2 || country[0] < 'a' || country[0] > 'z' || country[1] < 'a' || country[1] > 'z') {
+				return &ApplyError{Code: "invalid_route", Path: fmt.Sprintf("agent.routes[%d].geoip", i), Message: "route GeoIP code must be private or a two-letter ISO code"}
 			}
 		}
 	}
@@ -846,6 +974,9 @@ func (a Assignment) Validate() error {
 		if err := validateEndpoint(a.PublicEndpoint); err != nil {
 			return &ApplyError{Code: "invalid_endpoint", Path: "assignment.public_endpoint", Message: err.Error()}
 		}
+	}
+	if err := a.Obfuscation.Validate("assignment.obfuscation"); err != nil {
+		return err
 	}
 	if len(a.ServiceIDs) > maxAssignmentServices || len(a.Bindings) > maxAssignmentBindings {
 		return &ApplyError{Code: "assignment_too_large", Message: "assignment contains too many services or bindings"}
@@ -1006,30 +1137,11 @@ func ValidateID(value, path string) error {
 	return nil
 }
 
-// ComputeChecksum hashes a canonical copy with Checksum and repository-owned
-// metadata cleared. Resource revisions/timestamps describe the Controller's
-// storage history, not data-plane behavior; including them would advance a
-// desired generation merely because a row was rewritten during a transaction.
-// JSON is sufficient here because all remaining fields are deterministic and
-// maps are sorted by encoding/json.
+// ComputeChecksum hashes only the canonical SnapshotIntent. Repository
+// revisions/timestamps are therefore structurally unable to affect a desired
+// generation checksum.
 func (s DesiredSnapshot) ComputeChecksum() (string, error) {
-	s = s.Normalize()
-	s.Checksum = ""
-	if s.Gateway != nil {
-		s.Gateway.Revision = 0
-	}
-	if s.Agent != nil {
-		s.Agent.Revision = 0
-	}
-	for i := range s.Services {
-		s.Services[i].Revision = 0
-		s.Services[i].UpdatedAt = time.Time{}
-	}
-	for i := range s.Assignments {
-		s.Assignments[i].Revision = 0
-		s.Assignments[i].UpdatedAt = time.Time{}
-	}
-	b, err := json.Marshal(s)
+	b, err := json.Marshal(s.Intent())
 	if err != nil {
 		return "", err
 	}

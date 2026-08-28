@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"asterferry/internal/wireio"
 	"github.com/quic-go/quic-go"
 )
 
@@ -290,10 +291,10 @@ func writeControlFrame[T any](w io.Writer, encode sessionEncoder[T], value T, ma
 	}
 	var size [4]byte
 	binary.BigEndian.PutUint32(size[:], uint32(len(frame)))
-	if err := writeAll(w, size[:]); err != nil {
+	if err := wireio.WriteFull(w, size[:]); err != nil {
 		return err
 	}
-	return writeAll(w, frame)
+	return wireio.WriteFull(w, frame)
 }
 
 func readControlFrame(r io.Reader, max int) ([]byte, error) {

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	v1 "asterferry/internal/control/v1"
+	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
 )
 

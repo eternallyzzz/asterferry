@@ -14,8 +14,9 @@ Dashboard / CLI -- HTTPS REST --> Controller -- mTLS gRPC --> Gateway / Agent
 Gateway <============= AFDP/1 over QUIC =============> Agent
 ```
 
-This is a breaking generation. The current deployment does not read or migrate
-the retired YAML, bundles, Supervisor state, management API, or v6 codec.
+This is a breaking generation. The current deployment accepts only the
+Controller JSON bootstrap and AFDP/1; there is no legacy YAML, bundle,
+Supervisor, management API, or v6 codec compatibility layer.
 
 ## Quick start
 
@@ -118,6 +119,4 @@ npm --prefix web/dashboard run build
 ```
 
 Additional protocol fuzzing, integration and deployment smoke tests should be
-run before release on Linux, WSL and Windows. The old YAML examples and legacy
-commands remain in the source tree only for downstream upgrade diagnostics;
-they are not a supported configuration or protocol surface for new nodes.
+run before release on Linux, WSL and Windows.

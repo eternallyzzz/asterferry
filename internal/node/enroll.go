@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"asterferry/internal/atomicfile"
-	"asterferry/internal/control"
-	v1 "asterferry/internal/control/v1"
+	controlwire "asterferry/internal/controlwire"
+	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -145,7 +145,7 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 			serverName = strings.Trim(host, "[]")
 		}
 	}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName, InsecureSkipVerify: options.InsecureSkipVerify, NextProtos: []string{"h2", control.ControlALPN}} // #nosec G402 -- explicit bootstrap opt-in
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName, InsecureSkipVerify: options.InsecureSkipVerify, NextProtos: []string{"h2", controlwire.ControlALPN}} // #nosec G402 -- explicit bootstrap opt-in
 	if len(caPEM) > 0 {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
@@ -315,7 +315,7 @@ func Dial(ctx context.Context, bootstrap Bootstrap) (*grpc.ClientConn, error) {
 			serverName = host
 		}
 	}
-	config := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName, RootCAs: pool, Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", control.ControlALPN}}
+	config := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName, RootCAs: pool, Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", controlwire.ControlALPN}}
 	return grpc.DialContext(ctx, bootstrap.ControllerAddress, grpc.WithTransportCredentials(credentials.NewTLS(config)), grpc.WithBlock())
 }
 

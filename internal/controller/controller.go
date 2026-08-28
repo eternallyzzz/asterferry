@@ -25,7 +25,7 @@ type Controller struct {
 	closeErr        error
 }
 
-func New(ctx context.Context, config Config) (*Controller, error) {
+func New(config Config) (*Controller, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -38,7 +38,6 @@ func New(ctx context.Context, config Config) (*Controller, error) {
 		store.Close()
 		return nil, err
 	}
-	_ = ctx
 	return &Controller{Config: config, Store: store, HTTP: httpServer}, nil
 }
 

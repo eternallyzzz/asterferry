@@ -1,30 +1,26 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
-import { nextTick } from "vue";
 import App from "./App.vue";
 import router from "./router";
 import { useSession } from "./session";
 
 describe("App authentication gate", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     useSession().lock();
   });
 
-  it("shows the token gate before a Viewer token is unlocked", () => {
+  it("shows the Controller login before a session is established", () => {
     useSession().lock();
     const wrapper = mount(App, { global: { plugins: [router] } });
-
     expect(wrapper.find(".auth-shell").exists()).toBe(true);
-    expect(wrapper.find(".app-shell").exists()).toBe(false);
+    expect(wrapper.find(".controller-shell").exists()).toBe(false);
   });
 
-  it("keeps a Viewer authentication failure visible after locking", async () => {
+  it("renders the Controller shell for an authenticated user", () => {
     const session = useSession();
+    session.controllerUser.value = { id: "u1", username: "admin", role: "admin", enabled: true, revision: 1 };
     const wrapper = mount(App, { global: { plugins: [router] } });
-
-    session.invalidateViewer();
-    await nextTick();
-
-    expect(wrapper.find(".auth-error").text()).toContain("Viewer token 已失效");
+    expect(wrapper.find(".controller-shell").exists()).toBe(true);
   });
 });

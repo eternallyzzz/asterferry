@@ -1,12 +1,13 @@
-// Package atomicfile contains the shared file-write primitives used by
-// configuration and bundle generation code.
+// Package atomicfile contains the shared file-write primitives used by the
+// Controller and node bootstrap/cache code.
 package atomicfile
 
 import (
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
+
+	"asterferry/internal/wireio"
 )
 
 const tempPrefix = ".asterferry-atomic-*"
@@ -44,7 +45,7 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := writeAll(tmp, data); err != nil {
+	if err := wireio.WriteFull(tmp, data); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -69,18 +70,4 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 
 func ensureParent(path string) error {
 	return os.MkdirAll(filepath.Dir(path), 0o700)
-}
-
-func writeAll(file *os.File, data []byte) error {
-	for len(data) > 0 {
-		written, err := file.Write(data)
-		if err != nil {
-			return err
-		}
-		if written == 0 {
-			return io.ErrShortWrite
-		}
-		data = data[written:]
-	}
-	return nil
 }

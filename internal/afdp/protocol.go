@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	v1 "asterferry/internal/data/v1"
+	v1 "asterferry/internal/afdp/v1"
 	"asterferry/internal/domain"
 	"google.golang.org/protobuf/proto"
 )
@@ -113,7 +113,17 @@ func AuthorizeOpen(open OpenMetadata, assignment AssignmentView) error {
 }
 
 func EncodeOpenValidation(value OpenMetadata) error {
-	if value.Protocol != "tcp" && value.Protocol != "udp" || (!value.Egress && !validWireID(value.ServiceID, maxServiceIDBytes)) || (value.Egress && value.ServiceID != "") || len(value.Target) == 0 || len(value.Target) > maxTargetBytes || strings.ContainsAny(value.Target, "\x00\r\n") {
+	if value.Protocol != "tcp" && value.Protocol != "udp" {
+		return ErrMalformedFrame
+	}
+	if value.Egress {
+		if value.ServiceID != "" {
+			return ErrMalformedFrame
+		}
+	} else if !validWireID(value.ServiceID, maxServiceIDBytes) {
+		return ErrMalformedFrame
+	}
+	if len(value.Target) == 0 || len(value.Target) > maxTargetBytes || strings.ContainsAny(value.Target, "\x00\r\n") {
 		return ErrMalformedFrame
 	}
 	host, portText, err := net.SplitHostPort(value.Target)
@@ -135,19 +145,7 @@ func EncodeOpenValidation(value OpenMetadata) error {
 }
 
 func validWireID(value string, max int) bool {
-	if value == "" || len(value) > max {
-		return false
-	}
-	for i, r := range value {
-		if i == 0 && (r == '-' || r == '_' || r == '.') {
-			return false
-		}
-		if !(r == '-' || r == '_' || r == '.' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
-			return false
-		}
-	}
-	last := value[len(value)-1]
-	if last == '-' || last == '_' || last == '.' {
+	if value == "" || len(value) > max || domain.ValidateID(value, "wire_id") != nil {
 		return false
 	}
 	return true

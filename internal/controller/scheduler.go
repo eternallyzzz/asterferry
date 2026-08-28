@@ -438,7 +438,7 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 		if request.Existing != nil && request.Existing.GatewayID == candidate.Node.ID && request.Existing.AgentID == request.Agent.ID {
 			assignmentID = request.Existing.ID
 		}
-		return domain.Assignment{ID: assignmentID, GatewayID: candidate.Node.ID, AgentID: request.Agent.ID, ServiceIDs: serviceIDs, Bindings: serviceBindings, Generation: generation, State: domain.AssignmentPending, PublicEndpoint: endpoint, UpdatedAt: time.Now().UTC()}, nil
+		return domain.Assignment{ID: assignmentID, GatewayID: candidate.Node.ID, AgentID: request.Agent.ID, ServiceIDs: serviceIDs, Bindings: serviceBindings, Generation: generation, State: domain.AssignmentPending, PublicEndpoint: endpoint, Obfuscation: candidate.Spec.Obfuscation, UpdatedAt: time.Now().UTC()}, nil
 	}
 	if explicitConflict != nil {
 		return domain.Assignment{}, explicitConflict

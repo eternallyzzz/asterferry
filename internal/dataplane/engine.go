@@ -54,8 +54,8 @@ type Engine struct {
 }
 
 // OpenLease is a generation-scoped admission reservation.  Data-plane
-// goroutines should prefer this over the legacy AuthorizeOpen/ReleaseOpen
-// pair when their cleanup can outlive a snapshot swap.
+// goroutines should prefer this over an unscoped authorize/release pair when
+// their cleanup can outlive a snapshot swap.
 type OpenLease struct {
 	engine       *Engine
 	assignmentID string
@@ -605,8 +605,4 @@ func cloneEgressPolicy(value domain.EgressPolicy) domain.EgressPolicy {
 	value.AllowCIDRs = append([]string(nil), value.AllowCIDRs...)
 	value.AllowSpecialCIDRs = append([]string(nil), value.AllowSpecialCIDRs...)
 	return value
-}
-
-func (e *Engine) activeSessionCount() int {
-	return int(e.sessions.Load())
 }

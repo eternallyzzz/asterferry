@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -100,6 +101,37 @@ func Listen(addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.List
 	return quic.ListenAddr(addr, tlsConfig, NewQUICConfig(options))
 }
 
+// ListenWithObfuscation binds one UDP socket and gives quic-go the AFDP
+// packet wrapper. The wrapper is deliberately constructed before the QUIC
+// listener so malformed or unauthenticated packets are discarded below the
+// session layer.
+func ListenWithObfuscation(addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Listener, error) {
+	if tlsConfig == nil {
+		return nil, errors.New("data-plane TLS config is required")
+	}
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve data-plane address: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return nil, err
+	}
+	packetConn, err := NewObfuscatingPacketConn(conn, obfuscation)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	tlsConfig = tlsConfig.Clone()
+	tlsConfig.NextProtos = []string{ALPN}
+	listener, err := quic.Listen(packetConn, tlsConfig, NewQUICConfig(options))
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, err
+	}
+	return listener, nil
+}
+
 func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.Conn, error) {
 	if tlsConfig == nil {
 		return nil, errors.New("data-plane TLS config is required")
@@ -110,6 +142,39 @@ func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, options QUICO
 	tlsConfig = tlsConfig.Clone()
 	tlsConfig.NextProtos = []string{ALPN}
 	return quic.DialAddr(ctx, addr, tlsConfig, NewQUICConfig(options))
+}
+
+// DialWithObfuscation is the client counterpart to ListenWithObfuscation. The
+// returned QUIC connection owns the packet wrapper's lifetime; callers should
+// close the connection and then the returned PacketConn when the session ends.
+func DialWithObfuscation(ctx context.Context, addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Conn, net.PacketConn, error) {
+	if tlsConfig == nil {
+		return nil, nil, errors.New("data-plane TLS config is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	remote, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve data-plane address: %w", err)
+	}
+	local, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	packetConn, err := NewObfuscatingPacketConn(local, obfuscation)
+	if err != nil {
+		_ = local.Close()
+		return nil, nil, err
+	}
+	tlsConfig = tlsConfig.Clone()
+	tlsConfig.NextProtos = []string{ALPN}
+	connection, err := quic.Dial(ctx, packetConn, remote, tlsConfig, NewQUICConfig(options))
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, nil, err
+	}
+	return connection, packetConn, nil
 }
 
 func readCAPool(path string) (*x509.CertPool, error) {

@@ -7,7 +7,6 @@ import { useSession } from "./session";
 const session = useSession();
 const controllerUser = session.controllerUser;
 const controllerError = session.controllerError;
-const viewerError = session.viewerError;
 const username = ref("");
 const password = ref("");
 const submitting = ref(false);
@@ -55,7 +54,7 @@ async function logout() {
         <form class="auth-form" @submit.prevent="submit">
           <label>用户名<input v-model="username" name="username" autocomplete="username" required /></label>
           <label>密码<input v-model="password" name="password" type="password" autocomplete="current-password" required /></label>
-          <p v-if="controllerError || viewerError" class="auth-error">{{ controllerError || viewerError }}</p>
+          <p v-if="controllerError" class="auth-error">{{ controllerError }}</p>
           <button class="primary-button" type="submit" :disabled="submitting">{{ submitting ? "登录中…" : "登录" }}</button>
         </form>
         <button class="theme-toggle" type="button" @click="theme = theme === 'dark' ? 'light' : 'dark'">切换{{ theme === 'dark' ? "浅色" : "深色" }}主题</button>

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "1.0.0",
     [string]$OutputDirectory = "tmp/release-check",
     [switch]$SkipDocker
 )
@@ -78,12 +78,15 @@ if (Test-Path -LiteralPath $output) {
 $null = New-Item -ItemType Directory -Force -Path $output
 Remove-FrontendScratch
 
-$chartPath = Join-Path $root "deploy/helm/asterferry/Chart.yaml"
-$chartText = Get-Content -Raw -LiteralPath $chartPath
-$chartVersion = [regex]::Match($chartText, '(?m)^version:\s*([^\s]+)').Groups[1].Value
-$appVersion = [regex]::Match($chartText, '(?m)^appVersion:\s*["'']?([^"''\s]+)').Groups[1].Value
-if ($chartVersion -ne $Version -or $appVersion -ne $Version) {
-    throw "Chart metadata must match $Version; got version=$chartVersion appVersion=$appVersion"
+$chartPaths = @("deploy/helm/asterferry-controller", "deploy/helm/asterferry-node")
+foreach ($chart in $chartPaths) {
+    $chartPath = Join-Path $root "$chart/Chart.yaml"
+    $chartText = Get-Content -Raw -LiteralPath $chartPath
+    $chartVersion = [regex]::Match($chartText, '(?m)^version:\s*([^\s]+)').Groups[1].Value
+    $appVersion = [regex]::Match($chartText, '(?m)^appVersion:\s*["'']?([^"''\s]+)').Groups[1].Value
+    if ($chartVersion -ne $Version -or $appVersion -ne $Version) {
+        throw "$chart metadata must match $Version; got version=$chartVersion appVersion=$appVersion"
+    }
 }
 
 Invoke-Checked "Go module tidy check" "go" @("mod", "tidy", "-diff")
@@ -104,23 +107,26 @@ $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferr
 $binaryPath = Join-Path $output "asterferry.exe"
 Invoke-Checked "Windows amd64 binary" "go" @("build", "-trimpath", "-ldflags=$ldflags", "-o", $binaryPath, "./cmd/asterferry")
 $versionOutput = (& $binaryPath version | Out-String)
-if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: v6") {
-	throw "Release binary did not report version $Version and protocol v6: $versionOutput"
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: AFDP/1 \+ control/1") {
+	throw "Release binary did not report version $Version and AFDP/1: $versionOutput"
 }
 
-Invoke-Checked "Helm lint gateway" "helm" @("lint", "deploy/helm/asterferry", "--set", "role=gateway")
-Invoke-Checked "Helm lint agent" "helm" @("lint", "deploy/helm/asterferry", "--set", "role=agent")
-$gatewayTemplate = (& helm template release-check deploy/helm/asterferry --set role=gateway | Out-String)
+Invoke-Checked "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
+Invoke-Checked "Helm lint Gateway node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=gateway")
+Invoke-Checked "Helm lint Agent node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=agent")
+$gatewayTemplate = (& helm template release-check deploy/helm/asterferry-node --set role=gateway | Out-String)
 $expectedImage = "ghcr.io/eternallyzzz/asterferry:$Version"
 if ($LASTEXITCODE -ne 0 -or $gatewayTemplate -notmatch [regex]::Escape($expectedImage)) {
     throw "Default Helm image reference did not resolve to the release version"
 }
 $digest = "sha256:" + ("a" * 64)
-$digestTemplate = (& helm template release-check deploy/helm/asterferry --set role=gateway --set image.digest=$digest | Out-String)
+$digestTemplate = (& helm template release-check deploy/helm/asterferry-node --set role=gateway --set image.digest=$digest | Out-String)
 if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch "ghcr\.io/eternallyzzz/asterferry@$digest") {
     throw "Helm digest image override did not render correctly"
 }
-Invoke-Checked "Helm package" "helm" @("package", "deploy/helm/asterferry", "--destination", $output, "--version", $Version, "--app-version", $Version)
+foreach ($chart in $chartPaths) {
+    Invoke-Checked "Helm package $chart" "helm" @("package", $chart, "--destination", $output, "--version", $Version, "--app-version", $Version)
+}
 
 if (-not $SkipDocker) {
     $image = "asterferry:release-check-$Version"
@@ -137,10 +143,10 @@ if (-not $SkipDocker) {
 
 $report = [ordered]@{
     version = $Version
-	protocol = 6
+    protocol = "AFDP/1 + control/1"
     windows_binary = $binaryPath
-    chart = Join-Path $output "asterferry-$Version.tgz"
+    charts = @("asterferry-controller-$Version.tgz", "asterferry-node-$Version.tgz")
     docker_checked = (-not $SkipDocker)
 }
 $report | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $output "report.json")
-Write-Host "Release preflight passed for v$Version"
+Write-Host "Release preflight passed for $Version (AFDP/1 + control/1)"

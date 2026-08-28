@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -14,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"asterferry/internal/config"
 	"asterferry/internal/controller"
 	"asterferry/internal/domain"
 	"asterferry/internal/node"
@@ -84,7 +82,7 @@ func newControllerRunCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			instance, err := controller.New(cmd.Context(), config)
+			instance, err := controller.New(config)
 			if err != nil {
 				return err
 			}
@@ -225,28 +223,38 @@ func newNodeEnrollCommand(role string) *cobra.Command {
 	return cmd
 }
 
-func newGatewayRunCommand(path *string) *cobra.Command {
+func newGatewayCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "gateway", Short: "enroll or run a Gateway data-plane node", Args: cobra.NoArgs}
+	cmd.AddCommand(newNodeEnrollCommand(domain.RoleGateway), newGatewayRunCommand())
+	return cmd
+}
+
+func newAgentCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "agent", Short: "enroll or run an Agent data-plane node", Args: cobra.NoArgs}
+	cmd.AddCommand(newNodeEnrollCommand(domain.RoleAgent), newAgentRunCommand())
+	return cmd
+}
+
+func newGatewayRunCommand() *cobra.Command {
 	var bootstrapPath string
 	cmd := &cobra.Command{Use: "run", Short: "run a Gateway data-plane node", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if bootstrapPath != "" {
-			return runNodeBootstrap(cmd.Context(), bootstrapPath, domain.RoleGateway, cmd.ErrOrStderr())
+		if strings.TrimSpace(bootstrapPath) == "" {
+			return &codedError{code: 2, err: errors.New("--bootstrap is required; business configuration is owned by the Controller")}
 		}
-		return runRole(cmd.Context(), *path, config.RoleGateway, cmd.ErrOrStderr())
+		return runNodeBootstrap(cmd.Context(), bootstrapPath, domain.RoleGateway, cmd.ErrOrStderr())
 	}}
-	cmd.Flags().StringVarP(path, "config", "c", "config.yaml", "legacy runtime config (use node bootstrap for new deployments)")
 	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
 	return cmd
 }
 
-func newAgentRunCommand(path *string) *cobra.Command {
+func newAgentRunCommand() *cobra.Command {
 	var bootstrapPath string
 	cmd := &cobra.Command{Use: "run", Short: "run an Agent data-plane node", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if bootstrapPath != "" {
-			return runNodeBootstrap(cmd.Context(), bootstrapPath, domain.RoleAgent, cmd.ErrOrStderr())
+		if strings.TrimSpace(bootstrapPath) == "" {
+			return &codedError{code: 2, err: errors.New("--bootstrap is required; business configuration is owned by the Controller")}
 		}
-		return runRole(cmd.Context(), *path, config.RoleAgent, cmd.ErrOrStderr())
+		return runNodeBootstrap(cmd.Context(), bootstrapPath, domain.RoleAgent, cmd.ErrOrStderr())
 	}}
-	cmd.Flags().StringVarP(path, "config", "c", "config.yaml", "legacy runtime config (use node bootstrap for new deployments)")
 	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
 	return cmd
 }
@@ -272,9 +280,4 @@ func generateInitialPassword() (string, error) {
 		return "", err
 	}
 	return "Af-" + base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-func readPassword(in io.Reader) (string, error) {
-	line, err := bufio.NewReader(in).ReadString('\n')
-	return strings.TrimSpace(line), err
 }

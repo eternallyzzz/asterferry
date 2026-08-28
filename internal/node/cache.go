@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"asterferry/internal/atomicfile"
-	"asterferry/internal/control"
-	v1 "asterferry/internal/control/v1"
+	controlwire "asterferry/internal/controlwire"
+	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
 )
 
@@ -233,18 +233,18 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 	if snapshot.Checksum == "" {
 		canonical, err := snapshot.WithChecksum()
 		if err != nil {
-			return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, toApplyError(err))
+			return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, toApplyError(err))
 		}
 		snapshot = canonical
 	}
 	if err := snapshot.Validate(); err != nil {
 		applyErr := toApplyError(err)
-		return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
+		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
 	}
 	r.mu.Lock()
 	if r.state.NodeID != "" && snapshot.NodeID != r.state.NodeID {
 		r.mu.Unlock()
-		return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, &domain.ApplyError{Code: "node_mismatch", Path: "node_id", Message: "snapshot node id does not match reconciler"})
+		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, &domain.ApplyError{Code: "node_mismatch", Path: "node_id", Message: "snapshot node id does not match reconciler"})
 	}
 	if snapshot.Generation == 0 || snapshot.Generation < r.last || (snapshot.Generation == r.last && strings.EqualFold(snapshot.Checksum, r.lastChecksum)) {
 		generation := snapshot.Generation
@@ -252,7 +252,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 			generation = r.last
 		}
 		r.mu.Unlock()
-		return control.ApplyResult(generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, &domain.ApplyError{Code: "stale_generation", Path: "generation", Message: ErrStaleSnapshot.Error(), Retryable: false})
+		return controlwire.ApplyResult(generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, &domain.ApplyError{Code: "stale_generation", Path: "generation", Message: ErrStaleSnapshot.Error(), Retryable: false})
 	}
 	r.mu.Unlock()
 	var previous *domain.DesiredSnapshot
@@ -271,7 +271,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 			r.state.Degraded = true
 			r.state.LastError = applyErr
 			r.mu.Unlock()
-			return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
+			return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
 		}
 		previous = &old
 	}
@@ -288,7 +288,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 		r.state.Degraded = true
 		r.state.LastError = applyErr
 		r.mu.Unlock()
-		return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
+		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
 	}
 	if err := r.cache.Write(snapshot); err != nil {
 		if previous != nil {
@@ -309,7 +309,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 		r.state.Degraded = true
 		r.state.LastError = applyErr
 		r.mu.Unlock()
-		return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
+		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
 	}
 	r.mu.Lock()
 	r.last = snapshot.Generation
@@ -317,7 +317,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 	r.state = domain.ObservedState{SchemaVersion: domain.SchemaVersion, NodeID: snapshot.NodeID, AppliedGeneration: snapshot.Generation, Healthy: true, ObservedAt: time.Now().UTC()}
 	r.disconnectedAt = time.Time{}
 	r.mu.Unlock()
-	return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_APPLIED, nil)
+	return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_APPLIED, nil)
 }
 
 // Resync reapplies the durable last-known-good snapshot without advancing its
@@ -333,17 +333,17 @@ func (r *Reconciler) Resync(ctx context.Context) *v1.ApplyResult {
 	defer r.applyMu.Unlock()
 	snapshot, err := r.cache.Read()
 	if err != nil {
-		return control.ApplyResult(r.AppliedGeneration(), "", v1.ApplyStatus_APPLY_STATUS_REJECTED, &domain.ApplyError{Code: "cache_read_failed", Message: err.Error(), Retryable: true})
+		return controlwire.ApplyResult(r.AppliedGeneration(), "", v1.ApplyStatus_APPLY_STATUS_REJECTED, &domain.ApplyError{Code: "cache_read_failed", Message: err.Error(), Retryable: true})
 	}
 	if err := snapshot.Validate(); err != nil {
-		return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, toApplyError(err))
+		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, toApplyError(err))
 	}
 	if err := r.apply(ctx, snapshot, &snapshot); err != nil {
 		applyErr := toApplyFailure(err)
 		if applyErr.Code == "apply_failed" {
 			applyErr.Code = "resync_failed"
 		}
-		return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
+		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
 	}
 	r.mu.Lock()
 	r.state.Healthy = true
@@ -351,7 +351,7 @@ func (r *Reconciler) Resync(ctx context.Context) *v1.ApplyResult {
 	r.state.LastError = nil
 	r.state.ObservedAt = time.Now().UTC()
 	r.mu.Unlock()
-	return control.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_APPLIED, nil)
+	return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_APPLIED, nil)
 }
 
 // MarkConnected records a successful control-stream handshake and clears the

@@ -17,12 +17,10 @@ try {
     $env:GOOS = "linux"
     $env:GOARCH = "amd64"
     $env:CGO_ENABLED = "0"
-    & go test -c -o (Join-Path $binaryDir "transport.test") ./internal/transport
-    if ($LASTEXITCODE -ne 0) { throw "failed to build transport benchmark binary" }
-    & go test -c -o (Join-Path $binaryDir "relay.test") ./internal/relay
-    if ($LASTEXITCODE -ne 0) { throw "failed to build relay benchmark binary" }
-    & go test -c -o (Join-Path $binaryDir "integration.test") ./internal/integration
-    if ($LASTEXITCODE -ne 0) { throw "failed to build integration benchmark binary" }
+    & go test -c -o (Join-Path $binaryDir "afdp.test") ./internal/afdp
+    if ($LASTEXITCODE -ne 0) { throw "failed to build AFDP benchmark binary" }
+    & go test -c -o (Join-Path $binaryDir "dataplane.test") ./internal/dataplane
+    if ($LASTEXITCODE -ne 0) { throw "failed to build data-plane benchmark binary" }
 } finally {
     if ($null -eq $oldGOOS) { Remove-Item Env:GOOS -ErrorAction SilentlyContinue } else { $env:GOOS = $oldGOOS }
     if ($null -eq $oldGOARCH) { Remove-Item Env:GOARCH -ErrorAction SilentlyContinue } else { $env:GOARCH = $oldGOARCH }
@@ -34,8 +32,8 @@ $wslBinaryDir = (& wsl.exe -d $distro -- wslpath -a ($binaryDir -replace '\\', '
 $wslScript = "$wslRoot/scripts/bench-wsl.sh"
 $benchTime = if ($env:ASTERFERRY_BENCHTIME) { $env:ASTERFERRY_BENCHTIME } else { "30s" }
 $benchCount = if ($env:ASTERFERRY_BENCHCOUNT) { $env:ASTERFERRY_BENCHCOUNT } else { "5" }
-$fullRegex = "Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)"
-$smokeRegex = "Benchmark(ConnRoundTrip|AsterFerryProxyLatency)|AsterFerryProxy/mode=(standard|camouflage)/profile=balanced/payload=65536/streams=8"
+$fullRegex = "Benchmark(.*)"
+$smokeRegex = "Benchmark(.*)"
 $benchRegex = if ($env:ASTERFERRY_BENCHREGEX) { $env:ASTERFERRY_BENCHREGEX } elseif ($FullMatrix) { $fullRegex } else { $smokeRegex }
 $benchRegexB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($benchRegex))
 & wsl.exe -d $distro -- env `

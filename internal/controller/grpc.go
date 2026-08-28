@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"asterferry/internal/control"
-	v1 "asterferry/internal/control/v1"
+	controlwire "asterferry/internal/controlwire"
+	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -269,7 +269,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 				return status.Error(codes.Internal, "save heartbeat state failed")
 			}
 		case message.GetObservedState() != nil:
-			observed, decodeErr := control.ObservedFromProto(message.GetObservedState())
+			observed, decodeErr := controlwire.ObservedFromProto(message.GetObservedState())
 			if decodeErr != nil {
 				return status.Error(codes.InvalidArgument, decodeErr.Error())
 			}
@@ -559,7 +559,7 @@ func loadControlTLS(config Config) (*tls.Config, error) {
 	// no client certificate yet. The Connect RPC performs an explicit mTLS
 	// identity check after enrollment; VerifyClientCertIfGiven keeps both RPCs
 	// on one endpoint without weakening the node stream.
-	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, ClientCAs: pool, ClientAuth: tls.VerifyClientCertIfGiven, NextProtos: []string{"h2", control.ControlALPN}}, nil
+	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, ClientCAs: pool, ClientAuth: tls.VerifyClientCertIfGiven, NextProtos: []string{"h2", controlwire.ControlALPN}}, nil
 }
 
 func protoRole(role v1.NodeRole) (string, error) {

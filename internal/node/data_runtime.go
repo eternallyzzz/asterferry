@@ -507,7 +507,7 @@ func (d *DataPlaneRuntime) buildGateway(state *dataGeneration, spec domain.Gatew
 		d.tlsMu.RLock()
 		serverTLS := d.serverTLS
 		d.tlsMu.RUnlock()
-		listener, err := afdp.Listen(address, serverTLS, quicOptions)
+		listener, err := afdp.ListenWithObfuscation(address, serverTLS, quicOptions, afdpObfuscationOptions(spec.Obfuscation))
 		if err != nil {
 			return fmt.Errorf("listen AFDP endpoint %s: %w", address, err)
 		}
@@ -796,7 +796,7 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 		d.tlsMu.RLock()
 		clientTLS := d.clientTLS
 		d.tlsMu.RUnlock()
-		connection, err := afdp.Dial(state.ctx, assignment.PublicEndpoint, clientTLS, d.quicOptions)
+		connection, packetConn, err := afdp.DialWithObfuscation(state.ctx, assignment.PublicEndpoint, clientTLS, d.quicOptions, afdpObfuscationOptions(assignment.Obfuscation))
 		if err == nil {
 			session, sessionErr := afdp.ClientSession(state.ctx, connection, afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID, Capabilities: []string{"tcp", "udp", "http", "socks5"}}, options)
 			if sessionErr == nil {
@@ -814,6 +814,7 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 				_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP handshake rejected")
 			}
 			_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF00), "AFDP connection closed")
+			_ = packetConn.Close()
 		}
 		wait := backoff
 		if backoff < 30*time.Second {
@@ -1109,41 +1110,25 @@ func (d *DataPlaneRuntime) dialProxyTarget(state *dataGeneration, ctx context.Co
 }
 
 func selectAgentRoute(spec domain.AgentSpec, target string) string {
-	host, _, err := net.SplitHostPort(target)
-	if err != nil {
-		return "direct"
+	return dataplane.SelectRoute(spec, target)
+}
+
+func afdpObfuscationOptions(policy domain.ObfuscationPolicy) afdp.ObfuscationOptions {
+	mode := policy.Mode
+	if mode == "" {
+		mode = afdp.ObfuscationStandard
 	}
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	ip := net.ParseIP(host)
-	for _, rule := range spec.Routes {
-		if !rule.Enabled {
-			continue
-		}
-		matched := false
-		if ip != nil {
-			for _, value := range rule.CIDRs {
-				_, prefix, parseErr := net.ParseCIDR(strings.TrimSpace(value))
-				if parseErr == nil && prefix.Contains(ip) {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			for _, value := range rule.Domains {
-				domainName := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
-				domainName = strings.TrimPrefix(domainName, "*.")
-				if host == domainName || strings.HasSuffix(host, "."+domainName) {
-					matched = true
-					break
-				}
-			}
-		}
-		if matched {
-			return strings.ToLower(rule.Destination)
-		}
+	// KeyCiphertext is opaque to nodes. The Controller encrypts secret material
+	// at rest; AFDP derives a fixed packet key from the opaque snapshot bytes so
+	// both participants can authenticate packets without a second key channel.
+	return afdp.ObfuscationOptions{
+		Mode:               mode,
+		CurrentKey:         append([]byte(nil), policy.KeyCiphertext...),
+		HandshakeShaping:   policy.HandshakeShaping,
+		MinFragmentBytes:   512,
+		MaxFragmentBytes:   1200,
+		MaxWirePacketBytes: 1280,
 	}
-	return "direct"
 }
 
 func (d *DataPlaneRuntime) quicOptionsForGateway(spec domain.GatewaySpec) afdp.QUICOptions {

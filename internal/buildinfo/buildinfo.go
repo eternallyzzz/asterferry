@@ -6,7 +6,7 @@ package buildinfo
 import (
 	"runtime"
 
-	"asterferry/internal/protocol"
+	"asterferry/internal/wireversion"
 )
 
 var (
@@ -19,7 +19,7 @@ type Info struct {
 	Version      string
 	Commit       string
 	BuildDate    string
-	Protocol     int
+	Protocol     string
 	GoVersion    string
 	OS           string
 	Architecture string
@@ -30,7 +30,7 @@ func Current() Info {
 		Version:      valueOr(Version, "dev"),
 		Commit:       valueOr(Commit, "unknown"),
 		BuildDate:    valueOr(BuildDate, "unknown"),
-		Protocol:     protocol.Version,
+		Protocol:     wireversion.Display,
 		GoVersion:    runtime.Version(),
 		OS:           runtime.GOOS,
 		Architecture: runtime.GOARCH,

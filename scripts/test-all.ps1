@@ -218,13 +218,12 @@ try {
     Invoke-Logged "Windows staticcheck" "staticcheck" @("./...")
     Invoke-Logged "Windows vulnerability check" "govulncheck" @("./...")
     Invoke-Logged "Windows full tests" "go" @("test", "-count=1", "./...")
-    $uxDir = Join-Path $outputDir "ux-bundle"
-    if (Test-Path -LiteralPath $uxDir) {
-        Remove-Item -LiteralPath $uxDir -Recurse -Force
+    $controllerSmoke = Join-Path $outputDir "controller-smoke"
+    if (Test-Path -LiteralPath $controllerSmoke) {
+        Remove-Item -LiteralPath $controllerSmoke -Recurse -Force
     }
-    Invoke-Logged "CLI init smoke test" "go" @("run", "./cmd/asterferry", "init", "--dir", $uxDir, "--profile", "dev")
-    Invoke-Logged "CLI gateway doctor smoke test" "go" @("run", "./cmd/asterferry", "doctor", "--config", (Join-Path $uxDir "config/gateway.yaml"), "--skip-ports")
-    Invoke-Logged "CLI agent doctor smoke test" "go" @("run", "./cmd/asterferry", "doctor", "--config", (Join-Path $uxDir "config/agent.yaml"), "--skip-ports")
+    Invoke-Logged "CLI Controller init smoke test" "go" @("run", "./cmd/asterferry", "controller", "init", "--dir", $controllerSmoke, "--username", "smoke-admin", "--password", "smoke-password")
+    Invoke-Logged "CLI AFDP/control version smoke test" "go" @("run", "./cmd/asterferry", "version")
     if ($SkipRace) {
         Write-Host "== Windows race tests skipped by -SkipRace =="
     } else {
@@ -296,10 +295,12 @@ try {
         }
     }
 
-    Invoke-Logged "Helm lint gateway" "helm" @("lint", "deploy/helm/asterferry", "--set", "role=gateway")
-    Invoke-Logged "Helm lint agent" "helm" @("lint", "deploy/helm/asterferry", "--set", "role=agent")
-    Invoke-LoggedToFile "Helm template gateway" "helm" @("template", "asterferry-gateway", "deploy/helm/asterferry", "--set", "role=gateway") (Join-Path $outputDir "gateway.yaml")
-    Invoke-LoggedToFile "Helm template agent" "helm" @("template", "asterferry-agent", "deploy/helm/asterferry", "--set", "role=agent") (Join-Path $outputDir "agent.yaml")
+    Invoke-Logged "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
+    Invoke-Logged "Helm lint Gateway node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=gateway")
+    Invoke-Logged "Helm lint Agent node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=agent")
+    Invoke-LoggedToFile "Helm template Controller" "helm" @("template", "asterferry-controller", "deploy/helm/asterferry-controller") (Join-Path $outputDir "controller.yaml")
+    Invoke-LoggedToFile "Helm template Gateway node" "helm" @("template", "asterferry-gateway", "deploy/helm/asterferry-node", "--set", "role=gateway") (Join-Path $outputDir "gateway.yaml")
+    Invoke-LoggedToFile "Helm template Agent node" "helm" @("template", "asterferry-agent", "deploy/helm/asterferry-node", "--set", "role=agent") (Join-Path $outputDir "agent.yaml")
 
     if ($FullBench) {
         $oldDistro = $env:ASTERFERRY_WSL_DISTRO

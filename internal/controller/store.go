@@ -23,9 +23,16 @@ import (
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 1
+	currentDBSchema     = 2
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v2"
 	maxSnapshotDocument = 16 << 20
 )
+
+// ErrIncompatibleDatabase is returned deliberately instead of attempting an
+// in-place migration. Controller state is a new generation: an operator must
+// create a fresh database with `controller init` (or restore a backup made by
+// this generation) when the marker is absent or different.
+var ErrIncompatibleDatabase = errors.New("controller database belongs to an incompatible generation")
 
 type Store struct {
 	db         *sql.DB
@@ -528,9 +535,22 @@ func (s *Store) configure() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	compatible, empty, err := inspectDatabase(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if !empty && !compatible {
+		return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, dbSchemaFingerprint)
+	}
+	if compatible {
+		if err := validateRequiredTables(ctx, s.db); err != nil {
+			return fmt.Errorf("%w: %v", ErrIncompatibleDatabase, err)
+		}
+		return nil
+	}
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS users (
+		`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE users (
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
@@ -540,7 +560,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS api_tokens (
+		`CREATE TABLE api_tokens (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 			token_hash TEXT NOT NULL UNIQUE,
@@ -549,7 +569,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			revoked_at TEXT,
 			created_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS nodes (
+		`CREATE TABLE nodes (
 			id TEXT PRIMARY KEY,
 			role TEXT NOT NULL,
 			name TEXT NOT NULL,
@@ -561,22 +581,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS gateway_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS agent_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS service_bindings (service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, protocol TEXT NOT NULL, bind TEXT NOT NULL, port INTEGER NOT NULL, PRIMARY KEY(service_id), UNIQUE(gateway_id, protocol, bind, port))`,
-		`CREATE TABLE IF NOT EXISTS assignments (id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, generation INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS assignment_acks (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, status TEXT NOT NULL, error_code TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(assignment_id, node_id))`,
-		`CREATE TABLE IF NOT EXISTS desired_snapshots (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, checksum TEXT NOT NULL, document_json BLOB NOT NULL, created_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS observed_states (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, document_json BLOB NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, resource_id TEXT NOT NULL, revision INTEGER NOT NULL, attributes_json BLOB, created_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS idempotency_keys (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, response_json BLOB NOT NULL, created_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS enrollment_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
-		`CREATE INDEX IF NOT EXISTS idx_nodes_role_enabled ON nodes(role, enabled)`,
-		`CREATE INDEX IF NOT EXISTS idx_services_agent ON services(agent_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_assignments_gateway ON assignments(gateway_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_assignment_acks_generation ON assignment_acks(assignment_id,generation)`,
-		`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at)`,
+		`CREATE TABLE gateway_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE agent_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE services (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE service_bindings (service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, protocol TEXT NOT NULL, bind TEXT NOT NULL, port INTEGER NOT NULL, PRIMARY KEY(service_id), UNIQUE(gateway_id, protocol, bind, port))`,
+		`CREATE TABLE assignments (id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, generation INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE assignment_acks (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, status TEXT NOT NULL, error_code TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(assignment_id, node_id))`,
+		`CREATE TABLE desired_snapshots (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, checksum TEXT NOT NULL, document_json BLOB NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE observed_states (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, document_json BLOB NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, resource_id TEXT NOT NULL, revision INTEGER NOT NULL, attributes_json BLOB, created_at TEXT NOT NULL)`,
+		`CREATE TABLE idempotency_keys (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, response_json BLOB NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE enrollment_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
+		`CREATE INDEX idx_nodes_role_enabled ON nodes(role, enabled)`,
+		`CREATE INDEX idx_services_agent ON services(agent_id)`,
+		`CREATE INDEX idx_assignments_gateway ON assignments(gateway_id)`,
+		`CREATE INDEX idx_assignment_acks_generation ON assignment_acks(assignment_id,generation)`,
+		`CREATE INDEX idx_audit_created ON audit_events(created_at)`,
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -588,59 +608,43 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sqlite: %w", err)
 		}
 	}
-	// The current generation is intentionally destructive for old business
-	// schemas, but adding a missing metadata column is harmless for a database
-	// initialized by an earlier controller binary and keeps startup deterministic.
-	if err := ensureColumn(ctx, tx, "users", "revision", "INTEGER NOT NULL DEFAULT 1"); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	var stored string
-	if err := tx.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&stored); err == nil {
-		version, parseErr := strconv.Atoi(stored)
-		if parseErr != nil || version > currentDBSchema {
-			_ = tx.Rollback()
-			return fmt.Errorf("unsupported database schema version %q", stored)
-		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		_ = tx.Rollback()
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, currentDBSchema); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?), ('fingerprint', ?)`, strconv.Itoa(currentDBSchema), dbSchemaFingerprint); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 	return tx.Commit()
 }
 
-func ensureColumn(ctx context.Context, tx *sql.Tx, table, column, definition string) error {
-	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
-	if err != nil {
-		return fmt.Errorf("inspect %s schema: %w", table, err)
+// inspectDatabase distinguishes a genuinely new SQLite file from an existing
+// database. SQLite creates no user tables until the first migration, so this
+// check is safe before any CREATE statement runs.
+func inspectDatabase(ctx context.Context, db *sql.DB) (compatible, empty bool, err error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
+		return false, false, err
 	}
-	defer rows.Close()
-	var found bool
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+	if count == 0 {
+		return false, true, nil
+	}
+	var version, fingerprint string
+	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+		return false, false, nil
+	}
+	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
+		return false, false, nil
+	}
+	return version == strconv.Itoa(currentDBSchema) && fingerprint == dbSchemaFingerprint, false, nil
+}
+
+func validateRequiredTables(ctx context.Context, db *sql.DB) error {
+	for _, table := range []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
 			return err
 		}
-		if name == column {
-			found = true
-			break
+		if count != 1 {
+			return fmt.Errorf("required table %q is missing", table)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if found {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+definition); err != nil {
-		return fmt.Errorf("add %s.%s: %w", table, column, err)
 	}
 	return nil
 }

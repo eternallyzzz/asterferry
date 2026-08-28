@@ -72,24 +72,29 @@ jobs:
         shell: bash
         run: |
           ! rg -n "golang.org/x/net/quic" --glob "*.go" .
-          ! rg -n "github.com/quic-go/quic-go" --glob "*.go" internal/agent internal/gateway internal/relay
+          rg -n "github.com/quic-go/quic-go" --glob "*.go" internal/afdp internal/dataplane
+          ! rg -n "internal/(agent|gateway|relay|transport|configstore|observability)" --glob "*.go" .
       - name: Build binary
         run: go build ./cmd/asterferry
       - name: Set up Helm
         uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
       - name: Lint Helm chart
         run: |
-          helm lint deploy/helm/asterferry --set role=gateway
-          helm lint deploy/helm/asterferry --set role=agent
+          helm lint deploy/helm/asterferry-controller
+          helm lint deploy/helm/asterferry-node --set role=gateway
+          helm lint deploy/helm/asterferry-node --set role=agent
       - name: Render Gateway chart
-        run: helm template gateway deploy/helm/asterferry --set role=gateway
+        run: helm template gateway deploy/helm/asterferry-node --set role=gateway
       - name: Render Agent chart
-        run: helm template agent deploy/helm/asterferry --set role=agent
+        run: helm template agent deploy/helm/asterferry-node --set role=agent
+      - name: Render Controller chart
+        run: helm template controller deploy/helm/asterferry-controller
       - name: Package Helm chart
         shell: bash
         run: |
           mkdir -p tmp/ci-chart
-          helm package deploy/helm/asterferry --destination tmp/ci-chart
+          helm package deploy/helm/asterferry-controller --destination tmp/ci-chart
+          helm package deploy/helm/asterferry-node --destination tmp/ci-chart
 
   image:
     name: Build development image
@@ -169,12 +174,14 @@ jobs:
             exit 1
           }
           version="${GITHUB_REF_NAME#v}"
-          chart_version="$(sed -n 's/^version:[[:space:]]*//p' deploy/helm/asterferry/Chart.yaml)"
-          app_version="$(grep '^appVersion:' deploy/helm/asterferry/Chart.yaml | sed 's/^appVersion:[[:space:]]*//' | tr -d '\"')"
-          [[ "$chart_version" == "$version" && "$app_version" == "$version" ]] || {
-            echo "Chart.yaml must use version=$version and appVersion=$version" >&2
-            exit 1
-          }
+          for chart in deploy/helm/asterferry-controller deploy/helm/asterferry-node; do
+            chart_version="$(sed -n 's/^version:[[:space:]]*//p' "$chart/Chart.yaml")"
+            app_version="$(grep '^appVersion:' "$chart/Chart.yaml" | sed 's/^appVersion:[[:space:]]*//' | tr -d '\"')"
+            [[ "$chart_version" == "$version" && "$app_version" == "$version" ]] || {
+              echo "$chart/Chart.yaml must use version=$version and appVersion=$version" >&2
+              exit 1
+            }
+          done
       - name: Verify dashboard assets
         run: |
           npm --prefix web/dashboard ci
@@ -193,7 +200,8 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          helm package deploy/helm/asterferry --destination dist --version "$version" --app-version "$version"
+          helm package deploy/helm/asterferry-controller --destination dist --version "$version" --app-version "$version"
+          helm package deploy/helm/asterferry-node --destination dist --version "$version" --app-version "$version"
       - name: Generate source SBOM
         uses: anchore/sbom-action@da167eac915b4e86f08b264dbdbc867b61be6f0c # v0.20.5
         with:

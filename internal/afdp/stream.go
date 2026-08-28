@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"asterferry/internal/wireio"
 )
 
 // WriteOpen writes the one bounded metadata message that precedes a raw TCP
@@ -20,26 +22,10 @@ func WriteOpen(w io.Writer, metadata OpenMetadata, max int) error {
 	}
 	var size [4]byte
 	binary.BigEndian.PutUint32(size[:], uint32(len(frame)))
-	if err := writeAll(w, size[:]); err != nil {
+	if err := wireio.WriteFull(w, size[:]); err != nil {
 		return err
 	}
-	return writeAll(w, frame)
-}
-
-func writeAll(w io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := w.Write(data)
-		if n > 0 {
-			data = data[n:]
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
+	return wireio.WriteFull(w, frame)
 }
 
 func ReadOpen(r io.Reader, max int) (OpenMetadata, error) {

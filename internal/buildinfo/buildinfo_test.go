@@ -10,7 +10,7 @@ func TestCurrentUsesBuildMetadataAndProtocol(t *testing.T) {
 	if info.Version != "test-version" || info.Commit != "test-commit" || info.BuildDate != "2026-01-01" {
 		t.Fatalf("unexpected build info: %#v", info)
 	}
-	if info.Protocol <= 0 || info.GoVersion == "" || info.OS == "" || info.Architecture == "" {
+	if info.Protocol == "" || info.GoVersion == "" || info.OS == "" || info.Architecture == "" {
 		t.Fatalf("unexpected runtime info: %#v", info)
 	}
 }

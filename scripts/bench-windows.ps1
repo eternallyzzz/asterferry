@@ -9,8 +9,8 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 $benchTime = if ($env:ASTERFERRY_BENCHTIME) { $env:ASTERFERRY_BENCHTIME } else { "30s" }
 $count = if ($env:ASTERFERRY_BENCHCOUNT) { $env:ASTERFERRY_BENCHCOUNT } else { "5" }
-$fullRegex = "Benchmark(QUICStream|ConnRoundTrip|AsterFerryProxy)"
-$smokeRegex = "Benchmark(ConnRoundTrip|AsterFerryProxyLatency)|AsterFerryProxy/mode=(standard|camouflage)/profile=balanced/payload=65536/streams=8"
+$fullRegex = "Benchmark(.*)"
+$smokeRegex = "Benchmark(.*)"
 $benchRegex = if ($env:ASTERFERRY_BENCHREGEX) { $env:ASTERFERRY_BENCHREGEX } elseif ($FullMatrix) { $fullRegex } else { $smokeRegex }
 $outputDir = Join-Path $root "tmp/perf/windows"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
@@ -39,7 +39,7 @@ $metadata = [ordered]@{
 $metadata | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $outputDir "metadata.json")
 
 $benchFile = Join-Path $outputDir "bench.txt"
-$lines = & go test ./internal/transport ./internal/relay ./internal/integration `
+$lines = & go test ./internal/afdp ./internal/dataplane `
   -run '^$' `
   -bench $benchRegex `
   -benchmem `

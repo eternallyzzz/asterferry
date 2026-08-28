@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"asterferry/internal/control"
-	v1 "asterferry/internal/control/v1"
+	controlwire "asterferry/internal/controlwire"
+	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/dataplane"
 	"asterferry/internal/domain"
 	"google.golang.org/grpc/codes"
@@ -284,7 +284,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	// Report the cached/initial state immediately; the Controller should not
 	// have to wait for the first desired snapshot to know that this node is
 	// connected.
-	if observed, observedErr := control.ObservedToProto(state); observedErr == nil {
+	if observed, observedErr := controlwire.ObservedToProto(state); observedErr == nil {
 		if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ObservedState{ObservedState: observed}}); err != nil {
 			return err
 		}
@@ -298,7 +298,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			select {
 			case <-ticker.C:
 				observed := r.observedState()
-				_ = send(&v1.NodeMessage{Body: &v1.NodeMessage_Heartbeat{Heartbeat: control.Heartbeat(bootstrap.NodeID, observed.AppliedGeneration, observed.Healthy)}})
+				_ = send(&v1.NodeMessage{Body: &v1.NodeMessage_Heartbeat{Heartbeat: controlwire.Heartbeat(observed.AppliedGeneration, observed.Healthy)}})
 			case <-heartbeatCtx.Done():
 				return
 			}
@@ -355,22 +355,22 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			}
 		}
 		if desired := message.GetDesiredSnapshot(); desired != nil {
-			snapshot, decodeErr := control.SnapshotFromProto(desired)
+			snapshot, decodeErr := controlwire.SnapshotFromProto(desired)
 			if decodeErr != nil {
-				_ = send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: control.ApplyResult(desired.Generation, desired.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyError(decodeErr))}})
+				_ = send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: controlwire.ApplyResult(desired.Generation, desired.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyError(decodeErr))}})
 				return decodeErr
 			}
 			// ACCEPTED means the complete envelope has passed schema, metadata
 			// and checksum validation; malformed snapshots are reported only as
 			// REJECTED and never acknowledged as accepted work.
-			if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: control.ApplyResult(desired.Generation, desired.Checksum, v1.ApplyStatus_APPLY_STATUS_ACCEPTED, nil)}}); err != nil {
+			if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: controlwire.ApplyResult(desired.Generation, desired.Checksum, v1.ApplyStatus_APPLY_STATUS_ACCEPTED, nil)}}); err != nil {
 				return err
 			}
 			result := r.reconciler.Apply(ctx, snapshot)
 			if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: result}}); err != nil {
 				return err
 			}
-			observed, _ := control.ObservedToProto(r.observedState())
+			observed, _ := controlwire.ObservedToProto(r.observedState())
 			if observed != nil {
 				if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ObservedState{ObservedState: observed}}); err != nil {
 					return err
