@@ -31,7 +31,6 @@ const (
 	maxReassemblyEntries   = 128
 	maxReassemblyPerSource = 16
 	maxReassemblyBytes     = 1 << 20
-	maxObfuscationDatagram = 64 << 10
 	reassemblyTTL          = time.Second
 	randomBufferSize       = 32 << 10
 )
@@ -369,7 +368,10 @@ func (c *obfuscationPacketConn) seal(body []byte) ([]byte, error) {
 	masked := wire[len(salt) : len(salt)+len(body)]
 	copy(masked, body)
 	c.mask(masked, salt[:], c.keys[0].key)
-	tag := c.tag(salt[:], masked, c.keys[0].key)
+	tag, err := c.tag(salt[:], masked, c.keys[0].key)
+	if err != nil {
+		return nil, err
+	}
 	copy(wire[len(salt)+len(masked):], tag[:])
 	return wire, nil
 }
@@ -382,7 +384,13 @@ func (c *obfuscationPacketConn) decode(wire []byte, addr net.Addr, dst []byte) (
 	masked := wire[obfuscationSaltBytes : len(wire)-obfuscationTagBytes]
 	gotTag := wire[len(wire)-obfuscationTagBytes:]
 	for _, key := range c.keys {
-		expected := c.tag(salt, masked, key.key)
+		expected, err := c.tag(salt, masked, key.key)
+		if err != nil {
+			if c.metrics != nil {
+				c.metrics.ObfuscationPacketRejected()
+			}
+			return nil, false
+		}
 		if !hmac.Equal(expected[:], gotTag) {
 			continue
 		}
@@ -535,21 +543,32 @@ func (c *obfuscationPacketConn) mask(data, salt []byte, key [32]byte) {
 	}
 }
 
-func (c *obfuscationPacketConn) tag(salt, masked []byte, key [32]byte) [obfuscationTagBytes]byte {
+func (c *obfuscationPacketConn) tag(salt, masked []byte, key [32]byte) ([obfuscationTagBytes]byte, error) {
 	// Authenticate the complete masked body. The previous transport helper
 	// truncated the MAC input to a small fixed buffer, which left the tail of a
 	// large QUIC datagram unauthenticated. A streaming hash keeps the same
 	// domain separation without imposing a hidden payload limit.
-	hasher, _ := blake2b.New256(nil)
+	hasher, err := blake2b.New256(nil)
+	if err != nil {
+		return [obfuscationTagBytes]byte{}, fmt.Errorf("initialize obfuscation authenticator: %w", err)
+	}
 	var h hash.Hash = hasher
-	_, _ = h.Write([]byte(obfuscationTagDomain))
-	_, _ = h.Write(key[:])
-	_, _ = h.Write(salt)
-	_, _ = h.Write(masked)
+	if _, err := h.Write([]byte(obfuscationTagDomain)); err != nil {
+		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator domain: %w", err)
+	}
+	if _, err := h.Write(key[:]); err != nil {
+		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator key: %w", err)
+	}
+	if _, err := h.Write(salt); err != nil {
+		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator salt: %w", err)
+	}
+	if _, err := h.Write(masked); err != nil {
+		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator body: %w", err)
+	}
 	digest := h.Sum(nil)
 	var tag [obfuscationTagBytes]byte
 	copy(tag[:], digest[:obfuscationTagBytes])
-	return tag
+	return tag, nil
 }
 
 func putObfuscationBody(buffer *obfuscationPoolBuffer) {

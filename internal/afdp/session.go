@@ -18,12 +18,7 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const (
-	maxSessionFrame   = 64 << 10
-	maxOpenFrame      = 64 << 10
-	maxSessionStreams = 1 << 20
-	maxDatagramFrame  = 64 << 10
-)
+const maxSessionStreams = 1 << 20
 
 // Conn is the subset of quic.Conn used by the AFDP session. Keeping this
 // interface small makes handshake and authorization tests independent of a
@@ -65,7 +60,7 @@ func (o SessionOptions) limits() (int, int, int, int, int, time.Duration) {
 		maxDatagram = maxDatagramFrame
 	}
 	if maxStreams <= 0 {
-		maxStreams = 256
+		maxStreams = defaultMaxStreams
 	}
 	if maxStreams > maxSessionStreams {
 		maxStreams = maxSessionStreams
@@ -173,11 +168,6 @@ func ServerSessionWithLookup(ctx context.Context, conn Conn, lookup func(Session
 		}
 		return assignment, nil
 	}, options)
-}
-
-// AcceptServerSession is a descriptive alias for Gateway callers.
-func AcceptServerSession(ctx context.Context, conn Conn, lookup func(SessionHello) (AssignmentView, bool), options SessionOptions) (*Session, error) {
-	return ServerSessionWithLookup(ctx, conn, lookup, options)
 }
 
 func serverSession(ctx context.Context, conn Conn, resolve func(SessionHello) (AssignmentView, error), options SessionOptions) (*Session, error) {

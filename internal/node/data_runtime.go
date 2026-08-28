@@ -595,7 +595,7 @@ func (d *DataPlaneRuntime) acceptGatewayConnections(state *dataGeneration, liste
 }
 
 func (d *DataPlaneRuntime) handleGatewayConnection(state *dataGeneration, connection *quic.Conn, options afdp.SessionOptions) {
-	session, err := afdp.AcceptServerSession(state.ctx, connection, d.engine.AssignmentForSession, options)
+	session, err := afdp.ServerSessionWithLookup(state.ctx, connection, d.engine.AssignmentForSession, options)
 	if err != nil {
 		_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP session rejected")
 		return

@@ -21,7 +21,7 @@ type QUICOptions struct {
 }
 
 func DefaultQUICOptions() QUICOptions {
-	return QUICOptions{MaxStreams: 256, HandshakeTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, KeepAlive: 30 * time.Second}
+	return QUICOptions{MaxStreams: defaultMaxStreams, HandshakeTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, KeepAlive: 30 * time.Second}
 }
 
 func NewQUICConfig(options QUICOptions) *quic.Config {
