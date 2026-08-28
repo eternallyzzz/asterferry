@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc"
 )
 
 // Controller wires the authoritative store and the two control-plane
@@ -163,7 +165,7 @@ func (c *Controller) monitorServers(ctx context.Context) {
 }
 
 func isExpectedServerStopError(err error) bool {
-	return errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)
+	return errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) || errors.Is(err, grpc.ErrServerStopped)
 }
 
 func (c *Controller) logServeFailure(component string, err error) {

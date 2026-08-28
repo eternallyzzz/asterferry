@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"bufio"
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -30,7 +33,7 @@ type ControllerMetrics struct {
 	activeSessions *prometheus.GaugeVec
 	activeEgress   *prometheus.GaugeVec
 	listeners      *prometheus.GaugeVec
-	geoipUp        prometheus.Gauge
+	geoipUp        *prometheus.GaugeVec
 	mu             sync.Mutex
 	nodes          map[string]observedMetric
 }
@@ -42,6 +45,7 @@ type observedMetric struct {
 	streams    float64
 	sessions   float64
 	egress     float64
+	geoipUp    bool
 	listeners  map[string]int
 }
 
@@ -61,13 +65,15 @@ func newControllerMetrics() *ControllerMetrics {
 	m.activeSessions = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_sessions", Help: "Observed active sessions by node role."}, []string{"role"})
 	m.activeEgress = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_egress", Help: "Observed active egress connections by node role."}, []string{"role"})
 	m.listeners = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_listeners", Help: "Observed listeners by protocol."}, []string{"protocol"})
-	m.geoipUp = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Whether the optional GeoIP database is available."})
+	m.geoipUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Number of observed nodes with an available optional GeoIP database, by node role."}, []string{"role"})
 	for _, collector := range []prometheus.Collector{m.up, m.sqliteUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.listeners, m.geoipUp} {
 		m.registry.MustRegister(collector)
 	}
 	m.up.Set(1)
 	m.sqliteUp.Set(1)
-	m.geoipUp.Set(1)
+	for _, role := range []string{domain.RoleGateway, domain.RoleAgent} {
+		m.geoipUp.WithLabelValues(role).Set(0)
+	}
 	return m
 }
 
@@ -112,20 +118,13 @@ func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.Obs
 	if m == nil {
 		return
 	}
-	current := observedMetric{role: role, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], listeners: make(map[string]int)}
-	if value, ok := observed.Metrics["geoip_up"]; ok {
-		if value < 0.5 {
-			m.geoipUp.Set(0)
-		} else {
-			m.geoipUp.Set(1)
-		}
-	}
+	current := observedMetric{role: role, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], geoipUp: observed.Metrics["geoip_up"] >= 0.5, listeners: make(map[string]int)}
 	for _, listener := range observed.Listeners {
 		current.listeners[listener.Protocol]++
 	}
 	m.mu.Lock()
 	m.nodes[nodeID] = current
-	byRole := make(map[string]struct{ healthy, degraded, streams, sessions, egress, generation float64 })
+	byRole := make(map[string]struct{ healthy, degraded, streams, sessions, egress, generation, geoipUp float64 })
 	listenerTotals := make(map[string]float64)
 	for _, value := range m.nodes {
 		aggregate := byRole[value.role]
@@ -137,6 +136,9 @@ func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.Obs
 		aggregate.streams += value.streams
 		aggregate.sessions += value.sessions
 		aggregate.egress += value.egress
+		if value.geoipUp {
+			aggregate.geoipUp++
+		}
 		if generation := float64(value.generation); generation > aggregate.generation {
 			aggregate.generation = generation
 		}
@@ -145,7 +147,6 @@ func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.Obs
 			listenerTotals[protocol] += float64(count)
 		}
 	}
-	m.mu.Unlock()
 	for role, aggregate := range byRole {
 		m.observedNodes.WithLabelValues(role, "healthy").Set(aggregate.healthy)
 		m.observedNodes.WithLabelValues(role, "degraded").Set(aggregate.degraded)
@@ -153,10 +154,17 @@ func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.Obs
 		m.activeSessions.WithLabelValues(role).Set(aggregate.sessions)
 		m.activeEgress.WithLabelValues(role).Set(aggregate.egress)
 		m.snapshotGen.WithLabelValues(role).Set(aggregate.generation)
+		m.geoipUp.WithLabelValues(role).Set(aggregate.geoipUp)
+	}
+	for _, role := range []string{domain.RoleGateway, domain.RoleAgent} {
+		if _, ok := byRole[role]; !ok {
+			m.geoipUp.WithLabelValues(role).Set(0)
+		}
 	}
 	for _, protocol := range []string{"tcp", "udp", "http", "socks5"} {
 		m.listeners.WithLabelValues(protocol).Set(listenerTotals[protocol])
 	}
+	m.mu.Unlock()
 }
 
 func (m *ControllerMetrics) startSchedule() func(error) {
@@ -194,6 +202,13 @@ type metricsResponseWriter struct {
 	status int
 }
 
+var (
+	_ http.Flusher  = (*metricsResponseWriter)(nil)
+	_ http.Hijacker = (*metricsResponseWriter)(nil)
+	_ http.Pusher   = (*metricsResponseWriter)(nil)
+	_ io.ReaderFrom = (*metricsResponseWriter)(nil)
+)
+
 func (w *metricsResponseWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return
@@ -207,6 +222,56 @@ func (w *metricsResponseWriter) Write(data []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(data)
+}
+
+// Unwrap lets http.ResponseController reach optional capabilities exposed by
+// the underlying writer even though this middleware records response metrics.
+func (w *metricsResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// FlushError is the error-returning form used by http.ResponseController.
+// Keep Flush below for handlers that use the legacy http.Flusher interface.
+func (w *metricsResponseWriter) FlushError() error {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(interface{ FlushError() error }); ok {
+		return flusher.FlushError()
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+		return nil
+	}
+	return http.ErrNotSupported
+}
+
+func (w *metricsResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *metricsResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+func (w *metricsResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(reader)
+	}
+	return io.Copy(w.ResponseWriter, reader)
+}
+
+func (w *metricsResponseWriter) Push(target string, options *http.PushOptions) error {
+	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, options)
+	}
+	return http.ErrNotSupported
 }
 
 func (m *ControllerMetrics) middleware(next http.Handler) http.Handler {
