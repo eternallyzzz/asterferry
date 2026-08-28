@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -35,6 +36,7 @@ type ControlServer struct {
 	config   Config
 	streams  map[string]*controlStream // node id -> active stream
 	streamMu sync.Mutex
+	metrics  *ControllerMetrics
 }
 
 type controlStream struct {
@@ -53,10 +55,22 @@ func NewControlServer(config Config, store *Store) (*ControlServer, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return &ControlServer{store: store, config: config, streams: make(map[string]*controlStream)}, nil
+	if store.metrics == nil {
+		store.metrics = newControllerMetrics()
+	}
+	return &ControlServer{store: store, config: config, streams: make(map[string]*controlStream), metrics: store.metrics}, nil
 }
 
-func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (*v1.EnrollResponse, error) {
+func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (response *v1.EnrollResponse, returnErr error) {
+	defer func() {
+		if s.metrics != nil {
+			code := codes.OK.String()
+			if returnErr != nil {
+				code = status.Code(returnErr).String()
+			}
+			s.metrics.observeGRPC("Enroll", code)
+		}
+	}()
 	if request == nil || request.GetToken() == "" || request.GetNodeId() == "" || len(request.GetCsrDer()) == 0 || len(request.GetCsrDer()) > 128<<10 {
 		return nil, status.Error(codes.InvalidArgument, "token, node_id and csr_der are required")
 	}
@@ -66,12 +80,28 @@ func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (
 	}
 	certificate, err := s.store.IssueNodeCertificate(ctx, s.config, request.GetToken(), role, request.GetNodeId(), request.GetCsrDer())
 	if err != nil {
-		return nil, status.Error(codes.PermissionDenied, err.Error())
+		if errors.Is(err, ErrInvalidEnrollmentRequest) {
+			return nil, status.Error(codes.InvalidArgument, "enrollment request is invalid")
+		}
+		if isCredentialError(err) {
+			return nil, status.Error(codes.PermissionDenied, "enrollment credentials are invalid")
+		}
+		slog.Default().Error("node enrollment failed", "node_id", request.GetNodeId(), "error", err)
+		return nil, status.Error(codes.Unavailable, "enrollment service is temporarily unavailable")
 	}
 	return &v1.EnrollResponse{SchemaVersion: domain.SchemaVersion, Certificate: &v1.CertificateBundle{CertificateDer: certificateDER(certificate.CertificatePEM), CaCertificateDer: certificateDER(certificate.CAPEM), Serial: certificate.Serial, NotBefore: timestamppb.New(certificate.NotBefore), NotAfter: timestamppb.New(certificate.NotAfter)}}, nil
 }
 
-func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
+func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr error) {
+	defer func() {
+		if s.metrics != nil {
+			code := codes.OK.String()
+			if returnErr != nil {
+				code = status.Code(returnErr).String()
+			}
+			s.metrics.observeGRPC("Connect", code)
+		}
+	}()
 	first, err := stream.Recv()
 	if err != nil {
 		return err
@@ -119,7 +149,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 	}
 	node, err := s.store.GetNode(stream.Context(), hello.GetNodeId())
 	if err != nil {
-		return status.Error(codes.PermissionDenied, "node is not enrolled")
+		if errors.Is(err, sql.ErrNoRows) {
+			return status.Error(codes.PermissionDenied, "node is not enrolled")
+		}
+		slog.Default().Error("control stream node lookup failed", "node_id", hello.GetNodeId(), "error", err)
+		return status.Error(codes.Unavailable, "controller storage is temporarily unavailable")
 	}
 	if node.Role != role || !node.Enabled || node.CertificateState != domain.CertificateActive {
 		return status.Error(codes.PermissionDenied, "node is disabled or role does not match")
@@ -164,6 +198,10 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 	}
 	s.streams[hello.GetNodeId()] = entry
 	s.streamMu.Unlock()
+	if s.metrics != nil {
+		s.metrics.streams.Inc()
+		defer s.metrics.streams.Dec()
+	}
 	defer func() {
 		s.streamMu.Lock()
 		// Do not remove a newer stream that replaced this one while it was
@@ -213,8 +251,40 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 		}
 	}
 	go s.pushSnapshots(connectionCtx, hello.GetNodeId(), send, &lastSent)
+	type recvResult struct {
+		message *v1.NodeMessage
+		err     error
+	}
+	recvCh := make(chan recvResult, 1)
+	go func() {
+		defer close(recvCh)
+		for {
+			message, err := stream.Recv()
+			select {
+			case recvCh <- recvResult{message: message, err: err}:
+				if err != nil {
+					return
+				}
+			case <-connectionCtx.Done():
+				return
+			}
+		}
+	}()
 	for {
-		message, err := recvWithContext(connectionCtx, stream)
+		var result recvResult
+		var ok bool
+		select {
+		case <-connectionCtx.Done():
+			return connectionCtx.Err()
+		case result, ok = <-recvCh:
+			if !ok {
+				if connectionCtx.Err() != nil {
+					return connectionCtx.Err()
+				}
+				return errors.New("control stream receiver stopped")
+			}
+		}
+		message, err := result.message, result.err
 		if err != nil {
 			return err
 		}
@@ -226,7 +296,14 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 			heartbeat := message.GetHeartbeat()
 			currentNode, currentNodeErr := s.store.GetNode(stream.Context(), hello.GetNodeId())
 			currentPeer, currentPeerErr := peerCertificate(stream.Context())
-			if currentNodeErr != nil || currentPeerErr != nil || currentNode.CertificateState != domain.CertificateActive || currentNode.CertificateSerial == "" || !strings.EqualFold(currentPeer.SerialNumber.Text(16), currentNode.CertificateSerial) {
+			if currentNodeErr != nil {
+				if !errors.Is(currentNodeErr, sql.ErrNoRows) {
+					slog.Default().Error("heartbeat node lookup failed", "node_id", hello.GetNodeId(), "error", currentNodeErr)
+					return status.Error(codes.Unavailable, "controller storage is temporarily unavailable")
+				}
+				return status.Error(codes.PermissionDenied, "node is not enrolled")
+			}
+			if currentPeerErr != nil || currentNode.CertificateState != domain.CertificateActive || currentNode.CertificateSerial == "" || !strings.EqualFold(currentPeer.SerialNumber.Text(16), currentNode.CertificateSerial) {
 				return status.Error(codes.PermissionDenied, "certificate serial is not current")
 			}
 			if heartbeat.GetAppliedGeneration() > 0 {
@@ -268,6 +345,9 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 			if err := s.store.SaveObserved(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: observed.ObservedAt}); err != nil {
 				return status.Error(codes.Internal, "save heartbeat state failed")
 			}
+			if s.metrics != nil {
+				s.metrics.observeNode(hello.GetNodeId(), role, observed)
+			}
 		case message.GetObservedState() != nil:
 			observed, decodeErr := controlwire.ObservedFromProto(message.GetObservedState())
 			if decodeErr != nil {
@@ -286,9 +366,15 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 			} else if observed.AppliedGeneration != 0 {
 				return status.Error(codes.InvalidArgument, "observed state has no desired generation")
 			}
-			document, _ := jsonMarshalObserved(observed)
+			document, marshalErr := jsonMarshalObserved(observed)
+			if marshalErr != nil {
+				return status.Error(codes.Internal, "encode observed state failed")
+			}
 			if err := s.store.SaveObserved(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: time.Now().UTC()}); err != nil {
 				return status.Error(codes.Internal, "save observed state failed")
+			}
+			if s.metrics != nil {
+				s.metrics.observeNode(hello.GetNodeId(), role, observed)
 			}
 		case message.GetApplyResult() != nil:
 			result := message.GetApplyResult()
@@ -297,6 +383,17 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 				latest = current
 			} else if !errors.Is(currentErr, sql.ErrNoRows) {
 				return status.Error(codes.Internal, "load desired snapshot failed")
+			}
+			// A participant may finish applying generation N after the other
+			// participant has acknowledged N and the Controller has already
+			// published generation N+1. That result is stale, not malformed: it
+			// must not tear down the control stream or cause an endless reconnect
+			// loop. The node will receive and apply the newer snapshot normally.
+			if latest.NodeID != "" && result.GetGeneration() < latest.Generation {
+				if err := s.store.RecordEvent(stream.Context(), "system", "", "stale_apply_result", "ignored apply result for an older desired generation", hello.GetNodeId(), map[string]string{"generation": fmt.Sprint(result.GetGeneration()), "latest_generation": fmt.Sprint(latest.Generation)}); err != nil {
+					return status.Error(codes.Internal, "record stale apply result failed")
+				}
+				continue
 			}
 			if err := validateApplyResult(result, latest); err != nil {
 				return status.Error(codes.InvalidArgument, err.Error())
@@ -340,7 +437,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 				return status.Error(codes.InvalidArgument, "event batch is too large")
 			}
 			for _, event := range batch.GetEvents() {
-				if event == nil || strings.TrimSpace(event.GetType()) == "" || len(event.GetType()) > 128 || len(event.GetMessage()) > 4096 {
+				if event == nil || strings.TrimSpace(event.GetType()) == "" || len(event.GetType()) > 128 || len(event.GetMessage()) > 4096 || len(event.GetId()) > 128 || strings.ContainsAny(event.GetId(), "\x00\r\n") {
 					return status.Error(codes.InvalidArgument, "event fields are invalid")
 				}
 				attributes := map[string]string{}
@@ -352,8 +449,17 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 						return status.Error(codes.InvalidArgument, "event attributes are invalid")
 					}
 				}
+				if len(attributes) > 62 {
+					return status.Error(codes.InvalidArgument, "event attributes are too numerous")
+				}
+				for key, value := range attributes {
+					if len(key) > 128 || len(value) > 2048 || strings.ContainsAny(key, "\x00\r\n") || strings.ContainsAny(value, "\x00\r\n") {
+						return status.Error(codes.InvalidArgument, "event attributes are invalid")
+					}
+				}
 				if err := s.store.RecordEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetMessage(), hello.GetNodeId(), attributes); err != nil {
-					return status.Error(codes.InvalidArgument, err.Error())
+					slog.Default().Error("failed to record node event", "node_id", hello.GetNodeId(), "event_type", event.GetType(), "error", err)
+					return status.Error(codes.Internal, "record node event failed")
 				}
 			}
 		case message.GetRenewCertificate() != nil:
@@ -366,12 +472,26 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) error {
 			// revoked the node in the meantime.
 			currentNode, currentNodeErr := s.store.GetNode(stream.Context(), hello.GetNodeId())
 			currentPeer, currentPeerErr := peerCertificate(stream.Context())
-			if currentNodeErr != nil || currentPeerErr != nil || currentNode.CertificateState != domain.CertificateActive || currentNode.CertificateSerial == "" || !strings.EqualFold(currentPeer.SerialNumber.Text(16), currentNode.CertificateSerial) {
+			if currentNodeErr != nil {
+				if !errors.Is(currentNodeErr, sql.ErrNoRows) {
+					slog.Default().Error("certificate renewal node lookup failed", "node_id", hello.GetNodeId(), "error", currentNodeErr)
+					return status.Error(codes.Unavailable, "controller storage is temporarily unavailable")
+				}
+				return status.Error(codes.PermissionDenied, "node is not enrolled")
+			}
+			if currentPeerErr != nil || currentNode.CertificateState != domain.CertificateActive || currentNode.CertificateSerial == "" || !strings.EqualFold(currentPeer.SerialNumber.Text(16), currentNode.CertificateSerial) {
 				return status.Error(codes.PermissionDenied, "certificate serial is not current")
 			}
 			certificate, renewErr := s.store.RenewNodeCertificate(stream.Context(), s.config, hello.GetNodeId(), message.GetRenewCertificate().GetCsrDer())
 			if renewErr != nil {
-				return status.Error(codes.PermissionDenied, renewErr.Error())
+				if errors.Is(renewErr, ErrInvalidEnrollmentRequest) {
+					return status.Error(codes.InvalidArgument, "renewal request is invalid")
+				}
+				if isCredentialError(renewErr) {
+					return status.Error(codes.PermissionDenied, "node certificate renewal is not authorized")
+				}
+				slog.Default().Error("node certificate renewal failed", "node_id", hello.GetNodeId(), "error", renewErr)
+				return status.Error(codes.Unavailable, "certificate service is temporarily unavailable")
 			}
 			if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_CertificateBundle{CertificateBundle: &v1.CertificateBundle{CertificateDer: certificateDER(certificate.CertificatePEM), CaCertificateDer: certificateDER(certificate.CAPEM), Serial: certificate.Serial, NotBefore: timestamppb.New(certificate.NotBefore), NotAfter: timestamppb.New(certificate.NotAfter)}}}); err != nil {
 				return err
@@ -438,18 +558,20 @@ func (s *ControlServer) pushSnapshots(ctx context.Context, nodeID string, send f
 				if errors.Is(err, sql.ErrNoRows) {
 					continue
 				}
+				slog.Default().Warn("failed to refresh node desired snapshot", "node_id", nodeID, "error", err)
 				continue
 			}
 			for {
 				previous := lastSent.Load()
-				if snapshot.Generation <= previous || !lastSent.CompareAndSwap(previous, snapshot.Generation) {
-					if snapshot.Generation <= previous {
-						break
-					}
+				if snapshot.Generation <= previous {
+					break
+				}
+				if !lastSent.CompareAndSwap(previous, snapshot.Generation) {
 					continue
 				}
 				message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: snapshot.Document}}}
 				if err := send(message); err != nil {
+					lastSent.CompareAndSwap(snapshot.Generation, previous)
 					return
 				}
 				break
@@ -464,7 +586,10 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 	}
 	node, err := s.store.GetNode(ctx, nodeID)
 	if err != nil {
-		return errors.New("node not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNodeNotEnrolled
+		}
+		return storageFailure("load node for revocation", err)
 	}
 	node.CertificateState = domain.CertificateRevoked
 	if err := s.store.UpdateNode(ctx, node, WriteOptions{IfMatch: node.Revision, Actor: "system"}); err != nil {
@@ -484,7 +609,16 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 	}
 	s.streamMu.Unlock()
 	if send != nil {
-		_ = send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "reconnect"}}})
+		if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "reconnect"}}}); err != nil {
+			slog.Default().Error("failed to deliver node revocation action", "node_id", nodeID, "error", err)
+			if eventErr := s.store.RecordEvent(context.Background(), "system", "", "action_delivery_failed", "reconnect action could not be delivered", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
+				slog.Default().Error("failed to record node revocation delivery event", "node_id", nodeID, "error", eventErr)
+			}
+		}
+	} else {
+		if eventErr := s.store.RecordEvent(context.Background(), "system", "", "action_not_delivered", "reconnect action queued for next connection", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
+			slog.Default().Error("failed to record node revocation queued event", "node_id", nodeID, "error", eventErr)
+		}
 	}
 	if cancel != nil {
 		cancel()
@@ -492,43 +626,55 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 	return nil
 }
 
-func recvWithContext(ctx context.Context, stream v1.Control_ConnectServer) (*v1.NodeMessage, error) {
-	type result struct {
-		message *v1.NodeMessage
-		err     error
+func (s *ControlServer) Health(context.Context, *emptypb.Empty) (response *v1.Heartbeat, returnErr error) {
+	if s.metrics != nil {
+		defer func() {
+			code := codes.OK.String()
+			if returnErr != nil {
+				code = status.Code(returnErr).String()
+			}
+			s.metrics.observeGRPC("Health", code)
+		}()
 	}
-	channel := make(chan result, 1)
-	go func() { message, err := stream.Recv(); channel <- result{message: message, err: err} }()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case value := <-channel:
-		return value.message, value.err
-	}
-}
-
-func (s *ControlServer) Health(context.Context, *emptypb.Empty) (*v1.Heartbeat, error) {
 	return &v1.Heartbeat{SentAt: timestamppb.New(time.Now().UTC()), Healthy: true}, nil
 }
 
+// StartGRPC preserves the small embedding API used by tests and tools. Serve
+// failures are still logged by StartGRPCWithErrors; Controller.Start uses the
+// error channel directly so the CLI can propagate the failure.
 func StartGRPC(ctx context.Context, config Config, store *Store) (net.Listener, *grpc.Server, error) {
+	listener, server, serveErr, err := StartGRPCWithErrors(ctx, config, store)
+	if err == nil {
+		go func() {
+			if serveErr != nil {
+				if value, ok := <-serveErr; ok && value != nil {
+					slog.Default().Error("gRPC server stopped", "error", value)
+				}
+			}
+		}()
+	}
+	return listener, server, err
+}
+
+func StartGRPCWithErrors(ctx context.Context, config Config, store *Store) (net.Listener, *grpc.Server, <-chan error, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	server, err := NewControlServer(config, store)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	tlsConfig, err := loadControlTLS(config)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	listener, err := net.Listen("tcp", config.GRPCListen)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)), grpc.MaxRecvMsgSize(16<<20), grpc.MaxSendMsgSize(16<<20))
 	v1.RegisterControlServer(grpcServer, server)
+	serveErr := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
 		// Connect is intentionally long-lived. A graceful gRPC stop waits for
@@ -538,8 +684,11 @@ func StartGRPC(ctx context.Context, config Config, store *Store) (net.Listener, 
 		grpcServer.Stop()
 		_ = listener.Close()
 	}()
-	go func() { _ = grpcServer.Serve(listener) }()
-	return listener, grpcServer, nil
+	go func() {
+		serveErr <- grpcServer.Serve(listener)
+		close(serveErr)
+	}()
+	return listener, grpcServer, serveErr, nil
 }
 
 func loadControlTLS(config Config) (*tls.Config, error) {

@@ -6,6 +6,7 @@ package afdp
 
 import (
 	"bytes"
+	"container/heap"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -68,10 +69,11 @@ func AssignmentFromDomain(value domain.Assignment, maxStreams int) AssignmentVie
 }
 
 func (a AssignmentView) Clone() AssignmentView {
-	a.ServiceIDs = make(map[string]struct{}, len(a.ServiceIDs))
+	services := make(map[string]struct{}, len(a.ServiceIDs))
 	for id := range a.ServiceIDs {
-		a.ServiceIDs[id] = struct{}{}
+		services[id] = struct{}{}
 	}
+	a.ServiceIDs = services
 	return a
 }
 
@@ -448,19 +450,39 @@ type fragmentSet struct {
 // Reassembler bounds both the number of concurrent flows and their total
 // memory. Expired and over-budget fragments are discarded fail-closed.
 type Reassembler struct {
-	mu         sync.Mutex
-	flows      map[flowKey]*fragmentSet
-	completed  map[flowKey]time.Time
-	maxFlows   int
-	maxBytes   int
-	maxPayload int
-	timeout    time.Duration
-	bytes      int
+	mu             sync.Mutex
+	flows          map[flowKey]*fragmentSet
+	completed      map[flowKey]time.Time
+	completedOrder completedHeap
+	maxFlows       int
+	maxBytes       int
+	maxPayload     int
+	timeout        time.Duration
+	bytes          int
 }
 
 type flowKey struct {
 	flowID   uint64
 	sequence uint32
+}
+
+type completedEntry struct {
+	key flowKey
+	at  time.Time
+}
+
+type completedHeap []completedEntry
+
+func (h completedHeap) Len() int           { return len(h) }
+func (h completedHeap) Less(i, j int) bool { return h[i].at.Before(h[j].at) }
+func (h completedHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *completedHeap) Push(value any)    { *h = append(*h, value.(completedEntry)) }
+func (h *completedHeap) Pop() any {
+	old := *h
+	n := len(old)
+	value := old[n-1]
+	*h = old[:n-1]
+	return value
 }
 
 func NewReassembler(maxFlows, maxBytes, maxPayload int, timeout time.Duration) (*Reassembler, error) {
@@ -532,19 +554,15 @@ func (r *Reassembler) Add(data []byte, now time.Time) ([]byte, bool, error) {
 	// replayed datagram cannot be interpreted as a fresh payload. This map is
 	// bounded alongside the in-flight flow map and is expired under the same
 	// lock.
-	if len(r.completed) >= r.maxFlows*2 {
-		var oldest flowKey
-		var oldestAt time.Time
-		for candidate, completedAt := range r.completed {
-			if oldestAt.IsZero() || completedAt.Before(oldestAt) {
-				oldest, oldestAt = candidate, completedAt
-			}
-		}
-		if !oldestAt.IsZero() {
-			delete(r.completed, oldest)
+	for len(r.completed) >= r.maxFlows*2 && r.completedOrder.Len() > 0 {
+		entry := heap.Pop(&r.completedOrder).(completedEntry)
+		if completedAt, ok := r.completed[entry.key]; ok && completedAt.Equal(entry.at) {
+			delete(r.completed, entry.key)
+			break
 		}
 	}
 	r.completed[key] = now
+	heap.Push(&r.completedOrder, completedEntry{key: key, at: now})
 	return result, true, nil
 }
 
@@ -555,9 +573,14 @@ func (r *Reassembler) expireLocked(now time.Time) {
 			r.bytes -= set.bytes
 		}
 	}
-	for key, completedAt := range r.completed {
-		if now.Sub(completedAt) >= r.timeout {
-			delete(r.completed, key)
+	for r.completedOrder.Len() > 0 {
+		entry := r.completedOrder[0]
+		if now.Sub(entry.at) < r.timeout {
+			break
+		}
+		heap.Pop(&r.completedOrder)
+		if completedAt, ok := r.completed[entry.key]; ok && completedAt.Equal(entry.at) {
+			delete(r.completed, entry.key)
 		}
 	}
 }

@@ -59,7 +59,7 @@ func CopyRaw(dst io.Writer, src io.Reader, limit int64) (int64, error) {
 	if limit == 0 {
 		return 0, errors.New("raw stream limit must be non-zero")
 	}
-	var reader io.Reader = src
+	reader := src
 	if limit > 0 {
 		// The extra byte lets us distinguish an exact-limit stream from one
 		// that continues. Avoid overflowing int64 at the (theoretical) maximum

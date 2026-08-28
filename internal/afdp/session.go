@@ -10,7 +10,6 @@ import (
 	"errors"
 	"io"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,7 +91,6 @@ type Session struct {
 	opened      atomic.Int64
 	closed      atomic.Bool
 	control     *quic.Stream
-	mu          sync.Mutex
 }
 
 func (s *Session) Assignment() AssignmentView {

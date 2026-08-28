@@ -3,7 +3,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -20,9 +23,15 @@ type Controller struct {
 		Stop()
 		GracefulStop()
 	}
+	grpcServeErr    <-chan error
+	httpServeErr    <-chan error
 	reconcileCancel context.CancelFunc
 	closeOnce       sync.Once
 	closeErr        error
+	waitOnce        sync.Once
+	waitDone        chan struct{}
+	waitErr         error
+	logger          *slog.Logger
 }
 
 func New(config Config) (*Controller, error) {
@@ -42,7 +51,7 @@ func New(config Config) (*Controller, error) {
 		store.Close()
 		return nil, err
 	}
-	return &Controller{Config: config, Store: store, HTTP: httpServer}, nil
+	return &Controller{Config: config, Store: store, HTTP: httpServer, logger: slog.Default()}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) error {
@@ -53,7 +62,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	listener, grpcServer, err := StartGRPC(runCtx, c.Config, c.Store)
+	listener, grpcServer, grpcServeErr, err := StartGRPCWithErrors(runCtx, c.Config, c.Store)
 	if err != nil {
 		cancel()
 		return err
@@ -67,8 +76,15 @@ func (c *Controller) Start(ctx context.Context) error {
 	}
 	c.grpcListener, c.grpcServer = listener, grpcServer
 	c.httpListener = httpListener
+	c.grpcServeErr = grpcServeErr
+	c.waitDone = make(chan struct{})
 	c.reconcileCancel = cancel
-	go func() { _ = c.HTTP.Serve(httpListener) }()
+	httpServeErr := make(chan error, 1)
+	c.httpServeErr = httpServeErr
+	go func() {
+		httpServeErr <- c.HTTP.Serve(httpListener)
+		close(httpServeErr)
+	}()
 	// Context cancellation must stop both control-plane listeners. Close is
 	// idempotent, so an explicit caller shutdown can safely race this goroutine.
 	go func() {
@@ -77,7 +93,85 @@ func (c *Controller) Start(ctx context.Context) error {
 		_ = httpListener.Close()
 	}()
 	go c.reconcileLoop(runCtx)
+	go c.monitorServers(runCtx)
 	return nil
+}
+
+// Wait blocks until the Controller is stopped or either control-plane server
+// exits. A non-nil result means a server failed unexpectedly and should make
+// the process exit non-zero.
+func (c *Controller) Wait() error {
+	if c == nil || c.waitDone == nil {
+		return errors.New("controller is not started")
+	}
+	<-c.waitDone
+	return c.waitErr
+}
+
+func (c *Controller) monitorServers(ctx context.Context) {
+	finish := func(err error) {
+		c.waitOnce.Do(func() {
+			c.waitErr = err
+			close(c.waitDone)
+		})
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			finish(nil)
+			return
+		case err, ok := <-c.grpcServeErr:
+			if !ok {
+				err = errors.New("gRPC server stopped unexpectedly")
+			}
+			if ctx.Err() != nil || isExpectedServerStopError(err) {
+				finish(nil)
+				return
+			}
+			if err == nil {
+				err = errors.New("gRPC server stopped unexpectedly")
+			}
+			c.logServeFailure("grpc", err)
+			if c.reconcileCancel != nil {
+				c.reconcileCancel()
+			}
+			_ = c.HTTP.Close()
+			finish(fmt.Errorf("gRPC serve failed: %w", err))
+			return
+		case err, ok := <-c.httpServeErr:
+			if !ok {
+				err = errors.New("HTTP server stopped unexpectedly")
+			}
+			if ctx.Err() != nil || isExpectedServerStopError(err) {
+				finish(nil)
+				return
+			}
+			if err == nil {
+				err = errors.New("HTTP server stopped unexpectedly")
+			}
+			c.logServeFailure("http", err)
+			if c.reconcileCancel != nil {
+				c.reconcileCancel()
+			}
+			if c.grpcServer != nil {
+				c.grpcServer.Stop()
+			}
+			finish(fmt.Errorf("HTTP serve failed: %w", err))
+			return
+		}
+	}
+}
+
+func isExpectedServerStopError(err error) bool {
+	return errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)
+}
+
+func (c *Controller) logServeFailure(component string, err error) {
+	logger := c.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("controller control-plane server stopped", "component", component, "error", err)
 }
 
 func (c *Controller) reconcileLoop(ctx context.Context) {
@@ -87,7 +181,13 @@ func (c *Controller) reconcileLoop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		_, _ = c.Store.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter)
+		if _, err := c.Store.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter); err != nil && ctx.Err() == nil {
+			logger := c.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("controller assignment reconciliation failed", "error", err)
+		}
 		select {
 		case <-ctx.Done():
 			return

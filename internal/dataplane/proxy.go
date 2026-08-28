@@ -144,10 +144,6 @@ func ServeHTTPProxy(ctx context.Context, engine *Engine, listener net.Listener, 
 	}
 }
 
-func handleHTTPProxy(ctx context.Context, conn net.Conn, proxy domain.ProxySpec, dial ProxyDialFunc) error {
-	return handleHTTPProxyWithBuffer(ctx, conn, proxy, dial, 0)
-}
-
 func handleHTTPProxyWithBuffer(ctx context.Context, conn net.Conn, proxy domain.ProxySpec, dial ProxyDialFunc, maxBuffer int) error {
 	_ = conn.SetDeadline(time.Now().Add(proxyIdleTimeout))
 	reader := bufio.NewReaderSize(io.LimitReader(conn, proxyHandshakeLimit), 4096)
@@ -298,10 +294,6 @@ func ServeSOCKS5(ctx context.Context, engine *Engine, listener net.Listener, pro
 	}
 }
 
-func handleSOCKS5(ctx context.Context, conn net.Conn, proxy domain.ProxySpec, dial ProxyDialFunc) error {
-	return handleSOCKS5WithBuffer(ctx, conn, proxy, dial, 0)
-}
-
 func handleSOCKS5WithBuffer(ctx context.Context, conn net.Conn, proxy domain.ProxySpec, dial ProxyDialFunc, maxBuffer int) error {
 	_ = conn.SetDeadline(time.Now().Add(proxyIdleTimeout))
 	reader := bufio.NewReaderSize(io.LimitReader(conn, proxyHandshakeLimit), 4096)
@@ -411,14 +403,6 @@ func writeSOCKS5Reply(conn net.Conn, code byte) error {
 	// disclosing the upstream socket address to the local client.
 	_, err := conn.Write([]byte{5, code, 0, 1, 0, 0, 0, 0, 0, 0})
 	return err
-}
-
-func copyProxyDuplex(left, right net.Conn) error {
-	return copyProxyDuplexReaderLimited(left, left, right, 0)
-}
-
-func copyProxyDuplexReader(client net.Conn, clientReader io.Reader, upstream net.Conn) error {
-	return copyProxyDuplexReaderLimited(client, clientReader, upstream, 0)
 }
 
 func copyProxyDuplexReaderLimited(client net.Conn, clientReader io.Reader, upstream net.Conn, maxBuffer int) error {

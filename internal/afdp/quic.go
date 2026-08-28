@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -87,7 +88,32 @@ func ClientTLSConfig(certFile, keyFile, caFile, serverName string) (*tls.Config,
 // name. Callers that have a separate endpoint certificate may provide a
 // normal serverName for hostname verification.
 func ClientTLSConfigFromPEM(certificate tls.Certificate, roots *x509.CertPool, serverName string) *tls.Config {
-	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, RootCAs: roots, ServerName: serverName, NextProtos: []string{ALPN}}
+	config := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, RootCAs: roots, ServerName: serverName, NextProtos: []string{ALPN}}
+	if serverName == "" {
+		// AFDP node certificates identify peers by their Controller-issued
+		// SPIFFE URI/CN, not by the public endpoint (which may be an IP, NAT
+		// address, or a listener wildcard). quic-go fills ServerName from the
+		// dial address when it is blank, so explicitly verify the chain without
+		// hostname matching and leave identity authorization to the AFDP hello.
+		config.InsecureSkipVerify = true // #nosec G402 -- VerifyConnection validates the CA chain below.
+		config.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
+				return errors.New("data-plane peer certificate is missing")
+			}
+			intermediates := x509.NewCertPool()
+			for _, intermediate := range state.PeerCertificates[1:] {
+				intermediates.AddCert(intermediate)
+			}
+			_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{
+				Roots:         roots,
+				Intermediates: intermediates,
+				KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				CurrentTime:   time.Now().UTC(),
+			})
+			return err
+		}
+	}
+	return config
 }
 
 func Listen(addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.Listener, error) {
@@ -106,30 +132,71 @@ func Listen(addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.List
 // listener so malformed or unauthenticated packets are discarded below the
 // session layer.
 func ListenWithObfuscation(addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Listener, error) {
+	listener, _, err := ListenWithObfuscationPacketConn(addr, tlsConfig, options, obfuscation)
+	return listener, err
+}
+
+// ListenWithObfuscationPacketConn is the ownership-explicit variant of
+// ListenWithObfuscation. quic.Listener.Close stops accepting connections but
+// does not close a caller-owned PacketConn; callers that rebuild a listener on
+// the same address must close both objects.
+func ListenWithObfuscationPacketConn(addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Listener, net.PacketConn, error) {
 	if tlsConfig == nil {
-		return nil, errors.New("data-plane TLS config is required")
+		return nil, nil, errors.New("data-plane TLS config is required")
 	}
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("resolve data-plane address: %w", err)
+		return nil, nil, fmt.Errorf("resolve data-plane address: %w", err)
 	}
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	packetConn, err := NewObfuscatingPacketConn(conn, obfuscation)
 	if err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	tlsConfig = tlsConfig.Clone()
 	tlsConfig.NextProtos = []string{ALPN}
-	listener, err := quic.Listen(packetConn, tlsConfig, NewQUICConfig(options))
+	// Use an explicit Transport so the returned owner can wait for quic-go's
+	// receive loop to stop before releasing the UDP socket. This matters on
+	// Windows, where closing the raw socket while the transport is still
+	// unwinding can briefly leave the address unavailable to a replacement
+	// listener during a generation swap.
+	transport := &quic.Transport{Conn: packetConn}
+	listener, err := transport.Listen(tlsConfig, NewQUICConfig(options))
 	if err != nil {
 		_ = packetConn.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return listener, nil
+	return listener, &packetConnOwner{PacketConn: packetConn, transport: transport}, nil
+}
+
+// packetConnOwner couples a caller-owned PacketConn to its quic-go transport.
+// Transport.Close waits for the transport receive loop, while the final
+// PacketConn.Close releases the underlying socket. The operation is idempotent
+// so listener and generation cleanup can safely race.
+type packetConnOwner struct {
+	net.PacketConn
+	transport *quic.Transport
+	once      sync.Once
+	closeErr  error
+}
+
+func (c *packetConnOwner) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.once.Do(func() {
+		if c.transport != nil {
+			c.closeErr = c.transport.Close()
+		}
+		if err := c.PacketConn.Close(); c.closeErr == nil {
+			c.closeErr = err
+		}
+	})
+	return c.closeErr
 }
 
 func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.Conn, error) {

@@ -65,7 +65,11 @@ jobs:
       - name: Run vet
         run: go vet ./...
       - name: Run staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
+        # SA1019 is intentionally excluded here: the pinned gRPC client API
+        # remains supported through the current 1.x line, while generated
+        # protobuf exporters are emitted by protoc and cannot be edited by
+        # hand. Keep all correctness/style checks enabled.
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 -checks=all,-SA1019 ./...
       - name: Run vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
       - name: Verify QUIC implementation migration
@@ -96,10 +100,25 @@ jobs:
           helm package deploy/helm/asterferry-controller --destination tmp/ci-chart
           helm package deploy/helm/asterferry-node --destination tmp/ci-chart
 
+  e2e:
+    name: Go QUIC end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.7"
+          cache: true
+      - name: Run Controller/Gateway/Agent QUIC end-to-end test
+        run: go test -tags=integration -count=1 -timeout=5m ./internal/integration
+
   image:
     name: Build development image
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -138,7 +157,7 @@ jobs:
   release_build:
     name: Build release artifacts
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

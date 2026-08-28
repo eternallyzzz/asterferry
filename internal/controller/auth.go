@@ -111,7 +111,7 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 
 func passwordDigest(key [masterKeyBytes]byte, password string) string {
 	digest := hmac.New(sha256.New, key[:])
-	_, _ = digest.Write([]byte(password))
+	digest.Write([]byte(password))
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -127,20 +127,27 @@ func (s *Store) Authenticate(ctx context.Context, username, password string) (Us
 	err := s.db.QueryRowContext(ctx, `SELECT id,username,password_hash,role,enabled,revision,created_at,updated_at FROM users WHERE username=?`, strings.TrimSpace(username)).Scan(&user.ID, &user.Username, &hash, &user.Role, &enabled, &user.Revision, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = VerifyPassword(dummyPasswordHash, password)
-		return User{}, errors.New("invalid credentials")
+		return User{}, ErrInvalidCredentials
 	}
 	if err != nil {
-		return User{}, err
+		return User{}, storageFailure("authenticate user", err)
 	}
 	if !VerifyPassword(hash, password) {
-		return User{}, errors.New("invalid credentials")
+		return User{}, ErrInvalidCredentials
 	}
 	if enabled == 0 {
-		return User{}, errors.New("user is disabled")
+		return User{}, ErrUserDisabled
 	}
 	user.Enabled = true
-	user.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	user.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	var parseErr error
+	user.CreatedAt, parseErr = parseStoredTime("user.created_at", created)
+	if parseErr != nil {
+		return User{}, parseErr
+	}
+	user.UpdatedAt, parseErr = parseStoredTime("user.updated_at", updated)
+	if parseErr != nil {
+		return User{}, parseErr
+	}
 	return user, nil
 }
 
@@ -229,7 +236,10 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
-	user.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	user.CreatedAt, err = parseStoredTime("user.created_at", created)
+	if err != nil {
+		return User{}, err
+	}
 	user.Revision = newRevision
 	user.UpdatedAt = now
 	return user, nil
@@ -340,18 +350,24 @@ func (s *Store) CreateAPITokenWithOptions(ctx context.Context, userID, name stri
 			return "", APIToken{}, err
 		}
 		if expiry.Valid {
-			value, parseErr := time.Parse(time.RFC3339Nano, expiry.String)
-			if parseErr == nil {
-				token.ExpiresAt = &value
+			value, parseErr := parseStoredTime("api_token.expires_at", expiry.String)
+			if parseErr != nil {
+				return "", APIToken{}, parseErr
 			}
+			token.ExpiresAt = &value
 		}
 		if revoked.Valid {
-			value, parseErr := time.Parse(time.RFC3339Nano, revoked.String)
-			if parseErr == nil {
-				token.RevokedAt = &value
+			value, parseErr := parseStoredTime("api_token.revoked_at", revoked.String)
+			if parseErr != nil {
+				return "", APIToken{}, parseErr
 			}
+			token.RevokedAt = &value
 		}
-		token.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		var parseErr error
+		token.CreatedAt, parseErr = parseStoredTime("api_token.created_at", created)
+		if parseErr != nil {
+			return "", APIToken{}, parseErr
+		}
 		return "", token, tx.Commit()
 	}
 	plain, digest, err := NewAPIToken()
@@ -405,16 +421,24 @@ func (s *Store) ListAPITokens(ctx context.Context, userID string) ([]APIToken, e
 			return nil, err
 		}
 		if expires.Valid {
-			if value, err := time.Parse(time.RFC3339Nano, expires.String); err == nil {
-				token.ExpiresAt = &value
+			value, parseErr := parseStoredTime("api_token.expires_at", expires.String)
+			if parseErr != nil {
+				return nil, parseErr
 			}
+			token.ExpiresAt = &value
 		}
 		if revoked.Valid {
-			if value, err := time.Parse(time.RFC3339Nano, revoked.String); err == nil {
-				token.RevokedAt = &value
+			value, parseErr := parseStoredTime("api_token.revoked_at", revoked.String)
+			if parseErr != nil {
+				return nil, parseErr
 			}
+			token.RevokedAt = &value
 		}
-		token.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		var parseErr error
+		token.CreatedAt, parseErr = parseStoredTime("api_token.created_at", created)
+		if parseErr != nil {
+			return nil, parseErr
+		}
 		result = append(result, token)
 	}
 	return result, rows.Err()
@@ -428,22 +452,35 @@ func (s *Store) AuthenticateToken(ctx context.Context, token string) (User, erro
 	var created, updated string
 	var expires sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.username,u.role,u.enabled,u.revision,u.created_at,u.updated_at,t.expires_at FROM api_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.revoked_at IS NULL`, digest).Scan(&user.ID, &user.Username, &user.Role, &enabled, &revision, &created, &updated, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrInvalidAPIToken
+	}
 	if err != nil {
-		return User{}, errors.New("invalid API token")
+		return User{}, storageFailure("authenticate API token", err)
 	}
 	if enabled == 0 {
-		return User{}, errors.New("user is disabled")
+		return User{}, ErrUserDisabled
 	}
 	if expires.Valid {
-		expiry, parseErr := time.Parse(time.RFC3339Nano, expires.String)
-		if parseErr != nil || !time.Now().Before(expiry) {
-			return User{}, errors.New("API token has expired")
+		expiry, parseErr := parseStoredTime("api_token.expires_at", expires.String)
+		if parseErr != nil {
+			return User{}, parseErr
+		}
+		if !time.Now().Before(expiry) {
+			return User{}, ErrAPITokenExpired
 		}
 	}
 	user.Enabled = true
 	user.Revision = revision
-	user.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	user.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	var parseErr error
+	user.CreatedAt, parseErr = parseStoredTime("user.created_at", created)
+	if parseErr != nil {
+		return User{}, parseErr
+	}
+	user.UpdatedAt, parseErr = parseStoredTime("user.updated_at", updated)
+	if parseErr != nil {
+		return User{}, parseErr
+	}
 	return user, nil
 }
 
@@ -472,7 +509,11 @@ func (s *Store) RevokeAPITokenForUser(ctx context.Context, userID, id string, op
 	if err != nil {
 		return err
 	}
-	if count, _ := result.RowsAffected(); count == 0 {
+	count, affectedErr := result.RowsAffected()
+	if affectedErr != nil {
+		return fmt.Errorf("revoke API token: rows affected: %w", affectedErr)
+	}
+	if count == 0 {
 		return sql.ErrNoRows
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "revoke", "api_token", id, 1, map[string]string{"user_id": userID}); err != nil {
@@ -503,7 +544,10 @@ func (s *Store) RevokeAPITokenWithOptions(ctx context.Context, id string, option
 	if err != nil {
 		return err
 	}
-	count, _ := result.RowsAffected()
+	count, affectedErr := result.RowsAffected()
+	if affectedErr != nil {
+		return fmt.Errorf("revoke API token: rows affected: %w", affectedErr)
+	}
 	if count == 0 {
 		return sql.ErrNoRows
 	}

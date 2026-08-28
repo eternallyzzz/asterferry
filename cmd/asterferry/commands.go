@@ -111,11 +111,10 @@ func newHealthcheckCommand() *cobra.Command {
 		Short: "check an HTTP health endpoint without a configuration file",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			parsed, err := parseHealthcheckURL(target)
-			if err != nil {
+			if !healthcheckURLIsSafe(target) {
 				return &codedError{code: 2, err: errors.New("--url must be an absolute http or https URL")}
 			}
-			return runHealthcheckURL(cmd.OutOrStdout(), parsed, timeout, insecureTLS)
+			return runHealthcheckWithOptions(cmd.OutOrStdout(), target, timeout, insecureTLS)
 		},
 	}
 	cmd.Flags().StringVar(&target, "url", "", "health endpoint URL")

@@ -38,6 +38,7 @@ type Store struct {
 	db         *sql.DB
 	path       string
 	masterKey  [masterKeyBytes]byte
+	metrics    *ControllerMetrics
 	close      sync.Once
 	err        error
 	actionMu   sync.Mutex
@@ -151,8 +152,14 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 			return nil, err
 		}
 		user.Enabled = enabled != 0
-		user.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-		user.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		user.CreatedAt, err = parseStoredTime("user.created_at", created)
+		if err != nil {
+			return nil, err
+		}
+		user.UpdatedAt, err = parseStoredTime("user.updated_at", updated)
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, user)
 	}
 	return result, rows.Err()
@@ -166,8 +173,16 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 		return User{}, err
 	}
 	user.Enabled = enabled != 0
-	user.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	user.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	parsed, err := parseStoredTime("user.created_at", created)
+	if err != nil {
+		return User{}, err
+	}
+	user.CreatedAt = parsed
+	parsed, err = parseStoredTime("user.updated_at", updated)
+	if err != nil {
+		return User{}, err
+	}
+	user.UpdatedAt = parsed
 	return user, nil
 }
 
@@ -183,8 +198,16 @@ func getUserTx(ctx context.Context, tx *sql.Tx, field, value string) (User, erro
 		return User{}, err
 	}
 	user.Enabled = enabled != 0
-	user.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	user.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	parsed, err := parseStoredTime("user.created_at", created)
+	if err != nil {
+		return User{}, err
+	}
+	user.CreatedAt = parsed
+	parsed, err = parseStoredTime("user.updated_at", updated)
+	if err != nil {
+		return User{}, err
+	}
+	user.UpdatedAt = parsed
 	return user, nil
 }
 
@@ -337,13 +360,19 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 		return err
 	}
 	if snapshot.Gateway != nil {
-		value, _ := json.Marshal(snapshot.Gateway)
+		value, err := json.Marshal(snapshot.Gateway)
+		if err != nil {
+			return fmt.Errorf("encode gateway snapshot: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO gateway_specs(node_id,document_json,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(node_id) DO UPDATE SET document_json=excluded.document_json,revision=gateway_specs.revision+1,updated_at=excluded.updated_at`, snapshot.Gateway.NodeID, value, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 	}
 	if snapshot.Agent != nil {
-		value, _ := json.Marshal(snapshot.Agent)
+		value, err := json.Marshal(snapshot.Agent)
+		if err != nil {
+			return fmt.Errorf("encode agent snapshot: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_specs(node_id,document_json,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(node_id) DO UPDATE SET document_json=excluded.document_json,revision=agent_specs.revision+1,updated_at=excluded.updated_at`, snapshot.Agent.NodeID, value, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
@@ -352,7 +381,10 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 		// Agent snapshots are authoritative for the services owned by that
 		// Agent, so replace their documents in the same transaction.
 		for _, service := range snapshot.Services {
-			value, _ := json.Marshal(service)
+			value, err := json.Marshal(service)
+			if err != nil {
+				return fmt.Errorf("encode service %q: %w", service.ID, err)
+			}
 			var serviceRole string
 			if err := tx.QueryRowContext(ctx, `SELECT role FROM nodes WHERE id=?`, service.AgentID).Scan(&serviceRole); err != nil {
 				return fmt.Errorf("service %q agent: %w", service.ID, err)
@@ -442,7 +474,10 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 			}
 			serviceSet[serviceID] = struct{}{}
 		}
-		value, _ := json.Marshal(assignment)
+		value, err := json.Marshal(assignment)
+		if err != nil {
+			return fmt.Errorf("encode assignment %q: %w", assignment.ID, err)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO assignments(id,gateway_id,agent_id,document_json,generation,revision,updated_at) VALUES(?,?,?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET gateway_id=excluded.gateway_id,agent_id=excluded.agent_id,document_json=excluded.document_json,generation=excluded.generation,revision=assignments.revision+1,updated_at=excluded.updated_at`, assignment.ID, assignment.GatewayID, assignment.AgentID, value, assignment.Generation, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
@@ -1667,19 +1702,22 @@ func (s *Store) UpdateAssignmentState(ctx context.Context, id, state string, opt
 }
 
 // applyNodeResult records the lifecycle consequence of a node applying its
-// complete desired snapshot. Assignment state is controller-owned, so a node
-// can only move assignments that it participates in and only when the result
-// generation is at least the assignment generation carried by that snapshot.
-// The returned assignments let the caller refresh both node-scoped snapshots
-// after the transaction commits.
+// complete desired snapshot. The control-stream path uses
+// applyNodeResultWithError to retain stable rejection error codes; this
+// boolean helper remains useful to package-level tests and simple callers.
+//lint:ignore U1000 package tests exercise the boolean compatibility helper.
 func (s *Store) applyNodeResult(ctx context.Context, nodeID string, generation uint64, applied bool, actor string) ([]domain.Assignment, error) {
 	return s.applyNodeResultWithError(ctx, nodeID, generation, applied, "", actor)
 }
 
-// applyNodeResultWithError is the control-stream form of applyNodeResult. The
-// compatibility wrapper above keeps the repository helper small for callers
-// that only have a boolean result, while the gRPC path preserves the stable
-// rejection code in assignment_acks for diagnostics and auditing.
+// applyNodeResultWithError records the lifecycle consequence of a node
+// applying its complete desired snapshot. Assignment state is controller-
+// owned, so a node can only move assignments that it participates in and only
+// when the result generation is at least the assignment generation carried by
+// that snapshot. The returned assignments let the caller refresh both
+// node-scoped snapshots after the transaction commits. The control-stream form
+// also preserves the stable rejection code in assignment_acks for diagnostics
+// and auditing.
 func (s *Store) applyNodeResultWithError(ctx context.Context, nodeID string, generation uint64, applied bool, errorCode, actor string) ([]domain.Assignment, error) {
 	if strings.TrimSpace(nodeID) == "" || generation == 0 {
 		return nil, errors.New("node result identity and generation are required")
@@ -1920,7 +1958,10 @@ func (s *Store) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord
 	if err != nil {
 		return SnapshotRecord{}, err
 	}
-	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	record.CreatedAt, err = parseStoredTime("snapshot.created_at", created)
+	if err != nil {
+		return SnapshotRecord{}, err
+	}
 	if err := validateSnapshotRecord(record); err != nil {
 		return SnapshotRecord{}, err
 	}
@@ -2050,7 +2091,10 @@ func (s *Store) LoadObserved(ctx context.Context, nodeID string) (ObservedRecord
 	if err != nil {
 		return ObservedRecord{}, err
 	}
-	record.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	record.UpdatedAt, err = parseStoredTime("observed.updated_at", updated)
+	if err != nil {
+		return ObservedRecord{}, err
+	}
 	var observed domain.ObservedState
 	if err := json.Unmarshal(record.Document, &observed); err != nil {
 		return ObservedRecord{}, fmt.Errorf("stored observed document is invalid: %w", err)
@@ -2100,9 +2144,14 @@ func (s *Store) ListAudit(ctx context.Context, limit int) ([]AuditRecord, error)
 			return nil, err
 		}
 		if len(attributes) > 0 {
-			_ = json.Unmarshal(attributes, &record.Attributes)
+			if err := json.Unmarshal(attributes, &record.Attributes); err != nil {
+				return nil, fmt.Errorf("%w: invalid audit attributes: %w", ErrStorageFailure, err)
+			}
 		}
-		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		record.CreatedAt, err = parseStoredTime("audit.created_at", created)
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, record)
 	}
 	return result, rows.Err()
@@ -2658,14 +2707,14 @@ func scanNode(row scanner) (domain.Node, error) {
 		}
 	}
 	node.Enabled = enabled != 0
-	var err error
-	node.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+	parsed, err := parseStoredTime("node.created_at", created)
 	if err != nil {
-		return domain.Node{}, fmt.Errorf("stored node created_at is invalid: %w", err)
+		return domain.Node{}, err
 	}
-	node.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+	node.CreatedAt = parsed
+	node.UpdatedAt, err = parseStoredTime("node.updated_at", updated)
 	if err != nil {
-		return domain.Node{}, fmt.Errorf("stored node updated_at is invalid: %w", err)
+		return domain.Node{}, err
 	}
 	if err := node.Validate(); err != nil {
 		return domain.Node{}, fmt.Errorf("stored node is invalid: %w", err)

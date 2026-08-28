@@ -94,16 +94,28 @@ func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {
 			return err
 		}
 		if err := dataPlane.ApplySnapshot(ctx, snapshot, previous); err != nil {
+			options.Logger.Warn("data-plane snapshot apply failed", "generation", snapshot.Generation, "error", err)
 			// Keep the control engine and network adapters on the same
 			// generation if opening a listener/session fails.
 			if previous != nil {
-				_ = engine.ApplySnapshot(ctx, *previous, &snapshot)
-				_ = dataPlane.ApplySnapshot(context.Background(), *previous, nil)
+				var rollbackErrs []error
+				if rollbackErr := engine.ApplySnapshot(ctx, *previous, &snapshot); rollbackErr != nil {
+					options.Logger.Error("control engine rollback after snapshot failure failed", "generation", previous.Generation, "error", rollbackErr)
+					rollbackErrs = append(rollbackErrs, rollbackErr)
+				}
+				if rollbackErr := dataPlane.ApplySnapshot(context.Background(), *previous, nil); rollbackErr != nil {
+					options.Logger.Error("data-plane rollback after snapshot failure failed", "generation", previous.Generation, "error", rollbackErr)
+					rollbackErrs = append(rollbackErrs, rollbackErr)
+				}
+				return errors.Join(err, errors.Join(rollbackErrs...))
 			} else {
 				// The first engine apply has no previous document to restore. Clear
 				// the speculative index so a rejected listener build cannot leave
 				// authorization state active without a matching data-plane socket.
-				_ = engine.ResetSnapshot(snapshot.Generation)
+				if resetErr := engine.ResetSnapshot(snapshot.Generation); resetErr != nil {
+					options.Logger.Error("control engine reset after initial snapshot failure failed", "generation", snapshot.Generation, "error", resetErr)
+					return errors.Join(err, resetErr)
+				}
 			}
 			return err
 		}
@@ -233,11 +245,23 @@ func (r *Runtime) Run(ctx context.Context) error {
 		if backoff > time.Second {
 			backoff = time.Second
 		}
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
+		if !waitWithContext(ctx, backoff) {
 			return nil
 		}
+	}
+}
+
+func waitWithContext(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -247,7 +271,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	// DialContext while the Controller is down, preventing the offline cache
 	// grace/degraded state and reconnect backoff from taking effect.
 	bootstrap := r.bootstrapSnapshot()
-	dialCtx, cancelDial := context.WithTimeout(ctx, 10*time.Second)
+	dialCtx, cancelDial := context.WithTimeout(ctx, controllerDialTimeout)
 	client, conn, err := ControlClient(dialCtx, bootstrap)
 	cancelDial()
 	if err != nil {
@@ -299,7 +323,11 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			select {
 			case <-ticker.C:
 				observed := r.observedState()
-				_ = send(&v1.NodeMessage{Body: &v1.NodeMessage_Heartbeat{Heartbeat: controlwire.Heartbeat(observed.AppliedGeneration, observed.Healthy)}})
+				if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Heartbeat{Heartbeat: controlwire.Heartbeat(observed.AppliedGeneration, observed.Healthy)}}); err != nil {
+					r.logger.Warn("node heartbeat send failed", "error", err)
+					cancel()
+					return
+				}
 			case <-heartbeatCtx.Done():
 				return
 			}
@@ -311,7 +339,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			return err
 		}
 		if message == nil {
-			return errors.New("Controller sent an empty control message")
+			return errors.New("controller sent an empty control message")
 		}
 		if action := message.GetAction(); action != nil {
 			switch action.GetName() {
@@ -349,7 +377,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				if r.dataPlane != nil {
 					r.dataPlane.CloseSessions()
 				}
-				return errors.New("Controller requested reconnect")
+				return errors.New("controller requested reconnect")
 			default:
 				// Unknown actions are operational hints. Ignore them so a newer
 				// Controller can add actions without taking an older node offline.
@@ -358,7 +386,11 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 		if desired := message.GetDesiredSnapshot(); desired != nil {
 			snapshot, decodeErr := controlwire.SnapshotFromProto(desired)
 			if decodeErr != nil {
-				_ = send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: controlwire.ApplyResult(desired.Generation, desired.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyError(decodeErr))}})
+				rejected := &v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: controlwire.ApplyResult(desired.Generation, desired.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyError(decodeErr))}}
+				if sendErr := send(rejected); sendErr != nil {
+					r.logger.Warn("rejected snapshot result send failed", "generation", desired.Generation, "error", sendErr)
+					return errors.Join(decodeErr, sendErr)
+				}
 				return decodeErr
 			}
 			// ACCEPTED means the complete envelope has passed schema, metadata
@@ -371,11 +403,12 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: result}}); err != nil {
 				return err
 			}
-			observed, _ := controlwire.ObservedToProto(r.observedState())
-			if observed != nil {
-				if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ObservedState{ObservedState: observed}}); err != nil {
-					return err
-				}
+			observed, observedErr := controlwire.ObservedToProto(r.observedState())
+			if observedErr != nil {
+				return fmt.Errorf("encode observed state: %w", observedErr)
+			}
+			if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ObservedState{ObservedState: observed}}); err != nil {
+				return err
 			}
 		}
 		if certificate := message.GetCertificateBundle(); certificate != nil {
@@ -384,15 +417,18 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			}
 		}
 		if message.GetAction() == nil && message.GetDesiredSnapshot() == nil && message.GetCertificateBundle() == nil {
-			return errors.New("Controller sent an empty control message")
+			return errors.New("controller sent an empty control message")
 		}
 	}
 }
 
 func renewalRequest(bootstrap Bootstrap) ([]byte, error) {
 	certificate, err := tls.X509KeyPair([]byte(bootstrap.CertificatePEM), []byte(bootstrap.PrivateKeyPEM))
-	if err != nil || len(certificate.Certificate) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(certificate.Certificate) == 0 {
+		return nil, errors.New("node certificate is empty")
 	}
 	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
 	if err != nil {
@@ -406,26 +442,26 @@ func renewalRequest(bootstrap Bootstrap) ([]byte, error) {
 
 func (r *Runtime) acceptCertificate(bundle *v1.CertificateBundle) error {
 	if bundle == nil || len(bundle.CertificateDer) == 0 {
-		return errors.New("Controller returned an empty certificate bundle")
+		return errors.New("controller returned an empty certificate bundle")
 	}
 	leaf, err := x509.ParseCertificate(bundle.CertificateDer)
 	if err != nil {
-		return fmt.Errorf("Controller returned an invalid certificate: %w", err)
+		return fmt.Errorf("controller returned an invalid certificate: %w", err)
 	}
 	if strings.TrimSpace(bundle.Serial) == "" || !strings.EqualFold(leaf.SerialNumber.Text(16), strings.TrimSpace(bundle.Serial)) {
-		return errors.New("Controller certificate serial does not match the bundle")
+		return errors.New("controller certificate serial does not match the bundle")
 	}
 	now := time.Now().UTC()
 	if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
-		return errors.New("Controller certificate is expired or not yet valid")
+		return errors.New("controller certificate is expired or not yet valid")
 	}
 	bootstrap := r.bootstrapSnapshot()
 	if leaf.Subject.CommonName != bootstrap.NodeID {
-		return errors.New("Controller certificate identity does not match the node")
+		return errors.New("controller certificate identity does not match the node")
 	}
 	keyPair, err := tls.X509KeyPair([]byte(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: bundle.CertificateDer})), []byte(bootstrap.PrivateKeyPEM))
 	if err != nil || len(keyPair.Certificate) == 0 {
-		return errors.New("Controller certificate does not match the node private key")
+		return errors.New("controller certificate does not match the node private key")
 	}
 	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: bundle.CertificateDer})
 	caPEM := []byte(bootstrap.CAPEM)
@@ -434,10 +470,10 @@ func (r *Runtime) acceptCertificate(bundle *v1.CertificateBundle) error {
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return errors.New("Controller certificate bundle has no valid CA")
+		return errors.New("controller certificate bundle has no valid CA")
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, Intermediates: x509.NewCertPool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, CurrentTime: now}); err != nil {
-		return fmt.Errorf("Controller certificate is not signed by the configured CA: %w", err)
+		return fmt.Errorf("controller certificate is not signed by the configured CA: %w", err)
 	}
 	updated := bootstrap
 	updated.CertificatePEM = string(certificatePEM)
@@ -451,11 +487,18 @@ func (r *Runtime) acceptCertificate(bundle *v1.CertificateBundle) error {
 	}
 	if r.dataPlane != nil {
 		if err := r.dataPlane.UpdateBootstrap(updated); err != nil {
+			var rollbackErrs []error
 			if r.bootstrapPath != "" {
-				_ = WriteBootstrap(r.bootstrapPath, bootstrap)
+				if rollbackErr := WriteBootstrap(r.bootstrapPath, bootstrap); rollbackErr != nil {
+					r.logger.Error("node bootstrap rollback failed", "error", rollbackErr)
+					rollbackErrs = append(rollbackErrs, rollbackErr)
+				}
 			}
-			_ = r.dataPlane.UpdateBootstrap(bootstrap)
-			return err
+			if rollbackErr := r.dataPlane.UpdateBootstrap(bootstrap); rollbackErr != nil {
+				r.logger.Error("data-plane bootstrap rollback failed", "error", rollbackErr)
+				rollbackErrs = append(rollbackErrs, rollbackErr)
+			}
+			return errors.Join(err, errors.Join(rollbackErrs...))
 		}
 	}
 	r.bootstrapMu.Lock()

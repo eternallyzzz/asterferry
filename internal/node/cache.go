@@ -291,19 +291,24 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 		return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_REJECTED, applyErr)
 	}
 	if err := r.cache.Write(snapshot); err != nil {
+		rollbackErr := error(nil)
 		if previous != nil {
 			// Best-effort component rollback. The callback must itself be
 			// transactional; this keeps the applied generation aligned with the
 			// durable cache when the final atomic file publish fails.
-			_ = r.apply(ctx, *previous, &snapshot)
+			rollbackErr = r.apply(ctx, *previous, &snapshot)
 		} else if r.reset != nil {
 			// The first snapshot had no durable last-known-good generation. Do
 			// not leave listeners or authorization entries active when the
 			// encrypted cache cannot be published; a retry must start from an
 			// empty, drained data plane.
-			_ = r.reset(ctx, snapshot.Generation)
+			rollbackErr = r.reset(ctx, snapshot.Generation)
 		}
-		applyErr := &domain.ApplyError{Code: "cache_write_failed", Message: err.Error(), Retryable: true}
+		message := err.Error()
+		if rollbackErr != nil {
+			message += "; data-plane rollback failed: " + rollbackErr.Error()
+		}
+		applyErr := &domain.ApplyError{Code: "cache_write_failed", Message: message, Retryable: true}
 		r.mu.Lock()
 		r.state.Healthy = false
 		r.state.Degraded = true

@@ -122,10 +122,6 @@ func ServeTCPAgent(ctx context.Context, engine *Engine, session *afdp.Session, d
 	}
 }
 
-func copyDuplex(left, right io.ReadWriteCloser) {
-	copyDuplexLimited(left, right, 0)
-}
-
 // copyDuplexLimited keeps the two directional buffers within the node's
 // declared MaxBufferBytes budget. The default remains two 32 KiB buffers;
 // small configured budgets are honored by shrinking each side to half the

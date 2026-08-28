@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"asterferry/internal/afdp"
@@ -31,6 +32,13 @@ const (
 	dataPlaneFlowLimit   = 256
 	dataPlaneByteLimit   = 8 << 20
 	dataPlaneFlowTTL     = 30 * time.Second
+	// UDP datagrams can arrive on the QUIC DATAGRAM path before the reliable
+	// Open stream has been decoded by the Agent. Keep a small, bounded queue so
+	// that this normal reordering does not silently discard the first packet of
+	// every flow.
+	dataPlanePendingDatagramsPerFlow = 8
+	dataPlanePendingDatagramBytes    = 64 << 10
+	dataPlanePendingDatagramTTL      = dataPlaneFlowTTL
 )
 
 // DataPlaneOptions controls the network adapters owned by a node runtime.
@@ -75,6 +83,7 @@ type dataGeneration struct {
 	snap   domain.DesiredSnapshot
 
 	quicListeners []*quic.Listener
+	quicPackets   []net.PacketConn
 	tcpListeners  map[string]net.Listener
 	udpListeners  map[string]*net.UDPConn
 	proxies       map[string]net.Listener
@@ -111,6 +120,11 @@ type agentUDPFlow struct {
 	release      func()
 	sequence     atomic.Uint32
 	lastUnixNano atomic.Int64
+}
+
+type pendingAgentDatagram struct {
+	payload []byte
+	at      time.Time
 }
 
 // NewDataPlaneRuntime validates the mTLS material once, before any network
@@ -167,6 +181,7 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 			"active_streams":  float64(d.engine.ActiveStreams()),
 			"active_sessions": float64(d.engine.ActiveSessions()),
 			"active_egress":   float64(d.engine.ActiveEgress()),
+			"geoip_up":        boolMetric(dataplane.GeoIPAvailable()),
 		},
 	}
 	state.sessionMu.RLock()
@@ -200,6 +215,13 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 		}
 	}
 	return observed, true
+}
+
+func boolMetric(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // UpdateBootstrap replaces the certificate material used by future AFDP
@@ -507,11 +529,12 @@ func (d *DataPlaneRuntime) buildGateway(state *dataGeneration, spec domain.Gatew
 		d.tlsMu.RLock()
 		serverTLS := d.serverTLS
 		d.tlsMu.RUnlock()
-		listener, err := afdp.ListenWithObfuscation(address, serverTLS, quicOptions, afdpObfuscationOptions(spec.Obfuscation))
+		listener, packetConn, err := listenAFDPWithRetry(state.ctx, address, serverTLS, quicOptions, afdpObfuscationOptions(spec.Obfuscation))
 		if err != nil {
 			return fmt.Errorf("listen AFDP endpoint %s: %w", address, err)
 		}
 		state.quicListeners = append(state.quicListeners, listener)
+		state.quicPackets = append(state.quicPackets, packetConn)
 		go d.acceptGatewayConnections(state, listener, spec)
 	}
 	services := make(map[string]domain.Service, len(state.snap.Services))
@@ -554,6 +577,45 @@ func (d *DataPlaneRuntime) buildGateway(state *dataGeneration, spec domain.Gatew
 	return nil
 }
 
+// listenAFDPWithRetry covers the short handoff window between a QUIC
+// generation's listener close and the operating system releasing its UDP
+// address. The retry is deliberately bounded and only applies to an address
+// collision; malformed TLS or protocol configuration still fails immediately.
+func listenAFDPWithRetry(ctx context.Context, address string, tlsConfig *tls.Config, options afdp.QUICOptions, obfuscation afdp.ObfuscationOptions) (*quic.Listener, net.PacketConn, error) {
+	listener, packetConn, err := afdp.ListenWithObfuscationPacketConn(address, tlsConfig, options, obfuscation)
+	if err == nil || !addressInUse(err) {
+		return listener, packetConn, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-deadline.C:
+			return nil, nil, err
+		case <-ticker.C:
+			listener, packetConn, err = afdp.ListenWithObfuscationPacketConn(address, tlsConfig, options, obfuscation)
+			if err == nil || !addressInUse(err) {
+				return listener, packetConn, err
+			}
+		}
+	}
+}
+
+func addressInUse(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "address already in use") || strings.Contains(message, "only one usage of each socket address")
+}
+
 func (d *DataPlaneRuntime) buildAgent(state *dataGeneration, spec domain.AgentSpec) error {
 	for _, proxy := range spec.Proxies {
 		if !proxy.Enabled {
@@ -588,6 +650,9 @@ func (d *DataPlaneRuntime) acceptGatewayConnections(state *dataGeneration, liste
 	for {
 		connection, err := listener.Accept(state.ctx)
 		if err != nil {
+			if state.ctx.Err() == nil {
+				d.logger.Warn("data-plane Gateway listener stopped", "error", err)
+			}
 			return
 		}
 		go d.handleGatewayConnection(state, connection, options)
@@ -640,6 +705,7 @@ func (d *DataPlaneRuntime) serveGatewayTCP(state *dataGeneration, listener net.L
 			defer lease.Release()
 			stream, err := session.OpenStream(state.ctx, metadata)
 			if err != nil {
+				d.logger.Warn("data-plane reverse TCP stream open failed", "assignment_id", assignmentID, "service_id", service.ID, "error", err)
 				return
 			}
 			defer func() { _ = stream.Close(); session.ReleaseStream() }()
@@ -703,6 +769,7 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 		flow.lastUnixNano.Store(time.Now().UnixNano())
 		sequence := flow.sequence.Add(1) - 1
 		if err := flow.session.SendDatagram(flow.id, sequence, buffer[:n], dataPlaneDatagramMTU); err != nil {
+			d.logger.Warn("data-plane Gateway UDP datagram send failed", "flow_id", flow.id, "sequence", sequence, "error", err)
 			state.removeUDPFlow(flow)
 		}
 	}
@@ -728,7 +795,9 @@ func (d *DataPlaneRuntime) receiveGatewayDatagrams(state *dataGeneration, sessio
 			continue
 		}
 		flow.lastUnixNano.Store(time.Now().UnixNano())
-		_, _ = flow.socket.WriteToUDP(payload, flow.remote)
+		if _, writeErr := flow.socket.WriteToUDP(payload, flow.remote); writeErr != nil {
+			d.logger.Warn("data-plane Gateway UDP response write failed", "flow_id", header.FlowID, "error", writeErr)
+		}
 	}
 }
 
@@ -811,10 +880,13 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 					_ = session.Close()
 				}
 			} else {
+				d.logger.Warn("data-plane Agent session rejected", "assignment_id", assignment.ID, "gateway", assignment.GatewayID, "error", sessionErr)
 				_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP handshake rejected")
 			}
 			_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF00), "AFDP connection closed")
 			_ = packetConn.Close()
+		} else if state.ctx.Err() == nil {
+			d.logger.Warn("data-plane Agent connection failed", "assignment_id", assignment.ID, "endpoint", assignment.PublicEndpoint, "error", err)
 		}
 		wait := backoff
 		if backoff < 30*time.Second {
@@ -843,6 +915,8 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 	defer cancel()
 	assignmentID := session.Assignment().ID
 	flows := make(map[uint64]*agentUDPFlow)
+	pending := make(map[uint64][]pendingAgentDatagram)
+	pendingBytes := 0
 	var flowMu sync.RWMutex
 	errCh := make(chan error, 2)
 	go func() {
@@ -852,6 +926,7 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 			select {
 			case <-ticker.C:
 				expireAgentUDPFlows(&flowMu, flows, time.Now())
+				expirePendingAgentDatagrams(&flowMu, pending, &pendingBytes, time.Now())
 			case <-ctx.Done():
 				return
 			}
@@ -866,15 +941,25 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 		for {
 			header, payload, receiveErr := session.ReceiveDatagramPacket(ctx, reassembler)
 			if receiveErr != nil {
+				d.logger.Warn("data-plane Agent datagram receive failed", "assignment_id", assignmentID, "error", receiveErr)
 				errCh <- receiveErr
 				return
 			}
-			flowMu.RLock()
+			flowMu.Lock()
 			flow := flows[header.FlowID]
-			flowMu.RUnlock()
-			if flow != nil {
-				flow.lastUnixNano.Store(time.Now().UnixNano())
-				_, _ = flow.conn.Write(payload)
+			if flow == nil {
+				queue := pending[header.FlowID]
+				if len(queue) < dataPlanePendingDatagramsPerFlow && pendingBytes+len(payload) <= dataPlanePendingDatagramBytes {
+					pending[header.FlowID] = append(queue, pendingAgentDatagram{payload: append([]byte(nil), payload...), at: time.Now()})
+					pendingBytes += len(payload)
+				}
+				flowMu.Unlock()
+				continue
+			}
+			flowMu.Unlock()
+			flow.lastUnixNano.Store(time.Now().UnixNano())
+			if _, writeErr := flow.conn.Write(payload); writeErr != nil {
+				d.logger.Warn("data-plane Agent UDP target write failed", "flow_id", header.FlowID, "error", writeErr)
 			}
 		}
 	}()
@@ -901,6 +986,7 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 				flowCount := len(flows)
 				flowMu.RUnlock()
 				if !existing && flowCount >= dataPlaneFlowLimit {
+					discardPendingAgentDatagrams(&flowMu, pending, &pendingBytes, metadata.FlowID)
 					_ = stream.Close()
 					session.ReleaseStream()
 					continue
@@ -908,6 +994,7 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 			}
 			lease, err := d.engine.ReserveOpen(assignmentID, metadata)
 			if err != nil {
+				discardPendingAgentDatagrams(&flowMu, pending, &pendingBytes, metadata.FlowID)
 				_ = stream.Close()
 				session.ReleaseStream()
 				continue
@@ -918,6 +1005,8 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 			case domain.ProtocolUDP:
 				target, releaseEgress, egressErr := d.engine.AcquireEgress(state.ctx, domain.ProtocolUDP, metadata.Target)
 				if egressErr != nil {
+					discardPendingAgentDatagrams(&flowMu, pending, &pendingBytes, metadata.FlowID)
+					d.logger.Warn("data-plane Agent UDP egress denied", "service_id", metadata.ServiceID, "target", metadata.Target, "error", egressErr)
 					_ = stream.Close()
 					session.ReleaseStream()
 					lease.Release()
@@ -925,6 +1014,8 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 				}
 				addr, resolveErr := net.ResolveUDPAddr("udp", target)
 				if resolveErr != nil {
+					discardPendingAgentDatagrams(&flowMu, pending, &pendingBytes, metadata.FlowID)
+					d.logger.Warn("data-plane Agent UDP target resolve failed", "service_id", metadata.ServiceID, "target", target, "error", resolveErr)
 					_ = stream.Close()
 					session.ReleaseStream()
 					lease.Release()
@@ -933,6 +1024,8 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 				}
 				conn, dialErr := net.DialUDP("udp", nil, addr)
 				if dialErr != nil {
+					discardPendingAgentDatagrams(&flowMu, pending, &pendingBytes, metadata.FlowID)
+					d.logger.Warn("data-plane Agent UDP target dial failed", "service_id", metadata.ServiceID, "target", target, "error", dialErr)
 					_ = stream.Close()
 					session.ReleaseStream()
 					lease.Release()
@@ -947,13 +1040,26 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 				old := flows[metadata.FlowID]
 				if old == nil && len(flows) >= dataPlaneFlowLimit {
 					flowMu.Unlock()
+					discardPendingAgentDatagrams(&flowMu, pending, &pendingBytes, metadata.FlowID)
 					closeAgentUDPFlow(flow)
 					continue
 				}
 				flows[metadata.FlowID] = flow
+				queued := pending[metadata.FlowID]
+				delete(pending, metadata.FlowID)
+				for _, datagram := range queued {
+					pendingBytes -= len(datagram.payload)
+				}
 				flowMu.Unlock()
 				if old != nil {
 					closeAgentUDPFlow(old)
+				}
+				for _, datagram := range queued {
+					flow.lastUnixNano.Store(time.Now().UnixNano())
+					if _, writeErr := flow.conn.Write(datagram.payload); writeErr != nil {
+						d.logger.Warn("data-plane Agent UDP target write failed", "flow_id", metadata.FlowID, "error", writeErr)
+						break
+					}
 				}
 				go d.readAgentUDP(state, session, metadata.FlowID, flow, &flowMu, flows)
 			default:
@@ -981,6 +1087,8 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 		delete(flows, flowID)
 		staleFlows = append(staleFlows, flow)
 	}
+	pending = make(map[uint64][]pendingAgentDatagram)
+	pendingBytes = 0
 	flowMu.Unlock()
 	for _, flow := range staleFlows {
 		closeAgentUDPFlow(flow)
@@ -996,6 +1104,7 @@ func (d *DataPlaneRuntime) handleAgentTCP(state *dataGeneration, session *afdp.S
 	defer releaseEgress()
 	local, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(state.ctx, "tcp", target)
 	if err != nil {
+		d.logger.Warn("data-plane Agent TCP target dial failed", "service_id", metadata.ServiceID, "target", target, "error", err)
 		return
 	}
 	defer local.Close()
@@ -1030,6 +1139,7 @@ func (d *DataPlaneRuntime) readAgentUDP(state *dataGeneration, session *afdp.Ses
 		flow.lastUnixNano.Store(time.Now().UnixNano())
 		sequence := flow.sequence.Add(1) - 1
 		if err := session.SendDatagram(flowID, sequence, buffer[:n], dataPlaneDatagramMTU); err != nil {
+			d.logger.Warn("data-plane Agent UDP response send failed", "flow_id", flowID, "error", err)
 			return
 		}
 	}
@@ -1067,6 +1177,49 @@ func expireAgentUDPFlows(flowMu *sync.RWMutex, flows map[uint64]*agentUDPFlow, n
 	for _, flow := range stale {
 		closeAgentUDPFlow(flow)
 	}
+}
+
+func discardPendingAgentDatagrams(flowMu *sync.RWMutex, pending map[uint64][]pendingAgentDatagram, pendingBytes *int, flowID uint64) {
+	if flowMu == nil || pending == nil || pendingBytes == nil {
+		return
+	}
+	flowMu.Lock()
+	queued := pending[flowID]
+	delete(pending, flowID)
+	for _, datagram := range queued {
+		*pendingBytes -= len(datagram.payload)
+	}
+	if *pendingBytes < 0 {
+		*pendingBytes = 0
+	}
+	flowMu.Unlock()
+}
+
+func expirePendingAgentDatagrams(flowMu *sync.RWMutex, pending map[uint64][]pendingAgentDatagram, pendingBytes *int, now time.Time) {
+	if flowMu == nil || pending == nil || pendingBytes == nil {
+		return
+	}
+	cutoff := now.Add(-dataPlanePendingDatagramTTL)
+	flowMu.Lock()
+	for flowID, queued := range pending {
+		kept := queued[:0]
+		for _, datagram := range queued {
+			if datagram.at.IsZero() || datagram.at.After(cutoff) {
+				kept = append(kept, datagram)
+				continue
+			}
+			*pendingBytes -= len(datagram.payload)
+		}
+		if len(kept) == 0 {
+			delete(pending, flowID)
+		} else {
+			pending[flowID] = kept
+		}
+	}
+	if *pendingBytes < 0 {
+		*pendingBytes = 0
+	}
+	flowMu.Unlock()
 }
 
 func (d *DataPlaneRuntime) dialProxyTarget(state *dataGeneration, ctx context.Context, target, route string) (net.Conn, error) {
@@ -1173,19 +1326,6 @@ func dataBindingKey(assignmentID string, binding domain.Binding) string {
 	return assignmentID + "|" + binding.Protocol + "|" + binding.Bind + "|" + strconv.Itoa(int(binding.Port))
 }
 
-func containsString(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
-}
-
-func copyDataDuplex(left io.ReadWriteCloser, right io.ReadWriteCloser) {
-	copyDataDuplexLimited(left, right, 0)
-}
-
 func copyDataDuplexLimited(left io.ReadWriteCloser, right io.ReadWriteCloser, maxBuffer int) {
 	bufferSize := 32 << 10
 	if maxBuffer > 0 {
@@ -1263,8 +1403,20 @@ func (g *dataGeneration) close() {
 		return
 	}
 	g.cancel()
+	// Tear down authenticated sessions before closing the QUIC transport. A
+	// peer can otherwise complete a handshake while the listener is draining,
+	// keeping the caller-owned UDP socket busy during a same-address rebuild.
+	g.closeSessions()
 	for _, listener := range g.quicListeners {
-		_ = listener.Close()
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}
+	for _, packetConn := range g.quicPackets {
+		// The packet connection owner waits for quic-go's receive loop before
+		// closing the underlying socket. This makes same-address generation
+		// replacement deterministic on platforms with asynchronous UDP close.
+		_ = packetConn.Close()
 	}
 	for _, listener := range g.tcpListeners {
 		_ = listener.Close()
@@ -1275,9 +1427,7 @@ func (g *dataGeneration) close() {
 	for _, listener := range g.proxies {
 		_ = listener.Close()
 	}
-	g.closeSessions()
-	// closeSessions releases the authenticated sessions before flow cleanup;
-	// the generation itself owns the listeners and is already cancelled above.
+	// The generation owns all listeners and is already cancelled above.
 	g.udpMu.Lock()
 	flows := make([]*dataUDPFlow, 0, len(g.udpFlows))
 	for id, flow := range g.udpFlows {

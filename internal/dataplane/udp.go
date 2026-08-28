@@ -74,7 +74,15 @@ func ServeUDPReverse(ctx context.Context, engine *Engine, session *afdp.Session,
 			flow := findReverseFlow(flows, header.FlowID)
 			flowsMu.Unlock()
 			if flow != nil {
-				_, _ = socket.WriteToUDP(payload, flow.addr)
+				if _, writeErr := socket.WriteToUDP(payload, flow.addr); writeErr != nil {
+					if ctx.Err() == nil {
+						select {
+						case recvErr <- fmt.Errorf("write UDP reverse payload: %w", writeErr):
+						default:
+						}
+					}
+					return
+				}
 			}
 		}
 	}()

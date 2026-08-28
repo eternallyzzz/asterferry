@@ -96,7 +96,9 @@ function key(): string {
 
 function describeError(caught: unknown): string {
   if (caught instanceof ControllerAPIError) {
-    if (caught.status === 409 || caught.code === "revision_conflict") return "资源已被其他操作者修改，请刷新后重试（revision 冲突）。";
+    if (caught.code === "revision_conflict") return "资源已被其他操作者修改，请刷新后重试（revision 冲突）。";
+    if (caught.code === "already_exists") return "资源已存在，请使用其他 ID。";
+    if (caught.status === 409) return caught.message || "请求冲突，请刷新后重试。";
     if (caught.status === 403) return "当前账户没有执行此操作的权限。";
     return caught.message;
   }

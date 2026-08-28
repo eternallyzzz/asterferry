@@ -75,27 +75,57 @@ export class ControllerAPIError extends Error {
   }
 }
 
+// Keep a dashboard request from waiting forever when the Controller is down,
+// a reverse proxy is misconfigured, or the local HTTPS endpoint is still
+// starting.  The browser-side retry/refresh loop can then surface a bounded,
+// actionable error instead of leaving the page in a permanent loading state.
+export const controllerRequestTimeoutMs = 15_000;
+
 async function request<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (token) headers.set("Authorization", "Bearer " + token);
   const csrf = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("af_csrf="))?.slice("af_csrf=".length);
   if (csrf && init.method && init.method !== "GET" && init.method !== "HEAD") headers.set("X-CSRF-Token", decodeURIComponent(csrf));
-  const response = await fetch("/api/v1" + path, { ...init, headers, credentials: "include", cache: "no-store" });
-  if (!response.ok) {
-    let message = "request failed with HTTP " + response.status;
-    let code: string | undefined;
-    try {
-      const body = (await response.json()) as { error?: { code?: string; message?: string } };
-      message = body.error?.message || message;
-      code = body.error?.code;
-    } catch {
-      // Keep the stable HTTP status when the response is not JSON.
-    }
-    throw new ControllerAPIError(response.status, message, code);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, controllerRequestTimeoutMs);
+  const callerSignal = init.signal;
+  const forwardAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) forwardAbort();
+    else callerSignal.addEventListener("abort", forwardAbort, { once: true });
   }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  try {
+    const response = await fetch("/api/v1" + path, { ...init, headers, credentials: "include", cache: "no-store", signal: controller.signal });
+    if (!response.ok) {
+      let message = "request failed with HTTP " + response.status;
+      let code: string | undefined;
+      try {
+        const body = (await response.json()) as { error?: { code?: string; message?: string } };
+        message = body.error?.message || message;
+        code = body.error?.code;
+      } catch {
+        // Keep the stable HTTP status when the response is not JSON.
+      }
+      throw new ControllerAPIError(response.status, message, code);
+    }
+    if (response.status === 204) return undefined as T;
+    // Keep the timeout active through body consumption as well as header
+    // delivery. A proxy can accept a request and then stall its response body.
+    return (await response.json()) as T;
+  } catch (error) {
+    if (timedOut) {
+      throw new ControllerAPIError(0, "Controller 请求超时，请检查 Controller 是否在线。", "request_timeout");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", forwardAbort);
+  }
 }
 
 export function login(username: string, password: string): Promise<{ user: ControllerUser; csrf_token: string }> {

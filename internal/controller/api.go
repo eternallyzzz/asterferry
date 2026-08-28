@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"database/sql"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -22,10 +24,12 @@ import (
 )
 
 type Server struct {
-	store    *Store
-	config   Config
-	http     *http.Server
-	sessions sync.Map // opaque session id -> session
+	store        *Store
+	config       Config
+	http         *http.Server
+	sessions     sync.Map // opaque session id -> session
+	loginLimiter *loginLimiter
+	metrics      *ControllerMetrics
 }
 
 type session struct {
@@ -41,7 +45,10 @@ func NewServer(config Config, store *Store) (*Server, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	server := &Server{store: store, config: config}
+	if store.metrics == nil {
+		store.metrics = newControllerMetrics()
+	}
+	server := &Server{store: store, config: config, loginLimiter: newLoginLimiter(), metrics: store.metrics}
 	server.http = &http.Server{Addr: config.HTTPListen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second}
 	return server, nil
 }
@@ -50,7 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
-	mux.HandleFunc("/metrics", s.metrics)
+	mux.HandleFunc("/metrics", s.metricsHandler)
 	mux.HandleFunc("/openapi.yaml", s.openapi)
 	// Keep the document available both at the deployment-root path and under
 	// the versioned API prefix.  Reverse proxies commonly mount the whole
@@ -79,7 +86,7 @@ func (s *Server) Handler() http.Handler {
 	if s.config.DashboardEnable {
 		mux.Handle("/dashboard/", http.StripPrefix("/dashboard/", dashboard.Handler()))
 	}
-	return securityHeaders(mux)
+	return s.metrics.middleware(securityHeaders(mux))
 }
 
 func (s *Server) ListenAndServe() error { return s.http.ListenAndServe() }
@@ -145,14 +152,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ready": true})
 }
 
-func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorize(w, r, RoleViewer); !ok {
 		return
 	}
-	// Keep this endpoint intentionally small; deployments can protect it at
-	// the reverse proxy while the API remains the source of structured state.
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	_, _ = io.WriteString(w, "# HELP asterferry_controller_up Controller process health\n# TYPE asterferry_controller_up gauge\nasterferry_controller_up 1\n")
+	s.metrics.refreshSQLite(s.store)
+	s.metrics.Handler().ServeHTTP(w, r)
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -168,11 +173,28 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	keys := loginKeys(r, input.Username)
+	if allowed, retry := s.loginLimiter.allow(keys...); !allowed {
+		seconds := int(retry / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many failed login attempts")
+		return
+	}
 	user, err := s.store.Authenticate(r.Context(), input.Username, input.Password)
 	if err != nil {
+		if !isCredentialError(err) {
+			slog.Default().Error("controller login storage failure", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+			return
+		}
+		s.loginLimiter.failure(keys...)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "username or password is invalid")
 		return
 	}
+	s.loginLimiter.success(keys...)
 	sessionID, csrf, err := randomSessionValues()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_failed", "could not create session")
@@ -216,7 +238,7 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 		role := r.URL.Query().Get("role")
 		nodes, err := s.store.ListNodes(r.Context(), role)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "database_error", "could not list nodes")
+			writeStoreError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": nodes})
@@ -252,7 +274,7 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.store.GetNode(r.Context(), node.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database_error", "node was created but cannot be read")
+		writeStoreError(w, err)
 		return
 	}
 	setETag(w, created.Revision)
@@ -364,11 +386,25 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			// to disconnect immediately as well. Disabling, expiry and a pending
 			// certificate follow the same fail-closed path; an offline node is
 			// rejected when it reconnects.
-			_, _ = s.store.PublishAction(r.Context(), nodeID, "reconnect", "")
+			delivered, actionErr := s.store.PublishAction(r.Context(), nodeID, "reconnect", "")
+			if actionErr != nil || !delivered {
+				if actionErr != nil {
+					slog.Default().Error("failed to publish node security action", "node_id", nodeID, "error", actionErr)
+				} else {
+					slog.Default().Warn("node security action is not currently delivered", "node_id", nodeID)
+				}
+				eventType := "action_not_delivered"
+				if actionErr != nil {
+					eventType = "action_delivery_failed"
+				}
+				if eventErr := s.store.RecordEvent(context.Background(), user.Username, "", eventType, "reconnect action was not delivered immediately", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
+					slog.Default().Error("failed to record security action delivery event", "node_id", nodeID, "error", eventErr)
+				}
+			}
 		}
 		updated, err := s.store.GetNode(r.Context(), nodeID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "database_error", "node updated but cannot be read")
+			writeStoreError(w, err)
 			return
 		}
 		setETag(w, updated.Revision)
@@ -1290,7 +1326,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListAudit(r.Context(), limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "database_error", "could not list audit events")
+		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -1457,7 +1493,17 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 				// Do not let an in-memory session outlive an Admin revocation or
 				// role change. The database remains authoritative after login.
 				fresh, lookupErr := s.store.GetUser(r.Context(), sess.User.ID)
-				if lookupErr != nil || !fresh.Enabled {
+				if lookupErr != nil {
+					if !errors.Is(lookupErr, sql.ErrNoRows) {
+						slog.Default().Error("controller session lookup failed", "error", lookupErr)
+						writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+						return User{}, false
+					}
+					s.sessions.Delete(cookie.Value)
+					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
+					return User{}, false
+				}
+				if !fresh.Enabled {
 					s.sessions.Delete(cookie.Value)
 					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
 					return User{}, false
@@ -1472,7 +1518,16 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 			}
 		}
 	}
-	if err != nil || !user.Enabled {
+	if err != nil {
+		if !isCredentialError(err) {
+			slog.Default().Error("controller authentication storage failure", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+			return User{}, false
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
+		return User{}, false
+	}
+	if !user.Enabled {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
 		return User{}, false
 	}
@@ -1565,6 +1620,14 @@ func parseIfMatch(value string) (int64, error) {
 }
 
 func writeStoreError(w http.ResponseWriter, err error) {
+	// modernc.org/sqlite exposes every driver error through Code(), including
+	// UNIQUE constraint failures. Classify duplicate resources before the
+	// generic SQLite availability branch so callers receive a conflict instead
+	// of a misleading database-unavailable response.
+	if strings.Contains(strings.ToLower(err.Error()), "unique constraint") || strings.Contains(strings.ToLower(err.Error()), "already exists") {
+		writeError(w, http.StatusConflict, "already_exists", "resource already exists")
+		return
+	}
 	var conflict *RevisionConflictError
 	if errors.As(err, &conflict) {
 		writeError(w, http.StatusConflict, "revision_conflict", conflict.Error())
@@ -1591,11 +1654,19 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "resource was not found")
 		return
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "unique constraint") || strings.Contains(strings.ToLower(err.Error()), "already exists") {
-		writeError(w, http.StatusConflict, "already_exists", "resource already exists")
+	if errors.Is(err, ErrStorageFailure) || isSQLiteError(err) || errors.Is(err, sql.ErrConnDone) {
+		slog.Default().Error("controller store operation failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller storage is temporarily unavailable")
 		return
 	}
 	writeError(w, http.StatusBadRequest, "request_rejected", err.Error())
+}
+
+type sqliteError interface{ Code() int }
+
+func isSQLiteError(err error) bool {
+	var coded sqliteError
+	return errors.As(err, &coded)
 }
 
 func writeApplyError(w http.ResponseWriter, status int, applyErr *domain.ApplyError) {

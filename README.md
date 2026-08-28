@@ -114,9 +114,27 @@ Run the core verification suite:
 ```powershell
 go test ./...
 go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 -checks=all,-SA1019 ./...
 npm --prefix web/dashboard test
 npm --prefix web/dashboard run build
+go test -tags=integration -count=1 -timeout=5m ./internal/integration
 ```
 
-Additional protocol fuzzing, integration and deployment smoke tests should be
-run before release on Linux, WSL and Windows.
+The Dashboard client bounds each Controller request at 15 seconds and reports
+a localized timeout instead of waiting indefinitely when an HTTPS proxy or
+Controller is unavailable. Additional protocol fuzzing and deployment smoke
+tests should be run before release on Linux, WSL and Windows.
+
+On Windows, the race detector requires CGO and a recent mingw-w64 toolchain.
+Use GCC 10.3 or newer (or an LLVM MinGW release that provides
+`libsynchronization.a`), then point Go at that compiler before running the
+race suite:
+
+```powershell
+go env -w CGO_ENABLED=1
+go env -w CC=C:\path\to\mingw64\bin\gcc.exe CXX=C:\path\to\mingw64\bin\g++.exe
+go test -race ./...
+```
+
+An older MinGW compiler can build ordinary tests but fail to start race
+instrumented binaries with Windows status `0xc0000139`.

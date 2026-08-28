@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"embed"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -20,8 +21,9 @@ var countryDB embed.FS
 
 var routeDB struct {
 	sync.Once
-	db  *geoip2.Reader
-	err error
+	db       *geoip2.Reader
+	err      error
+	warnOnce sync.Once
 }
 
 func countryReader() (*geoip2.Reader, error) {
@@ -33,7 +35,20 @@ func countryReader() (*geoip2.Reader, error) {
 		}
 		routeDB.db, routeDB.err = geoip2.FromBytes(data)
 	})
+	if routeDB.err != nil {
+		routeDB.warnOnce.Do(func() {
+			slog.Default().Warn("GeoIP route database unavailable; GeoIP rules will not match", "error", routeDB.err)
+		})
+	}
 	return routeDB.db, routeDB.err
+}
+
+// GeoIPAvailable reports whether the embedded optional database initialized.
+// It is safe for data-plane callers to use this as a health signal; routing
+// itself still keeps the explicit direct/CIDR/domain fallback.
+func GeoIPAvailable() bool {
+	_, err := countryReader()
+	return err == nil
 }
 
 // SelectRoute evaluates the ordered Agent route rules. It intentionally has a
@@ -46,7 +61,13 @@ func SelectRoute(spec domain.AgentSpec, target string) string {
 	}
 	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 	ip := net.ParseIP(strings.Trim(host, "[]"))
-	db, _ := countryReader()
+	db, dbErr := countryReader()
+	if dbErr != nil {
+		// countryReader already emits a once-only warning. Keep the explicit
+		// error path here so a missing optional database cannot look like a
+		// successful GeoIP lookup to callers or static analysis.
+		db = nil
+	}
 	for _, rule := range spec.Routes {
 		if !rule.Enabled {
 			continue

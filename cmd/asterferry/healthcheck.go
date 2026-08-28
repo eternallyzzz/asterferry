@@ -10,10 +10,6 @@ import (
 	"time"
 )
 
-func runHealthcheck(out io.Writer, target string, timeout time.Duration) error {
-	return runHealthcheckWithOptions(out, target, timeout, false)
-}
-
 func runHealthcheckWithOptions(out io.Writer, target string, timeout time.Duration, insecureTLS bool) error {
 	parsed, err := parseHealthcheckURL(target)
 	if err != nil {

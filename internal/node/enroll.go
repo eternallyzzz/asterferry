@@ -26,6 +26,11 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
+const (
+	controllerDialTimeout    = 10 * time.Second
+	controllerRequestTimeout = 15 * time.Second
+)
+
 type Bootstrap struct {
 	SchemaVersion     int    `json:"schema_version"`
 	ControllerAddress string `json:"controller_address"`
@@ -153,7 +158,9 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 		}
 		tlsConfig.RootCAs = pool
 	}
-	conn, err := grpc.DialContext(ctx, options.ControllerAddress, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithBlock())
+	dialCtx, cancelDial := boundedControllerContext(ctx, controllerDialTimeout)
+	conn, err := grpc.DialContext(dialCtx, options.ControllerAddress, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithBlock())
+	cancelDial()
 	if err != nil {
 		return Bootstrap{}, fmt.Errorf("connect Controller: %w", err)
 	}
@@ -163,26 +170,28 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	if options.Role == domain.RoleAgent {
 		roleValue = v1.NodeRole_NODE_ROLE_AGENT
 	}
-	response, err := client.Enroll(ctx, &v1.EnrollRequest{Token: options.Token, Role: roleValue, NodeId: options.NodeID, CsrDer: csr})
+	requestCtx, cancelRequest := boundedControllerContext(ctx, controllerRequestTimeout)
+	response, err := client.Enroll(requestCtx, &v1.EnrollRequest{Token: options.Token, Role: roleValue, NodeId: options.NodeID, CsrDer: csr})
+	cancelRequest()
 	if err != nil {
 		return Bootstrap{}, err
 	}
 	if response.GetSchemaVersion() != domain.SchemaVersion {
-		return Bootstrap{}, errors.New("Controller returned an unsupported control schema version")
+		return Bootstrap{}, errors.New("controller returned an unsupported control schema version")
 	}
 	if response.GetCertificate() == nil || len(response.GetCertificate().GetCertificateDer()) == 0 {
-		return Bootstrap{}, errors.New("Controller returned no node certificate")
+		return Bootstrap{}, errors.New("controller returned no node certificate")
 	}
 	if len(caPEM) == 0 {
 		if len(response.GetCertificate().GetCaCertificateDer()) == 0 {
-			return Bootstrap{}, errors.New("Controller returned no CA certificate")
+			return Bootstrap{}, errors.New("controller returned no CA certificate")
 		}
 		caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: response.GetCertificate().GetCaCertificateDer()})
 	}
 	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: response.GetCertificate().GetCertificateDer()})
 	bootstrap := Bootstrap{SchemaVersion: domain.SchemaVersion, ControllerAddress: options.ControllerAddress, ControllerServerName: serverName, NodeID: options.NodeID, Role: options.Role, CertificatePEM: string(certificatePEM), PrivateKeyPEM: string(privateKey), CAPEM: string(caPEM), CachePath: options.CachePath, LogLevel: "info"}
 	if err := validateBootstrap(bootstrap); err != nil {
-		return Bootstrap{}, fmt.Errorf("Controller returned invalid bootstrap identity: %w", err)
+		return Bootstrap{}, fmt.Errorf("controller returned invalid bootstrap identity: %w", err)
 	}
 	if options.OutputPath != "" {
 		if err := WriteBootstrap(options.OutputPath, bootstrap); err != nil {
@@ -311,7 +320,26 @@ func Dial(ctx context.Context, bootstrap Bootstrap) (*grpc.ClientConn, error) {
 		}
 	}
 	config := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: serverName, RootCAs: pool, Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", controlwire.ControlALPN}}
-	return grpc.DialContext(ctx, bootstrap.ControllerAddress, grpc.WithTransportCredentials(credentials.NewTLS(config)), grpc.WithBlock())
+	dialCtx, cancelDial := boundedControllerContext(ctx, controllerDialTimeout)
+	conn, err := grpc.DialContext(dialCtx, bootstrap.ControllerAddress, grpc.WithTransportCredentials(credentials.NewTLS(config)), grpc.WithBlock())
+	cancelDial()
+	return conn, err
+}
+
+// boundedControllerContext prevents a command or reconnect attempt from
+// waiting forever when the Controller endpoint accepts no connections or
+// stops responding. A caller-provided shorter deadline remains authoritative.
+func boundedControllerContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= timeout {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func ControlClient(ctx context.Context, bootstrap Bootstrap) (v1.ControlClient, *grpc.ClientConn, error) {

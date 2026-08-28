@@ -35,7 +35,9 @@ type ScheduleRequest struct {
 // the resulting assignment with the repository's transactional port checks.
 // It is intentionally a convenience around Schedule; callers that already
 // have a consistent candidate view can use the pure function directly.
-func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options WriteOptions) (domain.Assignment, error) {
+func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options WriteOptions) (assignment domain.Assignment, returnErr error) {
+	finishMetrics := s.metrics.startSchedule()
+	defer func() { finishMetrics(returnErr) }()
 	agent, err := s.GetNode(ctx, agentID)
 	if err != nil {
 		return domain.Assignment{}, err
@@ -126,7 +128,7 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 		}
 		generation = existing.Generation + 1
 	}
-	assignment, err := Schedule(ScheduleRequest{Agent: agent, AgentSpec: agentSpec, Services: services, Existing: existing, Generation: generation}, candidates)
+	assignment, err = Schedule(ScheduleRequest{Agent: agent, AgentSpec: agentSpec, Services: services, Existing: existing, Generation: generation}, candidates)
 	if err != nil {
 		return domain.Assignment{}, err
 	}
@@ -179,7 +181,9 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 // enrolled Gateway has not yet proven liveness, but treating that absence as
 // failure would cause needless placement churn. A caller may run this method
 // periodically; each successful failover updates both node snapshots.
-func (s *Store) ReconcileAssignments(ctx context.Context, offlineAfter time.Duration) ([]domain.Assignment, error) {
+func (s *Store) ReconcileAssignments(ctx context.Context, offlineAfter time.Duration) (result []domain.Assignment, returnErr error) {
+	finishMetrics := s.metrics.startSchedule()
+	defer func() { finishMetrics(returnErr) }()
 	if offlineAfter <= 0 {
 		offlineAfter = DefaultGatewayOfflineAfter
 	}
@@ -188,7 +192,7 @@ func (s *Store) ReconcileAssignments(ctx context.Context, offlineAfter time.Dura
 		return nil, err
 	}
 	now := time.Now().UTC()
-	result := make([]domain.Assignment, 0)
+	result = make([]domain.Assignment, 0)
 	for _, assignment := range assignments {
 		if assignment.State == domain.AssignmentDraining {
 			continue

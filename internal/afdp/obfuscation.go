@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash"
 	"net"
 	"sync"
 	"time"
@@ -552,20 +551,19 @@ func (c *obfuscationPacketConn) tag(salt, masked []byte, key [32]byte) ([obfusca
 	if err != nil {
 		return [obfuscationTagBytes]byte{}, fmt.Errorf("initialize obfuscation authenticator: %w", err)
 	}
-	var h hash.Hash = hasher
-	if _, err := h.Write([]byte(obfuscationTagDomain)); err != nil {
+	if _, err := hasher.Write([]byte(obfuscationTagDomain)); err != nil {
 		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator domain: %w", err)
 	}
-	if _, err := h.Write(key[:]); err != nil {
+	if _, err := hasher.Write(key[:]); err != nil {
 		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator key: %w", err)
 	}
-	if _, err := h.Write(salt); err != nil {
+	if _, err := hasher.Write(salt); err != nil {
 		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator salt: %w", err)
 	}
-	if _, err := h.Write(masked); err != nil {
+	if _, err := hasher.Write(masked); err != nil {
 		return [obfuscationTagBytes]byte{}, fmt.Errorf("write obfuscation authenticator body: %w", err)
 	}
-	digest := h.Sum(nil)
+	digest := hasher.Sum(nil)
 	var tag [obfuscationTagBytes]byte
 	copy(tag[:], digest[:obfuscationTagBytes])
 	return tag, nil

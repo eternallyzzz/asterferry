@@ -90,8 +90,7 @@ func newControllerRunCommand() *cobra.Command {
 			if err := instance.Start(cmd.Context()); err != nil {
 				return err
 			}
-			<-cmd.Context().Done()
-			return nil
+			return instance.Wait()
 		},
 	}
 	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
