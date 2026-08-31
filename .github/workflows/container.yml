@@ -3,16 +3,20 @@ name: CI and Release
 on:
   pull_request:
     paths:
-      - ".github/workflows/container.yml"
+      - ".github/**"
       - ".dockerignore"
       - ".goreleaser.yaml"
       - "CHANGELOG.md"
       - "Dockerfile"
-      - "deploy/docker/**"
-      - "deploy/helm/**"
+      - "README.md"
+      - "api/**"
+      - "deploy/**"
+      - "docs/**"
+      - "examples/**"
       - "go.mod"
       - "go.sum"
-      - "scripts/release-check.ps1"
+      - "proto/**"
+      - "scripts/**"
       - "web/dashboard/**"
       - "cmd/**"
       - "internal/**"
@@ -37,6 +41,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -56,6 +62,9 @@ jobs:
           npm --prefix web/dashboard run build
           npm --prefix web/dashboard audit --registry=https://registry.npmjs.org --omit=dev --audit-level=high
           git diff --exit-code -- internal/dashboard/dist
+      - name: Check patch whitespace
+        shell: bash
+        run: git diff --check HEAD^ HEAD
       - name: Verify Go modules
         run: go mod verify
       - name: Run tests
