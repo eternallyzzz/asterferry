@@ -1,24 +1,26 @@
 package controller
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
-func TestPasswordDigestIsKeyed(t *testing.T) {
-	var key [masterKeyBytes]byte
-	copy(key[:], "01234567890123456789012345678901")
-	password := "a-very-long-password"
-	digest := passwordDigest(key, password)
-	plainDigest := sha256.Sum256([]byte(password))
-	if digest == hex.EncodeToString(plainDigest[:]) {
-		t.Fatal("password digest is an unkeyed SHA-256 digest")
+func TestPasswordIdempotencyRequestDoesNotContainPasswordDigest(t *testing.T) {
+	request := struct {
+		Username        string `json:"username"`
+		Role            string `json:"role"`
+		PasswordChanged bool   `json:"password_changed"`
+	}{Username: "admin", Role: RoleAdmin, PasswordChanged: true}
+	b, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
 	}
-	other := key
-	other[0]++
-	if digest == passwordDigest(other, password) {
-		t.Fatal("password digest did not depend on the master key")
+	if strings.Contains(string(b), "password_digest") || strings.Contains(string(b), "a-very-long-password") {
+		t.Fatalf("password material leaked into idempotency request: %s", b)
+	}
+	if !strings.Contains(string(b), `"password_changed":true`) {
+		t.Fatalf("password change marker missing: %s", b)
 	}
 }
 

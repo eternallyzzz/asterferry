@@ -19,6 +19,9 @@ func TestRootExposesOnlyCurrentGenerationCommands(t *testing.T) {
 			t.Fatalf("retired command %q is still exposed", name)
 		}
 	}
+	if command, _, err := root.Find([]string{"controller", "migrate"}); err != nil || command == root {
+		t.Fatalf("controller migrate command is missing: command=%v err=%v", command, err)
+	}
 }
 
 func TestNodeRunRequiresBootstrap(t *testing.T) {
@@ -39,7 +42,7 @@ func TestVersionUsesWireGenerationString(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "AFDP/1") || strings.Contains(out.String(), "protocol: v6") {
+	if !strings.Contains(out.String(), "AFDP/2") || strings.Contains(out.String(), "protocol: v6") {
 		t.Fatalf("unexpected version output: %s", out.String())
 	}
 }

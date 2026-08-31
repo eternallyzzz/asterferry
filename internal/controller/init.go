@@ -64,43 +64,58 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if err := config.Validate(); err != nil {
 		return InitResult{}, err
 	}
-	if _, err := os.Stat(dir); err == nil && !options.Force {
-		entries, readErr := os.ReadDir(dir)
-		if readErr != nil {
-			return InitResult{}, readErr
+	targetExists := false
+	if info, err := os.Stat(dir); err == nil {
+		if !info.IsDir() {
+			return InitResult{}, fmt.Errorf("controller path %q is not a directory", dir)
 		}
-		if len(entries) > 0 {
-			return InitResult{}, fmt.Errorf("controller directory %q is not empty; use force to replace it", dir)
+		targetExists = true
+		if !options.Force {
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil {
+				return InitResult{}, readErr
+			}
+			if len(entries) > 0 {
+				return InitResult{}, fmt.Errorf("controller directory %q is not empty; use force to replace it", dir)
+			}
 		}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return InitResult{}, err
 	}
-	for _, path := range []string{dir, filepath.Dir(config.CAKeyPath), filepath.Dir(config.CACertPath), filepath.Dir(config.TLSKeyPath), filepath.Dir(config.TLSCertPath)} {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return InitResult{}, err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".init-*")
+	if err != nil {
+		return InitResult{}, fmt.Errorf("create initialization staging directory: %w", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	stagedConfig := DefaultConfig(staging)
+	stagedConfig.HTTPListen = config.HTTPListen
+	stagedConfig.GRPCListen = config.GRPCListen
+	stagedConfig.DashboardEnable = config.DashboardEnable
+	stagedConfig.LogLevel = config.LogLevel
+	for _, path := range []string{staging, filepath.Dir(stagedConfig.CAKeyPath), filepath.Dir(stagedConfig.CACertPath), filepath.Dir(stagedConfig.TLSKeyPath), filepath.Dir(stagedConfig.TLSCertPath)} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return InitResult{}, err
 		}
 	}
-	if options.Force {
-		// --force is an explicit destructive re-initialization. Remove only the
-		// known Controller SQLite files; unrelated files in the directory are
-		// left untouched.
-		for _, path := range []string{config.DatabasePath, config.DatabasePath + "-wal", config.DatabasePath + "-shm"} {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return InitResult{}, fmt.Errorf("remove existing controller database %q: %w", path, err)
-			}
-		}
-	}
-	if err := writeCA(config.CAKeyPath, config.CACertPath, options.Now); err != nil {
+	if err := writeCA(stagedConfig.CAKeyPath, stagedConfig.CACertPath, options.Now); err != nil {
 		return InitResult{}, err
 	}
-	if err := writeServerCertificate(config, options.Now); err != nil {
+	if err := writeServerCertificate(stagedConfig, options.Now); err != nil {
 		return InitResult{}, err
 	}
-	masterKey, err := LoadOrCreateMasterKey(config.MasterKeyPath)
+	masterKey, err := LoadOrCreateMasterKey(stagedConfig.MasterKeyPath)
 	if err != nil {
 		return InitResult{}, err
 	}
-	store, err := OpenStore(config.DatabasePath, masterKey)
+	store, err := OpenStore(stagedConfig.DatabasePath, masterKey)
 	if err != nil {
 		return InitResult{}, err
 	}
@@ -109,12 +124,162 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if err != nil {
 		return InitResult{}, err
 	}
-	configPath := filepath.Join(dir, "controller.json")
-	if err := SaveConfig(configPath, config); err != nil {
+	// Windows keeps SQLite's database handle open across directory renames.
+	// Close the staging store before publishing the containing directory; the
+	// deferred close still covers every earlier error path.
+	if err := store.Close(); err != nil {
 		return InitResult{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return InitResult{}, err
+	}
+	// The generated config points at the eventual target directory, not the
+	// staging directory. It becomes correct as soon as the directory rename
+	// completes, while every referenced file has already been fsynced in the
+	// staging tree.
+	stagedConfigPath := filepath.Join(staging, "controller.json")
+	if err := SaveConfig(stagedConfigPath, config); err != nil {
+		return InitResult{}, err
+	}
+	if err := publishInitializedDirectory(staging, dir, targetExists, options.Force); err != nil {
+		return InitResult{}, err
+	}
+	published = true
+	configPath := filepath.Join(dir, "controller.json")
 	config.SourcePath = configPath
 	return InitResult{ConfigPath: configPath, Config: config, Admin: admin}, nil
+}
+
+type initMovedEntry struct {
+	from string
+	to   string
+}
+
+// publishInitializedDirectory makes initialization all-or-nothing for a new
+// directory. Force mode keeps unrelated files from the old directory and
+// leaves the replaced tree in a same-parent rollback backup.
+func publishInitializedDirectory(staging, target string, targetExists, force bool) error {
+	if !targetExists {
+		if err := os.Rename(staging, target); err != nil {
+			return fmt.Errorf("publish initialized Controller directory: %w", err)
+		}
+		return nil
+	}
+	if !force {
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			return err
+		}
+		if len(entries) > 0 {
+			return fmt.Errorf("controller directory %q became non-empty during initialization", target)
+		}
+		// Renaming the empty directory away is more reliable on Windows than
+		// removing it and immediately renaming another directory into the same
+		// pathname. It also gives the publish step an explicit rollback target.
+		backup, err := reserveInitDirectory(target, "."+filepath.Base(target)+".pre-init-*")
+		if err != nil {
+			return fmt.Errorf("reserve empty Controller rollback directory: %w", err)
+		}
+		if err := os.Rename(target, backup); err != nil {
+			return fmt.Errorf("move empty Controller directory: %w", err)
+		}
+		if err := os.Rename(staging, target); err != nil {
+			_ = os.Rename(backup, target)
+			return fmt.Errorf("publish initialized Controller directory: %w", err)
+		}
+		_ = os.Remove(backup)
+		return nil
+	}
+
+	backup, err := reserveInitDirectory(target, "."+filepath.Base(target)+".pre-init-*")
+	if err != nil {
+		return fmt.Errorf("reserve initialization rollback directory: %w", err)
+	}
+	if err := os.Rename(target, backup); err != nil {
+		return fmt.Errorf("move previous Controller directory: %w", err)
+	}
+	moved, err := preserveInitExtras(backup, staging)
+	if err != nil {
+		rollbackInitDirectory(backup, target, moved)
+		return fmt.Errorf("preserve unrelated Controller files: %w", err)
+	}
+	if err := os.Rename(staging, target); err != nil {
+		rollbackInitDirectory(backup, target, moved)
+		return fmt.Errorf("publish initialized Controller directory: %w", err)
+	}
+	return nil
+}
+
+func reserveInitDirectory(path, pattern string) (string, error) {
+	name, err := os.MkdirTemp(filepath.Dir(path), pattern)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Remove(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func preserveInitExtras(previous, staging string) ([]initMovedEntry, error) {
+	moved := []initMovedEntry{}
+	knownTop := map[string]struct{}{
+		"controller.db": {}, "controller.db-wal": {}, "controller.db-shm": {}, "controller.db-journal": {},
+		"controller.json": {}, "master.key": {}, "ca": {}, "tls": {},
+	}
+	entries, err := os.ReadDir(previous)
+	if err != nil {
+		return nil, err
+	}
+	move := func(from, to string) error {
+		if err := os.Rename(from, to); err != nil {
+			return err
+		}
+		moved = append(moved, initMovedEntry{from: from, to: to})
+		return nil
+	}
+	for _, entry := range entries {
+		if _, known := knownTop[entry.Name()]; known {
+			continue
+		}
+		if err := move(filepath.Join(previous, entry.Name()), filepath.Join(staging, entry.Name())); err != nil {
+			return moved, err
+		}
+	}
+	for _, item := range []struct {
+		directory string
+		known     map[string]struct{}
+	}{
+		{directory: "ca", known: map[string]struct{}{"ca.key": {}, "ca.crt": {}}},
+		{directory: "tls", known: map[string]struct{}{"controller.key": {}, "controller.crt": {}}},
+	} {
+		fromDir := filepath.Join(previous, item.directory)
+		entries, readErr := os.ReadDir(fromDir)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return moved, readErr
+		}
+		for _, entry := range entries {
+			if _, known := item.known[entry.Name()]; known {
+				continue
+			}
+			if err := move(filepath.Join(fromDir, entry.Name()), filepath.Join(staging, item.directory, entry.Name())); err != nil {
+				return moved, err
+			}
+		}
+	}
+	return moved, nil
+}
+
+func rollbackInitDirectory(previous, target string, moved []initMovedEntry) {
+	for index := len(moved) - 1; index >= 0; index-- {
+		_ = os.Rename(moved[index].to, moved[index].from)
+	}
+	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+		_ = os.Rename(previous, target)
+	}
 }
 
 func writeCA(keyPath, certPath string, nowFn func() time.Time) error {

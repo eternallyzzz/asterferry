@@ -26,25 +26,57 @@ func Write(path string, data []byte, mode os.FileMode) error {
 }
 
 // AtomicWrite writes data through a synced temporary file and replaces path.
-// On platforms that cannot rename over an existing file, it retries after
-// removing the old target. The temporary file is removed on every failure
-// path.
+// On platforms that cannot rename over an existing file, it moves the old
+// target to a same-directory backup while publishing the new file. If the
+// second rename fails, the old target is restored before returning, so a
+// Windows fallback can never leave both the destination and temporary file
+// absent.
 func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	tmpPath, err := WriteTemp(path, tempPrefix, data, mode)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmpPath)
-	if err := os.Rename(tmpPath, path); err == nil {
+	if firstErr := os.Rename(tmpPath, path); firstErr == nil {
+		return nil
+	} else {
+		if _, statErr := os.Stat(path); statErr != nil {
+			return errors.Join(firstErr, statErr)
+		}
+		backupPath, reserveErr := reservePath(path, ".asterferry-backup-*")
+		if reserveErr != nil {
+			return errors.Join(firstErr, reserveErr)
+		}
+		if backupErr := os.Rename(path, backupPath); backupErr != nil {
+			_ = os.Remove(backupPath)
+			return errors.Join(firstErr, backupErr)
+		}
+		if publishErr := os.Rename(tmpPath, path); publishErr != nil {
+			restoreErr := os.Rename(backupPath, path)
+			return errors.Join(firstErr, publishErr, restoreErr)
+		}
+		// Publishing succeeded. A failure to remove the backup is harmless to
+		// the new target and is intentionally left for an operator/cleanup job;
+		// returning it would make callers retry an already-published write.
+		_ = os.Remove(backupPath)
 		return nil
 	}
-	if removeErr := os.Remove(path); removeErr != nil {
-		return errors.Join(err, removeErr)
+}
+
+func reservePath(path, pattern string) (string, error) {
+	file, err := os.CreateTemp(filepath.Dir(path), pattern)
+	if err != nil {
+		return "", err
 	}
-	if renameErr := os.Rename(tmpPath, path); renameErr != nil {
-		return renameErr
+	reserved := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(reserved)
+		return "", err
 	}
-	return nil
+	if err := os.Remove(reserved); err != nil {
+		return "", err
+	}
+	return reserved, nil
 }
 
 // WriteTemp writes and syncs data to a temporary file in path's directory,

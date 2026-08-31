@@ -23,7 +23,7 @@ import (
 
 const (
 	SchemaVersion = 1
-	DataALPN      = "asterferry-data/1"
+	DataALPN      = "asterferry-data/2"
 
 	RoleGateway = "gateway"
 	RoleAgent   = "agent"
@@ -119,8 +119,19 @@ type TransportPolicy struct {
 }
 
 type ObfuscationPolicy struct {
-	Mode             string `json:"mode"`
-	KeyCiphertext    []byte `json:"key_ciphertext,omitempty"`
+	Mode string `json:"mode"`
+	// KeyCiphertext and PreviousKeyCiphertext are Controller-at-rest values.
+	// They are never used directly by AFDP; the Controller decrypts them before
+	// constructing a node wire snapshot.
+	KeyCiphertext         []byte `json:"key_ciphertext,omitempty"`
+	PreviousKeyCiphertext []byte `json:"previous_key_ciphertext,omitempty"`
+	KeyID                 string `json:"key_id,omitempty"`
+	PreviousKeyID         string `json:"previous_key_id,omitempty"`
+	// Key and PreviousKey are transient data-plane values. They are accepted
+	// at the API boundary so the Controller can encrypt them immediately, and
+	// are included only in the in-memory/wire snapshot after decryption.
+	Key              []byte `json:"key,omitempty"`
+	PreviousKey      []byte `json:"previous_key,omitempty"`
 	MaxPaddingBytes  int    `json:"max_padding_bytes"`
 	HandshakeShaping bool   `json:"handshake_shaping"`
 }
@@ -132,14 +143,27 @@ func (o ObfuscationPolicy) Validate(path string) error {
 	if o.Mode != "" && o.Mode != "standard" && o.Mode != "camouflage" {
 		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".mode", Message: "obfuscation mode must be standard or camouflage"}
 	}
-	if o.Mode == "camouflage" && len(o.KeyCiphertext) == 0 {
-		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".key_ciphertext", Message: "camouflage mode requires an encrypted key"}
+	if o.Mode == "camouflage" && len(o.Key) == 0 && len(o.KeyCiphertext) == 0 {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".key_ciphertext", Message: "camouflage mode requires a protected key"}
+	}
+	for keyPath, key := range map[string][]byte{"key": o.Key, "previous_key": o.PreviousKey} {
+		if len(key) != 0 && len(key) != 32 {
+			return &ApplyError{Code: "invalid_obfuscation", Path: path + "." + keyPath, Message: "data-plane obfuscation keys must contain exactly 32 bytes"}
+		}
+	}
+	for idPath, id := range map[string]string{"key_id": o.KeyID, "previous_key_id": o.PreviousKeyID} {
+		if len(id) > 128 || strings.ContainsAny(id, "\x00\r\n") {
+			return &ApplyError{Code: "invalid_obfuscation", Path: path + "." + idPath, Message: "obfuscation key id is invalid"}
+		}
 	}
 	if o.MaxPaddingBytes < 0 || o.MaxPaddingBytes > 64<<10 {
 		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".max_padding_bytes", Message: "obfuscation padding limit is out of range"}
 	}
 	if len(o.KeyCiphertext) > 128<<10 {
 		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".key_ciphertext", Message: "obfuscation key ciphertext is too large"}
+	}
+	if len(o.PreviousKeyCiphertext) > 128<<10 {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".previous_key_ciphertext", Message: "previous obfuscation key ciphertext is too large"}
 	}
 	return nil
 }
@@ -435,7 +459,7 @@ func (s DesiredSnapshot) Intent() SnapshotIntent {
 	intent := SnapshotIntent{SchemaVersion: canonical.SchemaVersion, NodeID: canonical.NodeID, Generation: canonical.Generation}
 	if canonical.Gateway != nil {
 		g := canonical.Gateway
-		intent.Gateway = &GatewayIntent{NodeID: g.NodeID, PublicEndpoints: append([]string(nil), g.PublicEndpoints...), Listeners: append([]Listener(nil), g.Listeners...), Labels: cloneLabels(g.Labels), Capacity: g.Capacity, PortPool: PortPool{TCP: append([]PortRange(nil), g.PortPool.TCP...), UDP: append([]PortRange(nil), g.PortPool.UDP...)}, Transport: g.Transport, Obfuscation: ObfuscationPolicy{Mode: g.Obfuscation.Mode, KeyCiphertext: append([]byte(nil), g.Obfuscation.KeyCiphertext...), MaxPaddingBytes: g.Obfuscation.MaxPaddingBytes, HandshakeShaping: g.Obfuscation.HandshakeShaping}, Egress: cloneEgress(g.Egress)}
+		intent.Gateway = &GatewayIntent{NodeID: g.NodeID, PublicEndpoints: append([]string(nil), g.PublicEndpoints...), Listeners: append([]Listener(nil), g.Listeners...), Labels: cloneLabels(g.Labels), Capacity: g.Capacity, PortPool: PortPool{TCP: append([]PortRange(nil), g.PortPool.TCP...), UDP: append([]PortRange(nil), g.PortPool.UDP...)}, Transport: g.Transport, Obfuscation: obfuscationIntent(g.Obfuscation), Egress: cloneEgress(g.Egress)}
 	}
 	if canonical.Agent != nil {
 		a := canonical.Agent
@@ -450,7 +474,7 @@ func (s DesiredSnapshot) Intent() SnapshotIntent {
 		intent.Services = append(intent.Services, ServiceIntent{ID: service.ID, AgentID: service.AgentID, Protocol: service.Protocol, LocalTarget: service.LocalTarget, PublicBind: service.PublicBind, PublicPort: service.PublicPort, GatewaySelector: Selector{MatchLabels: cloneLabels(service.GatewaySelector.MatchLabels)}, Enabled: service.Enabled})
 	}
 	for _, assignment := range canonical.Assignments {
-		intent.Assignments = append(intent.Assignments, AssignmentIntent{ID: assignment.ID, GatewayID: assignment.GatewayID, AgentID: assignment.AgentID, ServiceIDs: append([]string(nil), assignment.ServiceIDs...), Bindings: append([]Binding(nil), assignment.Bindings...), Generation: assignment.Generation, State: assignment.State, PublicEndpoint: assignment.PublicEndpoint, Obfuscation: ObfuscationPolicy{Mode: assignment.Obfuscation.Mode, KeyCiphertext: append([]byte(nil), assignment.Obfuscation.KeyCiphertext...), MaxPaddingBytes: assignment.Obfuscation.MaxPaddingBytes, HandshakeShaping: assignment.Obfuscation.HandshakeShaping}})
+		intent.Assignments = append(intent.Assignments, AssignmentIntent{ID: assignment.ID, GatewayID: assignment.GatewayID, AgentID: assignment.AgentID, ServiceIDs: append([]string(nil), assignment.ServiceIDs...), Bindings: append([]Binding(nil), assignment.Bindings...), Generation: assignment.Generation, State: assignment.State, PublicEndpoint: assignment.PublicEndpoint, Obfuscation: obfuscationIntent(assignment.Obfuscation)})
 	}
 	return intent
 }
@@ -472,6 +496,27 @@ func cloneEgress(value EgressPolicy) EgressPolicy {
 	value.AllowCIDRs = append([]string(nil), value.AllowCIDRs...)
 	value.AllowSpecialCIDRs = append([]string(nil), value.AllowSpecialCIDRs...)
 	return value
+}
+
+func obfuscationIntent(value ObfuscationPolicy) ObfuscationPolicy {
+	result := ObfuscationPolicy{Mode: value.Mode, KeyID: value.KeyID, PreviousKeyID: value.PreviousKeyID, MaxPaddingBytes: value.MaxPaddingBytes, HandshakeShaping: value.HandshakeShaping}
+	if result.KeyID == "" && (len(value.Key) > 0 || len(value.KeyCiphertext) > 0) {
+		source := value.Key
+		if len(source) == 0 {
+			source = value.KeyCiphertext
+		}
+		digest := sha256.Sum256(source)
+		result.KeyID = hex.EncodeToString(digest[:])
+	}
+	if result.PreviousKeyID == "" && (len(value.PreviousKey) > 0 || len(value.PreviousKeyCiphertext) > 0) {
+		source := value.PreviousKey
+		if len(source) == 0 {
+			source = value.PreviousKeyCiphertext
+		}
+		digest := sha256.Sum256(source)
+		result.PreviousKeyID = hex.EncodeToString(digest[:])
+	}
+	return result
 }
 
 type SessionSummary struct {
@@ -791,7 +836,7 @@ func (g GatewaySpec) Validate() error {
 	if g.Transport.MaxStreams < 0 || g.Transport.MaxFrameBytes < 0 || g.Transport.MaxDatagramBytes < 0 || g.Transport.HandshakeTimeoutSeconds < 0 || g.Transport.IdleTimeoutSeconds < 0 {
 		return &ApplyError{Code: "invalid_transport", Path: "gateway.transport", Message: "transport limits cannot be negative"}
 	}
-	if g.Transport.MaxStreams > 1<<20 || g.Transport.MaxFrameBytes > 64<<10 || g.Transport.MaxDatagramBytes > 64<<10 || g.Transport.HandshakeTimeoutSeconds > 24*60*60 || g.Transport.IdleTimeoutSeconds > 7*24*60*60 {
+	if g.Transport.MaxStreams > 1<<20 || g.Transport.MaxFrameBytes > 1<<20 || g.Transport.MaxDatagramBytes > 64<<10 || g.Transport.HandshakeTimeoutSeconds > 24*60*60 || g.Transport.IdleTimeoutSeconds > 7*24*60*60 {
 		return &ApplyError{Code: "invalid_transport", Path: "gateway.transport", Message: "transport limits exceed the supported maximum"}
 	}
 	if g.Transport.ALPN != "" && g.Transport.ALPN != DataALPN || len(g.Transport.ALPN) > 255 || containsControl(g.Transport.ALPN) {
@@ -1168,15 +1213,58 @@ func (s DesiredSnapshot) WithChecksum() (DesiredSnapshot, error) {
 }
 
 func (s DesiredSnapshot) Clone() DesiredSnapshot {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return DesiredSnapshot{}
+	clone := s
+	if s.Gateway != nil {
+		value := cloneGatewaySpec(*s.Gateway)
+		clone.Gateway = &value
 	}
-	var clone DesiredSnapshot
-	if err := json.Unmarshal(b, &clone); err != nil {
-		return DesiredSnapshot{}
+	if s.Agent != nil {
+		value := cloneAgentSpec(*s.Agent)
+		clone.Agent = &value
+	}
+	clone.Services = make([]Service, len(s.Services))
+	for i, service := range s.Services {
+		clone.Services[i] = service
+		clone.Services[i].GatewaySelector.MatchLabels = cloneLabels(service.GatewaySelector.MatchLabels)
+	}
+	clone.Assignments = make([]Assignment, len(s.Assignments))
+	for i, assignment := range s.Assignments {
+		clone.Assignments[i] = assignment
+		clone.Assignments[i].ServiceIDs = append([]string(nil), assignment.ServiceIDs...)
+		clone.Assignments[i].Bindings = append([]Binding(nil), assignment.Bindings...)
+		clone.Assignments[i].Obfuscation.KeyCiphertext = append([]byte(nil), assignment.Obfuscation.KeyCiphertext...)
+		clone.Assignments[i].Obfuscation.PreviousKeyCiphertext = append([]byte(nil), assignment.Obfuscation.PreviousKeyCiphertext...)
+		clone.Assignments[i].Obfuscation.Key = append([]byte(nil), assignment.Obfuscation.Key...)
+		clone.Assignments[i].Obfuscation.PreviousKey = append([]byte(nil), assignment.Obfuscation.PreviousKey...)
 	}
 	return clone
+}
+
+func cloneGatewaySpec(value GatewaySpec) GatewaySpec {
+	value.PublicEndpoints = append([]string(nil), value.PublicEndpoints...)
+	value.Listeners = append([]Listener(nil), value.Listeners...)
+	value.Labels = cloneLabels(value.Labels)
+	value.PortPool.TCP = append([]PortRange(nil), value.PortPool.TCP...)
+	value.PortPool.UDP = append([]PortRange(nil), value.PortPool.UDP...)
+	value.Obfuscation.KeyCiphertext = append([]byte(nil), value.Obfuscation.KeyCiphertext...)
+	value.Obfuscation.PreviousKeyCiphertext = append([]byte(nil), value.Obfuscation.PreviousKeyCiphertext...)
+	value.Obfuscation.Key = append([]byte(nil), value.Obfuscation.Key...)
+	value.Obfuscation.PreviousKey = append([]byte(nil), value.Obfuscation.PreviousKey...)
+	value.Egress = cloneEgress(value.Egress)
+	return value
+}
+
+func cloneAgentSpec(value AgentSpec) AgentSpec {
+	value.GatewaySelector.MatchLabels = cloneLabels(value.GatewaySelector.MatchLabels)
+	value.Proxies = append([]ProxySpec(nil), value.Proxies...)
+	value.Routes = append([]RouteRule(nil), value.Routes...)
+	for i := range value.Routes {
+		value.Routes[i].CIDRs = append([]string(nil), value.Routes[i].CIDRs...)
+		value.Routes[i].Domains = append([]string(nil), value.Routes[i].Domains...)
+		value.Routes[i].GeoIP = append([]string(nil), value.Routes[i].GeoIP...)
+	}
+	value.Egress = cloneEgress(value.Egress)
+	return value
 }
 
 func (s DesiredSnapshot) Normalize() DesiredSnapshot {

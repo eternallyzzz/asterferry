@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -180,5 +181,41 @@ func TestDegradedAssignmentRejectsNewSessionsAndOpens(t *testing.T) {
 	open := OpenMetadata{Protocol: domain.ProtocolTCP, ServiceID: "service", Target: "127.0.0.1:80"}
 	if err := AuthorizeOpen(open, assignment); !errors.Is(err, ErrUnauthorizedAgent) {
 		t.Fatalf("degraded open was accepted: %v", err)
+	}
+}
+
+func TestCapabilitiesAreNegotiatedAndLargeAssignmentsFitSessionAccept(t *testing.T) {
+	negotiated := NegotiateCapabilities([]string{"udp", "tcp", "unused"}, []string{"tcp", "http", "udp"})
+	want := []string{"tcp", "udp"}
+	if !bytes.Equal([]byte(fmt.Sprint(negotiated)), []byte(fmt.Sprint(want))) {
+		t.Fatalf("negotiated capabilities = %v, want %v", negotiated, want)
+	}
+	serviceIDs := make([]string, maxSessionServiceIDs)
+	for index := range serviceIDs {
+		serviceIDs[index] = fmt.Sprintf("svc-%0124d", index)
+	}
+	encoded, err := EncodeSessionAccept(SessionAccept{AssignmentID: "assignment", Generation: 1, Capabilities: want, ServiceIDs: serviceIDs}, maxSessionFrame)
+	if err != nil {
+		t.Fatalf("large session accept rejected: %v", err)
+	}
+	decoded, err := DecodeSessionAccept(encoded, maxSessionFrame)
+	if err != nil || len(decoded.ServiceIDs) != maxSessionServiceIDs {
+		t.Fatalf("large session accept round trip: len=%d err=%v", len(decoded.ServiceIDs), err)
+	}
+}
+
+func TestControlFramesRejectUnknownFields(t *testing.T) {
+	encoded, err := EncodeSessionHello(SessionHello{AssignmentID: "assignment", Generation: 1, AgentID: "agent"}, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Field 99 is not part of the current SessionHello schema. Keep the
+	// length prefix consistent so this exercises unknown-field handling rather
+	// than the outer frame bounds.
+	unknown := []byte{0x98, 0x06, 0x01}
+	encoded = append(encoded, unknown...)
+	binary.BigEndian.PutUint32(encoded[2:6], uint32(len(encoded)-6))
+	if _, err := DecodeSessionHello(encoded, 1024); !errors.Is(err, ErrMalformedFrame) {
+		t.Fatalf("unknown control field error = %v, want %v", err, ErrMalformedFrame)
 	}
 }

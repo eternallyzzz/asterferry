@@ -3,8 +3,8 @@ package afdp
 import "testing"
 
 func TestSharedAFDPLimitsAndDefaults(t *testing.T) {
-	if maxSessionFrame != maxAFDPWireBytes || maxDatagramFrame != maxAFDPWireBytes || maxObfuscationDatagram != maxAFDPWireBytes {
-		t.Fatalf("wire limit aliases drifted: base=%d session=%d datagram=%d obfuscation=%d", maxAFDPWireBytes, maxSessionFrame, maxDatagramFrame, maxObfuscationDatagram)
+	if maxSessionFrame < maxAFDPWireBytes || maxDatagramFrame != maxAFDPWireBytes || maxObfuscationDatagram != maxAFDPWireBytes {
+		t.Fatalf("wire limits drifted: base=%d session=%d datagram=%d obfuscation=%d", maxAFDPWireBytes, maxSessionFrame, maxDatagramFrame, maxObfuscationDatagram)
 	}
 
 	if defaults := DefaultQUICOptions(); defaults.MaxStreams != defaultMaxStreams {

@@ -2,9 +2,7 @@ package controller
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -82,10 +80,10 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 	}
 	defer tx.Rollback()
 	request := struct {
-		Username       string `json:"username"`
-		Role           string `json:"role"`
-		PasswordDigest string `json:"password_digest"`
-	}{Username: username, Role: role, PasswordDigest: passwordDigest(s.masterKey, password)}
+		Username        string `json:"username"`
+		Role            string `json:"role"`
+		PasswordChanged bool   `json:"password_changed"`
+	}{Username: username, Role: role, PasswordChanged: true}
 	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
 	if err != nil {
 		return User{}, err
@@ -107,12 +105,6 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 		return User{}, err
 	}
 	return User{ID: id, Username: username, Role: role, Enabled: true, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
-}
-
-func passwordDigest(key [masterKeyBytes]byte, password string) string {
-	digest := hmac.New(sha256.New, key[:])
-	digest.Write([]byte(password))
-	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // dummyPasswordHash is a fixed, valid Argon2id value used for failed logins
@@ -207,11 +199,7 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 			return User{}, err
 		}
 	}
-	passwordMarker := ""
-	if update.Password != nil {
-		passwordMarker = passwordDigest(s.masterKey, *update.Password)
-	}
-	request := map[string]any{"id": id, "username": update.Username, "password_digest": passwordMarker, "role": update.Role, "enabled": update.Enabled, "if_match": options.IfMatch}
+	request := map[string]any{"id": id, "username": update.Username, "password_changed": update.Password != nil, "role": update.Role, "enabled": update.Enabled, "if_match": options.IfMatch}
 	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
 	if err != nil {
 		return User{}, err

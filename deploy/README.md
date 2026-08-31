@@ -58,7 +58,7 @@ systemctl enable --now asterferry-gateway
 
 Use `asterferry-agent.service` on an Agent host and
 `asterferry-controller.service` for the Controller. Nodes need only their
-AFDP/1 QUIC endpoint (Gateway) and outbound Controller/data connectivity; all
+AFDP/2 QUIC endpoint (Gateway) and outbound Controller/data connectivity; all
 business changes go through the Controller API.
 
 ## Docker Compose and Helm

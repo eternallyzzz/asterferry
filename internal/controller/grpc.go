@@ -167,6 +167,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		// certificate even before its natural expiry.
 		return status.Error(codes.PermissionDenied, "certificate serial is not current")
 	}
+	// Subscribe before materializing the initial snapshot. A resource write
+	// racing this handshake is coalesced into the buffered notification instead
+	// of waiting for a periodic poll.
+	snapshotChanges, unsubscribeSnapshots := s.store.SubscribeSnapshotChanges(hello.GetNodeId())
+	defer unsubscribeSnapshots()
 	// Resource writes are intentionally independent from the long-lived node
 	// stream. Materialize the latest node-scoped document just before sending
 	// it so a reconnect always observes API changes, even if the writer was
@@ -243,14 +248,18 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		// A node's Hello carries both its applied generation and checksum. Send
 		// a newer generation, or repair a same-generation cache divergence.
 		if snapshotRecord.Generation > hello.GetAppliedGeneration() || (snapshotRecord.Generation == hello.GetAppliedGeneration() && !strings.EqualFold(snapshotRecord.Checksum, hello.GetAppliedChecksum())) {
-			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshotRecord.NodeID, Generation: snapshotRecord.Generation, Checksum: snapshotRecord.Checksum, DocumentJson: snapshotRecord.Document}}}
+			wireDocument, wireErr := s.store.SnapshotDocumentForWire(snapshotRecord.Document)
+			if wireErr != nil {
+				return status.Error(codes.Internal, "prepare desired snapshot for wire failed")
+			}
+			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshotRecord.NodeID, Generation: snapshotRecord.Generation, Checksum: snapshotRecord.Checksum, DocumentJson: wireDocument}}}
 			if err := send(message); err != nil {
 				return err
 			}
 			lastSent.Store(snapshotRecord.Generation)
 		}
 	}
-	go s.pushSnapshots(connectionCtx, hello.GetNodeId(), send, &lastSent)
+	go s.pushSnapshots(connectionCtx, hello.GetNodeId(), send, &lastSent, snapshotChanges)
 	type recvResult struct {
 		message *v1.NodeMessage
 		err     error
@@ -545,14 +554,15 @@ func validateApplyResult(result *v1.ApplyResult, snapshot SnapshotRecord) error 
 	return nil
 }
 
-func (s *ControlServer) pushSnapshots(ctx context.Context, nodeID string, send func(*v1.ControllerMessage) error, lastSent *atomic.Uint64) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+func (s *ControlServer) pushSnapshots(ctx context.Context, nodeID string, send func(*v1.ControllerMessage) error, lastSent *atomic.Uint64, changes <-chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case _, ok := <-changes:
+			if !ok {
+				return
+			}
 			snapshot, err := s.store.EnsureDesiredSnapshot(ctx, nodeID)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
@@ -569,7 +579,13 @@ func (s *ControlServer) pushSnapshots(ctx context.Context, nodeID string, send f
 				if !lastSent.CompareAndSwap(previous, snapshot.Generation) {
 					continue
 				}
-				message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: snapshot.Document}}}
+				wireDocument, wireErr := s.store.SnapshotDocumentForWire(snapshot.Document)
+				if wireErr != nil {
+					lastSent.CompareAndSwap(snapshot.Generation, previous)
+					slog.Default().Error("failed to prepare desired snapshot for wire", "node_id", nodeID, "error", wireErr)
+					return
+				}
+				message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
 				if err := send(message); err != nil {
 					lastSent.CompareAndSwap(snapshot.Generation, previous)
 					return
@@ -602,10 +618,9 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 	// can flush its buffered message; an offline node is rejected on its next
 	// mTLS control connection.
 	var send func(*v1.ControllerMessage) error
-	var cancel context.CancelFunc
 	s.streamMu.Lock()
-	if entry := s.streams[nodeID]; entry != nil {
-		send, cancel = entry.send, entry.cancel
+	if current := s.streams[nodeID]; current != nil {
+		send = current.send
 	}
 	s.streamMu.Unlock()
 	if send != nil {
@@ -620,9 +635,16 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 			slog.Default().Error("failed to record node revocation queued event", "node_id", nodeID, "error", eventErr)
 		}
 	}
-	if cancel != nil {
-		cancel()
+	// The stream lookup above is only a snapshot. A node may complete a new
+	// Connect handshake between that lookup and the action send. Re-read the
+	// map while holding the same mutex used by Connect and cancel whichever
+	// stream is current; otherwise revocation can leave the replacement stream
+	// alive until its next heartbeat.
+	s.streamMu.Lock()
+	if current := s.streams[nodeID]; current != nil {
+		current.cancel()
 	}
+	s.streamMu.Unlock()
 	return nil
 }
 

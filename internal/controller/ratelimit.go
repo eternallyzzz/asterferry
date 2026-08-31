@@ -14,6 +14,7 @@ const (
 	loginBlock        = time.Minute
 	loginMaxEntries   = 10_000
 	loginIdleExpiry   = 10 * time.Minute
+	loginPurgeBatch   = 64
 )
 
 type loginBucket struct {
@@ -45,7 +46,7 @@ func (l *loginLimiter) allow(keys ...string) (bool, time.Duration) {
 	now := l.clock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.purgeLocked(now)
+	l.purgeSomeLocked(now)
 	var retry time.Duration
 	for _, key := range uniqueKeys(keys) {
 		bucket, ok := l.entries[key]
@@ -72,7 +73,7 @@ func (l *loginLimiter) failure(keys ...string) {
 	now := l.clock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.purgeLocked(now)
+	l.purgeSomeLocked(now)
 	for _, key := range uniqueKeys(keys) {
 		bucket, exists := l.entries[key]
 		if !exists {
@@ -108,8 +109,17 @@ func (l *loginLimiter) clock() time.Time {
 	return l.now().UTC()
 }
 
-func (l *loginLimiter) purgeLocked(now time.Time) {
+// purgeSomeLocked deliberately bounds work performed while holding the
+// limiter mutex. Both the IP and username dimensions are request-derived, so
+// an attacker can otherwise force every login attempt to scan all 10,000
+// buckets before the actual rate-limit decision.
+func (l *loginLimiter) purgeSomeLocked(now time.Time) {
+	checked := 0
 	for key, bucket := range l.entries {
+		if checked >= loginPurgeBatch {
+			break
+		}
+		checked++
 		if !bucket.lastSeen.IsZero() && now.Sub(bucket.lastSeen) >= l.idleExpiry {
 			delete(l.entries, key)
 			continue
@@ -124,15 +134,11 @@ func (l *loginLimiter) evictForInsertLocked() {
 	if l.maxEntries <= 0 || len(l.entries) < l.maxEntries {
 		return
 	}
-	var oldestKey string
-	var oldest time.Time
-	for key, bucket := range l.entries {
-		if oldestKey == "" || bucket.lastSeen.Before(oldest) {
-			oldestKey, oldest = key, bucket.lastSeen
-		}
-	}
-	if oldestKey != "" {
-		delete(l.entries, oldestKey)
+	// A bounded limiter does not need strict LRU ordering. Evicting the first
+	// map entry keeps the critical section O(1) even when the cap is full.
+	for key := range l.entries {
+		delete(l.entries, key)
+		return
 	}
 }
 

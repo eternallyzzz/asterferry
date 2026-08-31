@@ -1,2 +1,2 @@
-// Package afdpv1 contains generated AFDP/1 data-plane protobuf messages.
+// Package afdpv1 contains the protobuf message schema carried by AFDP/2.
 package afdpv1

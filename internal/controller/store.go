@@ -23,8 +23,8 @@ import (
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 3
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v3"
+	currentDBSchema     = 4
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v4"
 	maxSnapshotDocument = 16 << 20
 )
 
@@ -35,14 +35,19 @@ const (
 var ErrIncompatibleDatabase = errors.New("controller database belongs to an incompatible generation")
 
 type Store struct {
-	db         *sql.DB
-	path       string
-	masterKey  [masterKeyBytes]byte
-	metrics    *ControllerMetrics
-	close      sync.Once
-	err        error
-	actionMu   sync.Mutex
-	actionSubs map[string]map[uint64]*actionSubscription
+	db           *sql.DB
+	path         string
+	masterKey    [masterKeyBytes]byte
+	metrics      *ControllerMetrics
+	close        sync.Once
+	err          error
+	actionMu     sync.Mutex
+	actionSubs   map[string]map[uint64]*actionSubscription
+	snapshotSubs map[string]map[uint64]*snapshotSubscription
+	// Snapshot materialization reads a previous generation and then writes a
+	// replacement. Serialize that check-and-write pair so concurrent control
+	// streams cannot publish the same generation with different content.
+	snapshotMu sync.Mutex
 }
 
 type RevisionConflictError struct {
@@ -227,6 +232,16 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 			return &domain.ApplyError{Code: "state_controller_owned", Path: fmt.Sprintf("assignments[%d].state", index), Message: "assignment state applied is controller-owned"}
 		}
 	}
+	if snapshot.Gateway != nil {
+		if err := s.protectObfuscationPolicy(&snapshot.Gateway.Obfuscation); err != nil {
+			return err
+		}
+	}
+	for index := range snapshot.Assignments {
+		if err := s.protectObfuscationPolicy(&snapshot.Assignments[index].Obfuscation); err != nil {
+			return fmt.Errorf("assignment %q obfuscation: %w", snapshot.Assignments[index].ID, err)
+		}
+	}
 	if err := snapshot.Validate(); err != nil {
 		return err
 	}
@@ -253,7 +268,8 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 		return err
 	}
 	defer tx.Rollback()
-	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, snapshot)
+	requestSnapshot := snapshotForIdempotency(snapshot)
+	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, requestSnapshot)
 	if err != nil {
 		return err
 	}
@@ -481,6 +497,9 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 		if _, err := tx.ExecContext(ctx, `INSERT INTO assignments(id,gateway_id,agent_id,document_json,generation,revision,updated_at) VALUES(?,?,?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET gateway_id=excluded.gateway_id,agent_id=excluded.agent_id,document_json=excluded.document_json,generation=excluded.generation,revision=assignments.revision+1,updated_at=excluded.updated_at`, assignment.ID, assignment.GatewayID, assignment.AgentID, value, assignment.Generation, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
+		if err := replaceAssignmentServicesTx(ctx, tx, assignment); err != nil {
+			return err
+		}
 		// Degraded and draining placements have relinquished their public
 		// listeners. Keep binding metadata in the assignment document for
 		// diagnostics/failover, but do not reinsert it into the occupancy index.
@@ -500,7 +519,7 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 					}
 				}
 				if _, bindingErr := tx.ExecContext(ctx, `INSERT INTO service_bindings(service_id,gateway_id,protocol,bind,port) VALUES(?,?,?,?,?) ON CONFLICT(service_id) DO UPDATE SET gateway_id=excluded.gateway_id,protocol=excluded.protocol,bind=excluded.bind,port=excluded.port`, binding.ServiceID, assignment.GatewayID, binding.Protocol, normalizeBind(binding.Bind), binding.Port); bindingErr != nil {
-					if strings.Contains(strings.ToLower(bindingErr.Error()), "unique") {
+					if isSQLiteUniqueConstraint(bindingErr) {
 						return &PortConflictError{GatewayID: assignment.GatewayID, Protocol: binding.Protocol, Bind: binding.Bind, Port: binding.Port}
 					}
 					return bindingErr
@@ -511,10 +530,10 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 	if err := insertAudit(ctx, tx, options.Actor, "apply", "desired_snapshot", snapshot.NodeID, int64(snapshot.Generation), map[string]string{"checksum": snapshot.Checksum}); err != nil {
 		return err
 	}
-	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, snapshot, map[string]any{"node_id": snapshot.NodeID, "generation": snapshot.Generation, "checksum": snapshot.Checksum}); err != nil {
+	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, requestSnapshot, map[string]any{"node_id": snapshot.NodeID, "generation": snapshot.Generation, "checksum": snapshot.Checksum}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func OpenStore(path string, masterKey []byte) (*Store, error) {
@@ -536,6 +555,7 @@ func OpenStore(path string, masterKey []byte) (*Store, error) {
 		}
 		dsn = abs
 	}
+	dsn = sqliteDSN(dsn)
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
@@ -563,8 +583,6 @@ func (s *Store) Path() string { return s.path }
 func (s *Store) configure() error {
 	for _, statement := range []string{
 		"PRAGMA journal_mode = WAL",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 5000",
 		"PRAGMA synchronous = NORMAL",
 	} {
 		if _, err := s.db.Exec(statement); err != nil {
@@ -572,6 +590,20 @@ func (s *Store) configure() error {
 		}
 	}
 	return nil
+}
+
+// sqliteDSN carries connection-scoped pragmas in the driver DSN. PRAGMA
+// foreign_keys and busy_timeout otherwise disappear whenever database/sql
+// opens a replacement connection from the pool.
+func sqliteDSN(path string) string {
+	if path == ":memory:" {
+		path = "file::memory:"
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -626,6 +658,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE services (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE service_bindings (service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, protocol TEXT NOT NULL, bind TEXT NOT NULL, port INTEGER NOT NULL, PRIMARY KEY(service_id), UNIQUE(gateway_id, protocol, bind, port))`,
 		`CREATE TABLE assignments (id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, generation INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE assignment_services (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, PRIMARY KEY(assignment_id,service_id), UNIQUE(service_id))`,
 		`CREATE TABLE assignment_acks (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, status TEXT NOT NULL, error_code TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(assignment_id, node_id))`,
 		`CREATE TABLE desired_snapshots (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, checksum TEXT NOT NULL, document_json BLOB NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE observed_states (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation INTEGER NOT NULL, document_json BLOB NOT NULL, updated_at TEXT NOT NULL)`,
@@ -635,6 +668,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX idx_nodes_role_enabled ON nodes(role, enabled)`,
 		`CREATE INDEX idx_services_agent ON services(agent_id)`,
 		`CREATE INDEX idx_assignments_gateway ON assignments(gateway_id)`,
+		`CREATE INDEX idx_assignments_agent ON assignments(agent_id)`,
+		`CREATE INDEX idx_assignment_services_service ON assignment_services(service_id)`,
 		`CREATE INDEX idx_assignment_acks_generation ON assignment_acks(assignment_id,generation)`,
 		`CREATE INDEX idx_audit_created ON audit_events(created_at)`,
 	}
@@ -652,7 +687,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		_ = tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 // inspectDatabase distinguishes a genuinely new SQLite file from an existing
@@ -677,7 +712,7 @@ func inspectDatabase(ctx context.Context, db *sql.DB) (compatible, empty bool, e
 }
 
 func validateRequiredTables(ctx context.Context, db *sql.DB) error {
-	for _, table := range []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"} {
+	for _, table := range []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_services", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"} {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
 			return err
@@ -700,6 +735,13 @@ func (s *Store) Close() error {
 				delete(subscribers, id)
 			}
 			delete(s.actionSubs, nodeID)
+		}
+		for nodeID, subscribers := range s.snapshotSubs {
+			for id, subscription := range subscribers {
+				close(subscription.ch)
+				delete(subscribers, id)
+			}
+			delete(s.snapshotSubs, nodeID)
 		}
 		s.actionMu.Unlock()
 		s.err = s.db.Close()
@@ -753,7 +795,7 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": node.ID, "revision": node.Revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
@@ -861,7 +903,7 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": node.ID, "revision": node.Revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 // quarantineAssignmentsForNodeTx moves every placement that references an
@@ -980,7 +1022,7 @@ func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions)
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func (s *Store) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, options WriteOptions) error {
@@ -993,6 +1035,9 @@ func (s *Store) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, opt
 	}
 	if node.Role != domain.RoleGateway {
 		return errors.New("gateway spec node has the wrong role")
+	}
+	if err := s.protectObfuscationPolicy(&spec.Obfuscation); err != nil {
+		return err
 	}
 	return s.putDocument(ctx, "gateway_specs", spec.NodeID, spec, options)
 }
@@ -1169,7 +1214,7 @@ func (s *Store) DeleteService(ctx context.Context, id string, options WriteOptio
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment, options WriteOptions) error {
@@ -1189,6 +1234,9 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 		return &domain.ApplyError{Code: "state_controller_owned", Path: "state", Message: "assignment state applied is controller-owned"}
 	}
 	if err := assignment.Validate(); err != nil {
+		return err
+	}
+	if err := s.protectObfuscationPolicy(&assignment.Obfuscation); err != nil {
 		return err
 	}
 	if assignment.Generation > math.MaxInt64 {
@@ -1213,6 +1261,7 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	requestAssignment := assignment
 	requestAssignment.Revision = 0
 	requestAssignment.UpdatedAt = time.Time{}
+	requestAssignment.Obfuscation = obfuscationRequestPolicy(requestAssignment.Obfuscation)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1391,6 +1440,9 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 			return fmt.Errorf("assignment service %q belongs to another agent", serviceID)
 		}
 	}
+	if err := replaceAssignmentServicesTx(ctx, tx, assignment); err != nil {
+		return err
+	}
 	serviceSet := make(map[string]struct{}, len(assignment.ServiceIDs))
 	for _, serviceID := range assignment.ServiceIDs {
 		serviceSet[serviceID] = struct{}{}
@@ -1429,7 +1481,7 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 			}
 			_, bindingErr := tx.ExecContext(ctx, `INSERT INTO service_bindings(service_id,gateway_id,protocol,bind,port) VALUES(?,?,?,?,?) ON CONFLICT(service_id) DO UPDATE SET gateway_id=excluded.gateway_id,protocol=excluded.protocol,bind=excluded.bind,port=excluded.port`, binding.ServiceID, assignment.GatewayID, binding.Protocol, normalizeBind(binding.Bind), binding.Port)
 			if bindingErr != nil {
-				if strings.Contains(strings.ToLower(bindingErr.Error()), "unique") {
+				if isSQLiteUniqueConstraint(bindingErr) {
 					return &PortConflictError{GatewayID: assignment.GatewayID, Protocol: binding.Protocol, Bind: binding.Bind, Port: binding.Port}
 				}
 				return bindingErr
@@ -1442,32 +1494,28 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": assignment.ID, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func serviceAssignedElsewhere(ctx context.Context, tx *sql.Tx, serviceID, assignmentID string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,document_json FROM assignments WHERE id<>?`, assignmentID)
-	if err != nil {
-		return false, err
+	var count int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignment_services WHERE service_id=? AND assignment_id<>?`, serviceID, assignmentID).Scan(&count)
+	return count > 0, err
+}
+
+func replaceAssignmentServicesTx(ctx context.Context, tx *sql.Tx, assignment domain.Assignment) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_services WHERE assignment_id=?`, assignment.ID); err != nil {
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var document []byte
-		if err := rows.Scan(&id, &document); err != nil {
-			return false, err
-		}
-		var assignment domain.Assignment
-		if err := json.Unmarshal(document, &assignment); err != nil {
-			return false, err
-		}
-		for _, candidate := range assignment.ServiceIDs {
-			if candidate == serviceID {
-				return true, nil
+	for _, serviceID := range assignment.ServiceIDs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO assignment_services(assignment_id,service_id) VALUES(?,?)`, assignment.ID, serviceID); err != nil {
+			if isSQLiteUniqueConstraint(err) {
+				return &domain.ApplyError{Code: "resource_conflict", Path: "service_ids", Message: fmt.Sprintf("service %q is already assigned", serviceID)}
 			}
+			return err
 		}
 	}
-	return false, rows.Err()
+	return nil
 }
 
 // deleteAssignmentBindingsTx releases a placement's public-port occupancy
@@ -1495,11 +1543,13 @@ func supersededAssignments(ctx context.Context, tx *sql.Tx, serviceIDs []string,
 	if len(serviceIDs) == 0 {
 		return nil, nil
 	}
-	wanted := make(map[string]struct{}, len(serviceIDs))
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(serviceIDs)), ",")
+	args := make([]any, 0, len(serviceIDs)+1)
+	args = append(args, assignmentID)
 	for _, serviceID := range serviceIDs {
-		wanted[serviceID] = struct{}{}
+		args = append(args, serviceID)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,document_json FROM assignments WHERE id<>? ORDER BY id`, assignmentID)
+	rows, err := tx.QueryContext(ctx, `SELECT a.id,a.document_json FROM assignments a JOIN assignment_services assignment_service ON assignment_service.assignment_id=a.id WHERE a.id<>? AND assignment_service.service_id IN (`+placeholders+`) GROUP BY a.id ORDER BY a.id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1517,16 +1567,6 @@ func supersededAssignments(ctx context.Context, tx *sql.Tx, serviceIDs []string,
 			return nil, fmt.Errorf("decode assignment %q: %w", id, err)
 		}
 		candidate.ID = id
-		claimsService := false
-		for _, serviceID := range candidate.ServiceIDs {
-			if _, wanted := wanted[serviceID]; wanted {
-				claimsService = true
-				break
-			}
-		}
-		if !claimsService {
-			continue
-		}
 		if candidate.State != domain.AssignmentDegraded && candidate.State != domain.AssignmentDraining {
 			return nil, &domain.ApplyError{Code: "resource_conflict", Path: "service_ids", Message: fmt.Sprintf("service is already assigned by %q", candidate.ID)}
 		}
@@ -1610,7 +1650,7 @@ func (s *Store) DeleteAssignment(ctx context.Context, id string, options WriteOp
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 // UpdateAssignmentState changes only the lifecycle state of an assignment.
@@ -1657,7 +1697,7 @@ func (s *Store) UpdateAssignmentState(ctx context.Context, id, state string, opt
 		if err := json.Unmarshal(document, &assignment); err != nil {
 			return domain.Assignment{}, err
 		}
-		return assignment, tx.Commit()
+		return assignment, s.commitAndNotify(tx)
 	}
 	var revision int64
 	var document []byte
@@ -1698,13 +1738,14 @@ func (s *Store) UpdateAssignmentState(ctx context.Context, id, state string, opt
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": assignment.Revision, "state": state}); err != nil {
 		return domain.Assignment{}, err
 	}
-	return assignment, tx.Commit()
+	return assignment, s.commitAndNotify(tx)
 }
 
 // applyNodeResult records the lifecycle consequence of a node applying its
 // complete desired snapshot. The control-stream path uses
 // applyNodeResultWithError to retain stable rejection error codes; this
 // boolean helper remains useful to package-level tests and simple callers.
+//
 //lint:ignore U1000 package tests exercise the boolean compatibility helper.
 func (s *Store) applyNodeResult(ctx context.Context, nodeID string, generation uint64, applied bool, actor string) ([]domain.Assignment, error) {
 	return s.applyNodeResultWithError(ctx, nodeID, generation, applied, "", actor)
@@ -1819,7 +1860,7 @@ func (s *Store) applyNodeResultWithError(ctx context.Context, nodeID string, gen
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitAndNotify(tx); err != nil {
 		return nil, err
 	}
 	return changed, nil
@@ -1890,6 +1931,21 @@ func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 	if err := json.Unmarshal(record.Document, &snapshot); err != nil {
 		return fmt.Errorf("snapshot document is invalid: %w", err)
 	}
+	if snapshot.Gateway != nil {
+		if err := s.protectObfuscationPolicy(&snapshot.Gateway.Obfuscation); err != nil {
+			return err
+		}
+	}
+	for index := range snapshot.Assignments {
+		if err := s.protectObfuscationPolicy(&snapshot.Assignments[index].Obfuscation); err != nil {
+			return fmt.Errorf("assignment %q obfuscation: %w", snapshot.Assignments[index].ID, err)
+		}
+	}
+	if protected, err := json.Marshal(snapshot); err == nil {
+		record.Document = protected
+	} else {
+		return fmt.Errorf("encode protected snapshot: %w", err)
+	}
 	if snapshot.NodeID != record.NodeID || snapshot.Generation != record.Generation || !strings.EqualFold(snapshot.Checksum, record.Checksum) {
 		return errors.New("snapshot metadata does not match document")
 	}
@@ -1948,7 +2004,7 @@ func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, record.NodeID, record.Generation, record.Checksum, record.Document, record.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func (s *Store) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
@@ -2167,6 +2223,7 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	switch typed := value.(type) {
 	case domain.GatewaySpec:
 		typed.Revision = 0
+		typed.Obfuscation = obfuscationRequestPolicy(typed.Obfuscation)
 		requestValue = typed
 	case domain.AgentSpec:
 		typed.Revision = 0
@@ -2258,7 +2315,7 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 // updateAssignmentEndpointsTx keeps the derived assignment dial target
@@ -2439,7 +2496,7 @@ func (s *Store) deleteDocument(ctx context.Context, table, nodeID string, option
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, options WriteOptions) error {
@@ -2547,7 +2604,7 @@ func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, 
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": service.ID, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotify(tx)
 }
 
 // bumpAssignmentsForServiceTx invalidates the shared placement generation for
@@ -2557,19 +2614,34 @@ func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, 
 // assignment. Degraded/draining assignments remain fail-closed; a later
 // scheduler pass can replace them with a fresh placement.
 func bumpAssignmentsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID string) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id,document_json,revision,generation FROM assignments ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT assignments.id,assignments.document_json,assignments.revision,assignments.generation FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=? ORDER BY assignments.id`, serviceID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type assignmentRow struct {
+		id         string
+		document   []byte
+		revision   int64
+		generation uint64
+	}
+	assigned := make([]assignmentRow, 0)
 	for rows.Next() {
-		var id string
-		var document []byte
-		var revision int64
-		var indexedGeneration uint64
-		if err := rows.Scan(&id, &document, &revision, &indexedGeneration); err != nil {
+		var row assignmentRow
+		if err := rows.Scan(&row.id, &row.document, &row.revision, &row.generation); err != nil {
+			_ = rows.Close()
 			return err
 		}
+		assigned = append(assigned, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, row := range assigned {
+		id, document, revision, indexedGeneration := row.id, row.document, row.revision, row.generation
 		var assignment domain.Assignment
 		if err := json.Unmarshal(document, &assignment); err != nil {
 			return fmt.Errorf("decode assignment %q: %w", id, err)
@@ -2620,51 +2692,27 @@ func bumpAssignmentsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID stri
 }
 
 func serviceHasAssignment(ctx context.Context, tx *sql.Tx, serviceID string) (bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT document_json FROM assignments`)
-	if err != nil {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignment_services WHERE service_id=?`, serviceID).Scan(&count); err != nil {
 		return false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var data []byte
-		var assignment domain.Assignment
-		if err := rows.Scan(&data); err != nil {
-			return false, err
-		}
-		if err := json.Unmarshal(data, &assignment); err != nil {
-			return false, err
-		}
-		for _, id := range assignment.ServiceIDs {
-			if id == serviceID {
-				return true, nil
-			}
-		}
-	}
-	return false, rows.Err()
+	return count > 0, nil
 }
 
 func assignmentForService(ctx context.Context, tx *sql.Tx, serviceID string) (domain.Assignment, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT document_json FROM assignments ORDER BY id`)
+	var document []byte
+	err := tx.QueryRowContext(ctx, `SELECT assignments.document_json FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=?`, serviceID).Scan(&document)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Assignment{}, false, nil
+	}
 	if err != nil {
 		return domain.Assignment{}, false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var document []byte
-		var assignment domain.Assignment
-		if err := rows.Scan(&document); err != nil {
-			return domain.Assignment{}, false, err
-		}
-		if err := json.Unmarshal(document, &assignment); err != nil {
-			return domain.Assignment{}, false, err
-		}
-		for _, candidate := range assignment.ServiceIDs {
-			if candidate == serviceID {
-				return assignment, true, nil
-			}
-		}
+	var assignment domain.Assignment
+	if err := json.Unmarshal(document, &assignment); err != nil {
+		return domain.Assignment{}, false, err
 	}
-	return domain.Assignment{}, false, rows.Err()
+	return assignment, true, nil
 }
 
 func selectorsEqual(left, right domain.Selector) bool {
@@ -2808,6 +2856,147 @@ func requestHash(value any) (string, error) {
 	}
 	digest := sha256.Sum256(b)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func (s *Store) protectObfuscationPolicy(policy *domain.ObfuscationPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.Mode == "" || policy.Mode == "standard" {
+		policy.Key = nil
+		policy.PreviousKey = nil
+		policy.KeyCiphertext = nil
+		policy.PreviousKeyCiphertext = nil
+		policy.KeyID = ""
+		policy.PreviousKeyID = ""
+		return nil
+	}
+	if policy.Mode != "camouflage" {
+		return &domain.ApplyError{Code: "invalid_obfuscation", Path: "obfuscation.mode", Message: "obfuscation mode must be standard or camouflage"}
+	}
+	if len(policy.Key) > 0 {
+		if len(policy.Key) != 32 {
+			return errors.New("data-plane obfuscation key must contain exactly 32 bytes")
+		}
+		ciphertext, err := EncryptSecret(s.masterKey[:], policy.Key)
+		if err != nil {
+			return fmt.Errorf("encrypt obfuscation key: %w", err)
+		}
+		policy.KeyCiphertext = ciphertext
+		policy.KeyID = obfuscationKeyID(policy.Key)
+		policy.Key = nil
+	}
+	if len(policy.KeyCiphertext) == 0 {
+		return errors.New("camouflage mode requires a protected current key")
+	}
+	current, err := DecryptSecret(s.masterKey[:], policy.KeyCiphertext)
+	if err != nil || len(current) != 32 {
+		return errors.New("camouflage current key is not a valid Controller-encrypted 32-byte key")
+	}
+	if policy.KeyID == "" {
+		policy.KeyID = obfuscationKeyID(current)
+	}
+	if len(policy.PreviousKey) > 0 {
+		if len(policy.PreviousKey) != 32 {
+			return errors.New("previous data-plane obfuscation key must contain exactly 32 bytes")
+		}
+		ciphertext, err := EncryptSecret(s.masterKey[:], policy.PreviousKey)
+		if err != nil {
+			return fmt.Errorf("encrypt previous obfuscation key: %w", err)
+		}
+		policy.PreviousKeyCiphertext = ciphertext
+		policy.PreviousKeyID = obfuscationKeyID(policy.PreviousKey)
+		policy.PreviousKey = nil
+	}
+	if len(policy.PreviousKeyCiphertext) > 0 {
+		previous, err := DecryptSecret(s.masterKey[:], policy.PreviousKeyCiphertext)
+		if err != nil || len(previous) != 32 {
+			return errors.New("previous obfuscation key is not a valid Controller-encrypted 32-byte key")
+		}
+		if policy.PreviousKeyID == "" {
+			policy.PreviousKeyID = obfuscationKeyID(previous)
+		}
+	}
+	policy.Key = nil
+	policy.PreviousKey = nil
+	return nil
+}
+
+func obfuscationKeyID(key []byte) string {
+	digest := sha256.Sum256(key)
+	return hex.EncodeToString(digest[:])
+}
+
+func obfuscationRequestPolicy(policy domain.ObfuscationPolicy) domain.ObfuscationPolicy {
+	return domain.ObfuscationPolicy{Mode: policy.Mode, KeyID: policy.KeyID, PreviousKeyID: policy.PreviousKeyID, MaxPaddingBytes: policy.MaxPaddingBytes, HandshakeShaping: policy.HandshakeShaping}
+}
+
+func snapshotForIdempotency(snapshot domain.DesiredSnapshot) domain.DesiredSnapshot {
+	request := snapshot.Clone()
+	if request.Gateway != nil {
+		request.Gateway.Obfuscation = obfuscationRequestPolicy(request.Gateway.Obfuscation)
+	}
+	for index := range request.Assignments {
+		request.Assignments[index].Obfuscation = obfuscationRequestPolicy(request.Assignments[index].Obfuscation)
+	}
+	return request
+}
+
+// SnapshotDocumentForWire decrypts only the data-plane keys needed by an
+// authenticated node. The persisted desired snapshot retains ciphertext and
+// is never sent to a node as key material; the returned document is ephemeral
+// and contains plaintext keys protected by the mTLS control stream.
+func (s *Store) SnapshotDocumentForWire(document []byte) ([]byte, error) {
+	var snapshot domain.DesiredSnapshot
+	if err := json.Unmarshal(document, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode snapshot for wire: %w", err)
+	}
+	if snapshot.Gateway != nil {
+		if err := s.decryptObfuscationPolicyForWire(&snapshot.Gateway.Obfuscation); err != nil {
+			return nil, err
+		}
+	}
+	for index := range snapshot.Assignments {
+		if err := s.decryptObfuscationPolicyForWire(&snapshot.Assignments[index].Obfuscation); err != nil {
+			return nil, fmt.Errorf("assignment %q obfuscation: %w", snapshot.Assignments[index].ID, err)
+		}
+	}
+	if err := snapshot.Validate(); err != nil {
+		return nil, fmt.Errorf("snapshot for wire is invalid: %w", err)
+	}
+	return json.Marshal(snapshot)
+}
+
+func (s *Store) decryptObfuscationPolicyForWire(policy *domain.ObfuscationPolicy) error {
+	if policy == nil || policy.Mode == "" || policy.Mode == "standard" {
+		if policy != nil {
+			policy.Key = nil
+			policy.PreviousKey = nil
+			policy.KeyCiphertext = nil
+			policy.PreviousKeyCiphertext = nil
+		}
+		return nil
+	}
+	if len(policy.Key) == 0 {
+		key, err := DecryptSecret(s.masterKey[:], policy.KeyCiphertext)
+		if err != nil || len(key) != 32 {
+			return errors.New("current obfuscation key cannot be decrypted")
+		}
+		policy.Key = key
+	}
+	if len(policy.PreviousKeyCiphertext) > 0 && len(policy.PreviousKey) == 0 {
+		key, err := DecryptSecret(s.masterKey[:], policy.PreviousKeyCiphertext)
+		if err != nil || len(key) != 32 {
+			return errors.New("previous obfuscation key cannot be decrypted")
+		}
+		policy.PreviousKey = key
+	}
+	if len(policy.Key) != 32 || (len(policy.PreviousKey) != 0 && len(policy.PreviousKey) != 32) {
+		return errors.New("wire obfuscation key has an invalid length")
+	}
+	policy.KeyCiphertext = nil
+	policy.PreviousKeyCiphertext = nil
+	return nil
 }
 
 func sameServiceContent(left, right domain.Service) bool {

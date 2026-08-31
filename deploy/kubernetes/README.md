@@ -41,7 +41,7 @@ helm upgrade --install agent-east ./deploy/helm/asterferry-node \
 
 The node chart copies the Secret into its private state PVC so certificate
 rotation can atomically update the bootstrap file. Gateway data traffic uses
-AFDP/1 over QUIC; Agents normally need no Service because they initiate both
+AFDP/2 over QUIC; Agents normally need no Service because they initiate both
 Controller and Gateway connections. Each Gateway must have an independent
 reachable public endpoint.
 

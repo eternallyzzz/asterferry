@@ -1,6 +1,6 @@
 package afdp
 
-// This file contains the transport adapter for AFDP/1. It deliberately deals
+// This file contains the transport adapter for AFDP/2. It deliberately deals
 // only in a small QUIC connection interface and AssignmentView; the
 // Controller, SQLite and node bootstrap packages are not visible here.
 
@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -38,6 +39,7 @@ type SessionOptions struct {
 	ReassemblyFlow int
 	ReassemblyByte int
 	ReassemblyTTL  time.Duration
+	Capabilities   []string
 	// ExpectedPeerID is the Controller-issued node identity expected on the
 	// remote QUIC certificate. The Gateway uses the assignment's AgentID on
 	// the server side; an Agent sets this to the assignment's GatewayID so a
@@ -79,18 +81,19 @@ func (o SessionOptions) limits() (int, int, int, int, int, time.Duration) {
 	return maxFrame, maxDatagram, maxStreams, flows, bytes, timeout
 }
 
-// Session is an authenticated AFDP/1 QUIC session. The first bidirectional
+// Session is an authenticated AFDP/2 QUIC session. The first bidirectional
 // stream is retained as the reliable handshake/control stream; all subsequent
 // streams carry one bounded OpenMetadata message followed by raw bytes.
 type Session struct {
-	conn        Conn
-	assignment  AssignmentView
-	maxFrame    int
-	maxDatagram int
-	maxStreams  int
-	opened      atomic.Int64
-	closed      atomic.Bool
-	control     *quic.Stream
+	conn         Conn
+	assignment   AssignmentView
+	maxFrame     int
+	maxDatagram  int
+	maxStreams   int
+	opened       atomic.Int64
+	closed       atomic.Bool
+	control      *quic.Stream
+	capabilities []string
 }
 
 func (s *Session) Assignment() AssignmentView {
@@ -100,6 +103,13 @@ func (s *Session) Assignment() AssignmentView {
 	return s.assignment.Clone()
 }
 func (s *Session) ActiveStreams() int64 { return s.opened.Load() }
+
+func (s *Session) Capabilities() []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s.capabilities...)
+}
 
 func ClientSession(ctx context.Context, conn Conn, hello SessionHello, options SessionOptions) (*Session, error) {
 	if conn == nil {
@@ -133,11 +143,15 @@ func ClientSession(ctx context.Context, conn Conn, hello SessionHello, options S
 	if accept.AssignmentID != hello.AssignmentID || accept.Generation != hello.Generation {
 		return closeOnError(ErrUnauthorizedAgent)
 	}
+	negotiated := NegotiateCapabilities(hello.Capabilities, accept.Capabilities)
+	if len(negotiated) != len(accept.Capabilities) {
+		return closeOnError(fmt.Errorf("%w: session accept contains capabilities not offered by the client", ErrProtocolViolation))
+	}
 	services := make(map[string]struct{}, len(accept.ServiceIDs))
 	for _, serviceID := range accept.ServiceIDs {
 		services[serviceID] = struct{}{}
 	}
-	return &Session{conn: conn, assignment: AssignmentView{ID: accept.AssignmentID, AgentID: hello.AgentID, Generation: accept.Generation, ServiceIDs: services, MaxStreams: maxStreams}, maxFrame: maxFrame, maxDatagram: maxDatagram, maxStreams: maxStreams, control: control}, nil
+	return &Session{conn: conn, assignment: AssignmentView{ID: accept.AssignmentID, AgentID: hello.AgentID, Generation: accept.Generation, ServiceIDs: services, MaxStreams: maxStreams}, maxFrame: maxFrame, maxDatagram: maxDatagram, maxStreams: maxStreams, control: control, capabilities: negotiated}, nil
 }
 
 func ServerSession(ctx context.Context, conn Conn, assignment AssignmentView, options SessionOptions) (*Session, error) {
@@ -202,7 +216,7 @@ func serverSession(ctx context.Context, conn Conn, resolve func(SessionHello) (A
 	for serviceID := range assignment.ServiceIDs {
 		serviceIDs = append(serviceIDs, serviceID)
 	}
-	accept := SessionAccept{AssignmentID: assignment.ID, Generation: assignment.Generation, Capabilities: hello.Capabilities, ServiceIDs: serviceIDs}
+	accept := SessionAccept{AssignmentID: assignment.ID, Generation: assignment.Generation, Capabilities: NegotiateCapabilities(options.Capabilities, hello.Capabilities), ServiceIDs: serviceIDs}
 	if err := WriteSessionAccept(control, accept, maxFrame); err != nil {
 		_ = control.Close()
 		return nil, err
@@ -210,7 +224,7 @@ func serverSession(ctx context.Context, conn Conn, resolve func(SessionHello) (A
 	if assignment.MaxStreams > 0 && assignment.MaxStreams < maxStreams {
 		maxStreams = assignment.MaxStreams
 	}
-	return &Session{conn: conn, assignment: assignment, maxFrame: maxFrame, maxDatagram: maxDatagram, maxStreams: maxStreams, control: control}, nil
+	return &Session{conn: conn, assignment: assignment, maxFrame: maxFrame, maxDatagram: maxDatagram, maxStreams: maxStreams, control: control, capabilities: append([]string(nil), accept.Capabilities...)}, nil
 }
 
 type quicConnectionState interface {
@@ -319,7 +333,7 @@ func (s *Session) OpenStream(ctx context.Context, metadata OpenMetadata) (*quic.
 		return nil, err
 	}
 	if !s.reserveStream() {
-		return nil, errors.New("AFDP stream limit reached")
+		return nil, fmt.Errorf("%w: AFDP stream limit reached", ErrTransient)
 	}
 	stream, err := s.conn.OpenStreamSync(ctx)
 	if err != nil {
@@ -341,24 +355,28 @@ func (s *Session) AcceptStream(ctx context.Context) (*quic.Stream, OpenMetadata,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !s.reserveStream() {
-		return nil, OpenMetadata{}, errors.New("AFDP stream limit reached")
-	}
 	stream, err := s.conn.AcceptStream(ctx)
 	if err != nil {
-		s.releaseStream()
 		return nil, OpenMetadata{}, err
+	}
+	// Accept the peer stream before checking the local reservation. Otherwise
+	// a full session leaves the same stream queued forever and the caller can
+	// either spin or incorrectly tear down the whole session. Closing the
+	// accepted stream rejects only this open and lets the loop continue.
+	if !s.reserveStream() {
+		_ = stream.Close()
+		return nil, OpenMetadata{}, fmt.Errorf("%w: AFDP stream limit reached", ErrTransient)
 	}
 	metadata, err := ReadOpen(stream, s.maxFrame)
 	if err != nil {
 		_ = stream.Close()
 		s.releaseStream()
-		return nil, OpenMetadata{}, err
+		return nil, OpenMetadata{}, fmt.Errorf("%w: %w", ErrProtocolViolation, err)
 	}
 	if err := AuthorizeOpen(metadata, s.assignment); err != nil {
 		_ = stream.Close()
 		s.releaseStream()
-		return nil, OpenMetadata{}, err
+		return nil, OpenMetadata{}, fmt.Errorf("%w: %w", ErrUnauthorizedOpen, err)
 	}
 	return stream, metadata, nil
 }

@@ -11,11 +11,11 @@ Dashboard / CLI -- HTTPS REST --> Controller -- mTLS gRPC --> Gateway / Agent
                                       |
                                       +-- SQLite, audit, scheduling
 
-Gateway <============= AFDP/1 over QUIC =============> Agent
+Gateway <============= AFDP/2 over QUIC =============> Agent
 ```
 
 This is a breaking generation. The current deployment accepts only the
-Controller JSON bootstrap and AFDP/1; there is no legacy YAML, bundle,
+Controller JSON bootstrap and AFDP/2; there is no legacy YAML, bundle,
 Supervisor, management API, or v6 codec compatibility layer.
 
 ## Quick start
@@ -84,9 +84,9 @@ generation active. While the Controller is unavailable, the node continues
 using its encrypted last-known-good snapshot and reports degraded state after
 the configured offline grace period.
 
-## AFDP/1 data plane
+## AFDP/2 data plane
 
-AFDP/1 uses QUIC with TLS 1.3 and ALPN `asterferry-data/1`. A reliable control
+AFDP/2 uses QUIC with TLS 1.3 and ALPN `asterferry-data/2`. A reliable control
 stream begins with `SessionHello`/`SessionAccept` carrying the assignment,
 generation and capabilities. The Gateway accepts only Agents present in its
 locally applied assignment.

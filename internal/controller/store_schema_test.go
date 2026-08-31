@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -77,5 +78,43 @@ func TestOpenStoreCreatesCurrentGenerationMarker(t *testing.T) {
 	}
 	if version != strconv.Itoa(currentDBSchema) || fingerprint != dbSchemaFingerprint {
 		t.Fatalf("unexpected schema marker version=%q fingerprint=%q", version, fingerprint)
+	}
+}
+
+func TestSQLiteConnectionPragmasSurvivePoolConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pragmas.db")
+	db, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(2)
+	if _, err := db.Exec(`CREATE TABLE parent (id TEXT PRIMARY KEY); CREATE TABLE child (parent_id TEXT REFERENCES parent(id));`); err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	for name, conn := range map[string]*sql.Conn{"first": first, "second": second} {
+		var foreignKeys, busyTimeout int
+		if err := conn.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+			t.Fatalf("%s foreign_keys: %v", name, err)
+		}
+		if err := conn.QueryRowContext(context.Background(), `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+			t.Fatalf("%s busy_timeout: %v", name, err)
+		}
+		if foreignKeys != 1 || busyTimeout != 5000 {
+			t.Fatalf("%s connection pragmas = foreign_keys:%d busy_timeout:%d", name, foreignKeys, busyTimeout)
+		}
+	}
+	if _, err := second.ExecContext(context.Background(), `INSERT INTO child(parent_id) VALUES('missing')`); err == nil {
+		t.Fatal("foreign key constraint was not enforced on the second pooled connection")
 	}
 }

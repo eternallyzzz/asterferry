@@ -1,4 +1,4 @@
-// Package afdp implements the small, data-plane-only AFDP/1 wire helpers.
+// Package afdp implements the small, data-plane-only AFDP/2 wire helpers.
 // QUIC connection setup is intentionally left to the gateway/agent runtime;
 // this package only knows about bytes on an already authenticated QUIC
 // session and therefore cannot accidentally import the Controller.
@@ -9,6 +9,7 @@ import (
 	"container/heap"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -25,14 +26,15 @@ const (
 	// Keep the AFDP wire identity local to the data-plane package. This avoids
 	// importing the retired relay codec's protocol package into the new data
 	// path and makes the version boundary explicit at the transport edge.
-	Version byte = 1
-	ALPN         = "asterferry-data/1"
+	Version byte = 2
+	ALPN         = "asterferry-data/2"
 
 	SessionHelloKind  byte = 1
 	SessionAcceptKind byte = 2
 	OpenKind          byte = 3
 
 	maxSessionCapabilities = 64
+	maxSessionServiceIDs   = 4096
 	maxAssignmentIDBytes   = 128
 	maxServiceIDBytes      = 128
 	maxTargetBytes         = 2048
@@ -41,11 +43,22 @@ const (
 	maxDatagramFragments   = 1024
 )
 
+var defaultCapabilities = []string{"http", "socks5", "tcp", "udp"}
+
 var (
 	ErrInvalidVersion    = errors.New("unsupported AFDP version")
 	ErrMalformedFrame    = errors.New("malformed AFDP frame")
 	ErrFrameTooLarge     = errors.New("AFDP frame exceeds configured limit")
 	ErrUnauthorizedAgent = errors.New("agent is not present in assignment")
+	// ErrTransient marks a local resource decision that rejects one stream or
+	// datagram but does not invalidate the authenticated session.
+	ErrTransient = errors.New("AFDP transient resource limit")
+	// ErrProtocolViolation marks a malformed or otherwise session-fatal peer
+	// message. Callers may close the authenticated session for this class.
+	ErrProtocolViolation = errors.New("AFDP protocol violation")
+	// ErrUnauthorizedOpen is scoped to one already-authenticated stream. The
+	// stream is closed, but the peer session remains usable.
+	ErrUnauthorizedOpen = errors.New("AFDP open is unauthorized")
 )
 
 // AssignmentView is the only control state the data plane needs for session
@@ -275,7 +288,19 @@ func decodeControl(data []byte, kind byte, out any, max int) error {
 	if length > max || length != len(data)-6 {
 		return ErrMalformedFrame
 	}
-	if err := (proto.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data[6:], out.(proto.Message)); err != nil {
+	message, ok := out.(proto.Message)
+	if !ok {
+		return ErrMalformedFrame
+	}
+	if err := (proto.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data[6:], message); err != nil {
+		return ErrMalformedFrame
+	}
+	// Unknown fields are retained by the protobuf runtime when
+	// DiscardUnknown is false. Retention alone would let a newer peer add a
+	// field while an older peer silently accepts it and re-emits the bytes.
+	// AFDP control frames are intentionally fail-closed: a field added to the
+	// wire contract must first be negotiated/versioned rather than ignored.
+	if len(message.ProtoReflect().GetUnknown()) != 0 {
 		return ErrMalformedFrame
 	}
 	return nil
@@ -325,7 +350,7 @@ func validateSessionAccept(value SessionAccept) error {
 		}
 		seen[capability] = struct{}{}
 	}
-	if len(value.ServiceIDs) > maxSessionCapabilities*4 {
+	if len(value.ServiceIDs) > maxSessionServiceIDs {
 		return ErrFrameTooLarge
 	}
 	seenServices := make(map[string]struct{}, len(value.ServiceIDs))
@@ -341,7 +366,7 @@ func validateSessionAccept(value SessionAccept) error {
 	return nil
 }
 
-// DatagramHeader is the fixed AFDP/1 header carried in a QUIC DATAGRAM. The
+// DatagramHeader is the fixed AFDP/2 header carried in a QUIC DATAGRAM. The
 // payload itself is not wrapped in a per-record envelope.
 type DatagramHeader struct {
 	Flags         byte
@@ -514,7 +539,7 @@ func (r *Reassembler) Add(data []byte, now time.Time) ([]byte, bool, error) {
 	set := r.flows[key]
 	if set == nil {
 		if len(r.flows) >= r.maxFlows {
-			return nil, false, errors.New("reassembler flow limit reached")
+			return nil, false, fmt.Errorf("%w: reassembler flow limit reached", ErrTransient)
 		}
 		set = &fragmentSet{created: now, count: header.FragmentCount, parts: make(map[uint16][]byte)}
 		r.flows[key] = set
@@ -532,7 +557,7 @@ func (r *Reassembler) Add(data []byte, now time.Time) ([]byte, bool, error) {
 	if r.bytes+len(payload) > r.maxBytes {
 		delete(r.flows, key)
 		r.bytes -= set.bytes
-		return nil, false, errors.New("reassembler byte limit reached")
+		return nil, false, fmt.Errorf("%w: reassembler byte limit reached", ErrTransient)
 	}
 	set.parts[header.FragmentIndex] = payload
 	set.bytes += len(payload)
@@ -641,6 +666,34 @@ func CanonicalCapabilities(values []string) []string {
 	result := append([]string(nil), values...)
 	sort.Strings(result)
 	return result
+}
+
+func DefaultCapabilities() []string { return append([]string(nil), defaultCapabilities...) }
+
+// NegotiateCapabilities returns the sorted intersection of the capabilities
+// offered by both peers. An AFDP/2 peer must never claim a feature merely
+// because the other side echoed it; only the intersection is actionable.
+func NegotiateCapabilities(local, peer []string) []string {
+	if len(local) == 0 {
+		local = defaultCapabilities
+	}
+	peerSet := make(map[string]struct{}, len(peer))
+	for _, capability := range peer {
+		peerSet[capability] = struct{}{}
+	}
+	result := make([]string, 0, len(local))
+	seen := make(map[string]struct{}, len(local))
+	for _, capability := range local {
+		if _, ok := peerSet[capability]; !ok {
+			continue
+		}
+		if _, ok := seen[capability]; ok {
+			continue
+		}
+		seen[capability] = struct{}{}
+		result = append(result, capability)
+	}
+	return CanonicalCapabilities(result)
 }
 
 func CanonicalServiceIDs(values []string) []string {

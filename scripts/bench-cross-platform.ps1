@@ -37,10 +37,10 @@ try {
 
 $wslBinary = (& wsl.exe -d $WslDistro -- wslpath -a ($linuxBinary -replace '\', '/')).Trim()
 $wslVersion = (& wsl.exe -d $WslDistro -- $wslBinary version --short | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $wslVersion.Length -eq 0) { throw "WSL AFDP/1 binary check failed" }
+if ($LASTEXITCODE -ne 0 -or $wslVersion.Length -eq 0) { throw "WSL AFDP/2 binary check failed" }
 $report = [ordered]@{
     commit = (git rev-parse HEAD).Trim()
-    protocol = "AFDP/1 + control/1"
+    protocol = "AFDP/2 + control/1"
     binaries = @(
         (Invoke-Version $windowsBinary "windows"),
         [ordered]@{ name = "wsl-linux"; version = $wslVersion }

@@ -5,9 +5,9 @@ package afdp
 // bounds (control frame, datagram, or obfuscation packet).
 const (
 	maxAFDPWireBytes  = 64 << 10
+	maxSessionFrame   = 1 << 20
 	defaultMaxStreams = 256
 
-	maxSessionFrame        = maxAFDPWireBytes
 	maxDatagramFrame       = maxAFDPWireBytes
 	maxObfuscationDatagram = maxAFDPWireBytes
 )

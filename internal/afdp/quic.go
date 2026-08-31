@@ -120,7 +120,7 @@ func Listen(addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.List
 	if tlsConfig == nil {
 		return nil, errors.New("data-plane TLS config is required")
 	}
-	// AFDP/1 has one reserved ALPN. Never let a caller accidentally expose a
+	// AFDP/2 has one reserved ALPN. Never let a caller accidentally expose a
 	// listener that negotiates an unrelated protocol on the data endpoint.
 	tlsConfig = tlsConfig.Clone()
 	tlsConfig.NextProtos = []string{ALPN}

@@ -373,6 +373,11 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 			bindings = make(map[string]struct{})
 		}
 		for _, existing := range candidate.Assignments {
+			if existing.State == domain.AssignmentDegraded || existing.State == domain.AssignmentDraining {
+				// These placements have relinquished their listeners. Keep their
+				// documents for diagnostics, but never let them block failover.
+				continue
+			}
 			if request.Existing != nil && existing.ID == request.Existing.ID {
 				continue
 			}

@@ -4,9 +4,9 @@ package wireversion
 
 const (
 	Control     byte = 1
-	Data        byte = 1
+	Data        byte = 2
 	ControlALPN      = "asterferry-control/1"
-	DataALPN         = "asterferry-data/1"
+	DataALPN         = "asterferry-data/2"
 )
 
-const Display = "AFDP/1 + control/1"
+const Display = "AFDP/2 + control/1"

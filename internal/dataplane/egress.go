@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"asterferry/internal/addresspolicy"
+	"asterferry/internal/afdp"
 	"asterferry/internal/domain"
 )
 
@@ -43,7 +44,7 @@ func (e *Engine) AcquireEgress(ctx context.Context, network, target string) (str
 		for {
 			current := e.egressOpen.Load()
 			if current >= int64(policy.MaxConnections) {
-				return nil, errors.New("egress connection limit reached")
+				return nil, fmt.Errorf("%w: egress connection limit reached", afdp.ErrTransient)
 			}
 			if e.egressOpen.CompareAndSwap(current, current+1) {
 				var once sync.Once

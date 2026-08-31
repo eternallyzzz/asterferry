@@ -393,7 +393,7 @@ func (e *Engine) AuthorizeSession(hello afdp.SessionHello) error {
 	for {
 		current := e.sessions.Load()
 		if current >= int64(e.maxSessions) {
-			return errors.New("session limit reached")
+			return fmt.Errorf("%w: session limit reached", afdp.ErrTransient)
 		}
 		if e.sessions.CompareAndSwap(current, current+1) {
 			return nil
@@ -453,19 +453,19 @@ func (e *Engine) ReserveOpen(assignmentID string, open afdp.OpenMetadata) (*Open
 		maxStreams = assignment.MaxStreams
 	}
 	if e.active[assignmentID] >= maxStreams {
-		return nil, errors.New("assignment stream limit reached")
+		return nil, fmt.Errorf("%w: assignment stream limit reached", afdp.ErrTransient)
 	}
 	for {
 		current := e.streams.Load()
 		if current >= int64(e.maxStreams) {
-			return nil, errors.New("stream limit reached")
+			return nil, fmt.Errorf("%w: stream limit reached", afdp.ErrTransient)
 		}
 		// The connection limit is a second global ceiling and must be checked
 		// inside the same CAS loop as the stream limit. Checking it only before
 		// the loop lets concurrent opens race past a one-connection policy when
 		// the first goroutine wins the CAS and the second retries.
 		if e.connectionLimit > 0 && current >= int64(e.connectionLimit) {
-			return nil, errors.New("connection limit reached")
+			return nil, fmt.Errorf("%w: connection limit reached", afdp.ErrTransient)
 		}
 		if e.streams.CompareAndSwap(current, current+1) {
 			break
@@ -490,10 +490,10 @@ func (e *Engine) ReserveLocalOpen() (*OpenLease, error) {
 	for {
 		current := e.streams.Load()
 		if current >= int64(e.maxStreams) {
-			return nil, errors.New("stream limit reached")
+			return nil, fmt.Errorf("%w: stream limit reached", afdp.ErrTransient)
 		}
 		if e.connectionLimit > 0 && current >= int64(e.connectionLimit) {
-			return nil, errors.New("connection limit reached")
+			return nil, fmt.Errorf("%w: connection limit reached", afdp.ErrTransient)
 		}
 		if e.streams.CompareAndSwap(current, current+1) {
 			return &OpenLease{engine: e, epoch: e.epoch}, nil
@@ -580,6 +580,9 @@ func cloneGatewaySpec(value domain.GatewaySpec) domain.GatewaySpec {
 	value.PortPool.TCP = append([]domain.PortRange(nil), value.PortPool.TCP...)
 	value.PortPool.UDP = append([]domain.PortRange(nil), value.PortPool.UDP...)
 	value.Obfuscation.KeyCiphertext = append([]byte(nil), value.Obfuscation.KeyCiphertext...)
+	value.Obfuscation.PreviousKeyCiphertext = append([]byte(nil), value.Obfuscation.PreviousKeyCiphertext...)
+	value.Obfuscation.Key = append([]byte(nil), value.Obfuscation.Key...)
+	value.Obfuscation.PreviousKey = append([]byte(nil), value.Obfuscation.PreviousKey...)
 	value.Egress = cloneEgressPolicy(value.Egress)
 	return value
 }
@@ -595,6 +598,7 @@ func cloneAgentSpec(value domain.AgentSpec) domain.AgentSpec {
 	for i := range value.Routes {
 		value.Routes[i].CIDRs = append([]string(nil), value.Routes[i].CIDRs...)
 		value.Routes[i].Domains = append([]string(nil), value.Routes[i].Domains...)
+		value.Routes[i].GeoIP = append([]string(nil), value.Routes[i].GeoIP...)
 	}
 	return value
 }

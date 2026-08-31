@@ -21,7 +21,7 @@ import (
 
 func newControllerCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "controller", Short: "run and administer the AsterFerry Controller"}
-	cmd.AddCommand(newControllerInitCommand(), newControllerRunCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
+	cmd.AddCommand(newControllerInitCommand(), newControllerRunCommand(), newControllerMigrateCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
 	return cmd
 }
 
@@ -94,6 +94,40 @@ func newControllerRunCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
+	return cmd
+}
+
+func newControllerMigrateCommand() *cobra.Command {
+	var path string
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "upgrade a stopped v3 Controller database to schema v4",
+		Long:  "validate and upgrade a v3 Controller database in a maintenance window; the original database is retained as a rollback backup",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			config, err := controller.LoadConfig(path)
+			if err != nil {
+				return err
+			}
+			report, err := controller.MigrateDatabase(cmd.Context(), config.DatabasePath, dryRun)
+			if err != nil {
+				return err
+			}
+			if report.AlreadyCurrent {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "controller database is already schema v%d\n", report.ToVersion)
+				return err
+			}
+			if dryRun {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "migration dry-run passed: schema v%d -> v%d, assignments: %d, assignment services: %d, legacy idempotency keys to clear: %d\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.LegacyIdempotencyKeys)
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "controller database migrated: schema v%d -> v%d, assignments: %d, assignment services: %d, rollback backup: %s\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.BackupPath)
+			return err
+		},
+	}
+	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate the migration without changing the database")
 	return cmd
 }
 

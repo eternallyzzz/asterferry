@@ -85,12 +85,18 @@ func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {
 		// generation while the other half is still being rebuilt.
 		wasDraining := engine.IsDraining()
 		engine.BeginDrain()
+		admissionRestored := false
 		defer func() {
-			if !wasDraining {
+			if !wasDraining && admissionRestored {
 				engine.EndDrain()
 			}
 		}()
 		if err := engine.ApplySnapshot(ctx, snapshot, previous); err != nil {
+			// Engine.ApplySnapshot builds its replacement indexes before taking
+			// the lock, so a failure leaves the previous generation intact. A
+			// durable previous document means the sibling data plane is intact as
+			// well; an initial failure must remain drained until a full apply.
+			admissionRestored = previous != nil
 			return err
 		}
 		if err := dataPlane.ApplySnapshot(ctx, snapshot, previous); err != nil {
@@ -98,15 +104,24 @@ func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {
 			// Keep the control engine and network adapters on the same
 			// generation if opening a listener/session fails.
 			if previous != nil {
+				// Keep rollback tied to the runtime lifetime rather than the
+				// cancelled control-stream operation. WithoutCancel preserves
+				// request values while allowing both components to restore the
+				// last known-good generation.
+				rollbackCtx := context.WithoutCancel(ctx)
 				var rollbackErrs []error
-				if rollbackErr := engine.ApplySnapshot(ctx, *previous, &snapshot); rollbackErr != nil {
+				rollbackOK := true
+				if rollbackErr := engine.ApplySnapshot(rollbackCtx, *previous, &snapshot); rollbackErr != nil {
 					options.Logger.Error("control engine rollback after snapshot failure failed", "generation", previous.Generation, "error", rollbackErr)
 					rollbackErrs = append(rollbackErrs, rollbackErr)
+					rollbackOK = false
 				}
-				if rollbackErr := dataPlane.ApplySnapshot(context.Background(), *previous, nil); rollbackErr != nil {
+				if rollbackErr := dataPlane.ApplySnapshot(rollbackCtx, *previous, nil); rollbackErr != nil {
 					options.Logger.Error("data-plane rollback after snapshot failure failed", "generation", previous.Generation, "error", rollbackErr)
 					rollbackErrs = append(rollbackErrs, rollbackErr)
+					rollbackOK = false
 				}
+				admissionRestored = rollbackOK
 				return errors.Join(err, errors.Join(rollbackErrs...))
 			} else {
 				// The first engine apply has no previous document to restore. Clear
@@ -119,6 +134,7 @@ func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {
 			}
 			return err
 		}
+		admissionRestored = true
 		return nil
 	}
 	reset := func(ctx context.Context, generation uint64) error {
@@ -278,7 +294,9 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
-	stream, err := client.Connect(ctx)
+	connectionCtx, cancelConnection := context.WithCancel(ctx)
+	defer cancelConnection()
+	stream, err := client.Connect(connectionCtx)
 	if err != nil {
 		return err
 	}
@@ -314,8 +332,8 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 			return err
 		}
 	}
-	heartbeatCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(connectionCtx)
+	defer cancelHeartbeat()
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -325,7 +343,10 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				observed := r.observedState()
 				if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Heartbeat{Heartbeat: controlwire.Heartbeat(observed.AppliedGeneration, observed.Healthy)}}); err != nil {
 					r.logger.Warn("node heartbeat send failed", "error", err)
-					cancel()
+					// Recv is blocked in the main goroutine. Cancelling only the
+					// heartbeat child would leave the control RPC alive forever;
+					// cancel the stream context so Recv observes the failure too.
+					cancelConnection()
 					return
 				}
 			case <-heartbeatCtx.Done():

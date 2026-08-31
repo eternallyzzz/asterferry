@@ -30,8 +30,8 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	info := buildinfo.Current()
 	root := &cobra.Command{
 		Use:           "asterferry",
-		Short:         "AsterFerry Controller and AFDP/1 data-plane node",
-		Long:          "AsterFerry keeps identity, desired state and scheduling in the Controller; Gateway and Agent processes only run AFDP/1 data-plane state.",
+		Short:         "AsterFerry Controller and AFDP/2 data-plane node",
+		Long:          "AsterFerry keeps identity, desired state and scheduling in the Controller; Gateway and Agent processes only run AFDP/2 data-plane state.",
 		Version:       info.Version,
 		SilenceErrors: true,
 		SilenceUsage:  true,

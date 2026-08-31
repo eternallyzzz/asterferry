@@ -9,9 +9,69 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 
 	"asterferry/internal/domain"
 )
+
+type snapshotSubscription struct {
+	id uint64
+	ch chan struct{}
+}
+
+// SubscribeSnapshotChanges returns a coalescing notification stream for
+// desired-state writes. The notification carries no payload: the subscriber
+// must materialize the current node-scoped snapshot after receiving it.
+func (s *Store) SubscribeSnapshotChanges(nodeID string) (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	sub := &snapshotSubscription{id: nextActionSubscription.Add(1), ch: ch}
+	s.actionMu.Lock()
+	if s.snapshotSubs == nil {
+		s.snapshotSubs = make(map[string]map[uint64]*snapshotSubscription)
+	}
+	if s.snapshotSubs[nodeID] == nil {
+		s.snapshotSubs[nodeID] = make(map[uint64]*snapshotSubscription)
+	}
+	s.snapshotSubs[nodeID][sub.id] = sub
+	s.actionMu.Unlock()
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			s.actionMu.Lock()
+			if subscribers := s.snapshotSubs[nodeID]; subscribers != nil {
+				if current := subscribers[sub.id]; current == sub {
+					delete(subscribers, sub.id)
+					close(current.ch)
+				}
+				if len(subscribers) == 0 {
+					delete(s.snapshotSubs, nodeID)
+				}
+			}
+			s.actionMu.Unlock()
+		})
+	}
+}
+
+func (s *Store) notifySnapshotChanges() {
+	s.actionMu.Lock()
+	defer s.actionMu.Unlock()
+	for _, subscribers := range s.snapshotSubs {
+		for _, subscriber := range subscribers {
+			select {
+			case subscriber.ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+func (s *Store) commitAndNotify(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifySnapshotChanges()
+	return nil
+}
 
 // BuildDesiredSnapshot materializes the complete node-scoped desired state
 // from the authoritative resources in SQLite.  The result is pure data: it
@@ -129,6 +189,8 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 // a resource write has changed it.  It is safe to call before every control
 // stream reconnect; unchanged state does not create another generation.
 func (s *Store) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
 	snapshot, err := s.BuildDesiredSnapshot(ctx, nodeID)
 	if err != nil {
 		return SnapshotRecord{}, err

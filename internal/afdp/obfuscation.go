@@ -21,7 +21,9 @@ const (
 	obfuscationData     byte = 0
 	obfuscationFragment byte = 1
 
-	obfuscationSaltBytes = 8
+	// A 128-bit per-packet salt keeps the keystream collision probability
+	// negligible even at sustained multi-gigabit packet rates.
+	obfuscationSaltBytes = 16
 	obfuscationTagBytes  = 8
 	fragmentHeaderBytes  = 10
 	dataHeaderBytes      = 2
@@ -35,8 +37,8 @@ const (
 )
 
 const (
-	obfuscationMaskDomain = "asterferry-data/1/mask/"
-	obfuscationTagDomain  = "asterferry-data/1/tag/"
+	obfuscationMaskDomain = "asterferry-data/2/mask/"
+	obfuscationTagDomain  = "asterferry-data/2/tag/"
 	maskInputBytes        = len(obfuscationMaskDomain) + 32 + obfuscationSaltBytes + 4
 )
 

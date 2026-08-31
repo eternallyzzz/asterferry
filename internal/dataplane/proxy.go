@@ -165,6 +165,10 @@ func handleHTTPProxyWithBuffer(ctx context.Context, conn net.Conn, proxy domain.
 			return err
 		}
 		defer upstream.Close()
+		// The deadline above protects only the HTTP handshake. Leaving it in
+		// place would turn it into an absolute lifetime limit for CONNECT
+		// tunnels, including WebSocket and SSH traffic.
+		_ = conn.SetDeadline(time.Time{})
 		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		return copyProxyDuplexReaderLimited(conn, io.MultiReader(reader, conn), upstream, maxBuffer)
 	}
@@ -183,6 +187,9 @@ func handleHTTPProxyWithBuffer(ctx context.Context, conn net.Conn, proxy domain.
 		return err
 	}
 	defer upstream.Close()
+	// The request has completed its handshake; the socket must not inherit the
+	// fixed handshake deadline during the long-lived proxied connection.
+	_ = conn.SetDeadline(time.Time{})
 	request.RequestURI = request.URL.RequestURI()
 	request.URL.Scheme = ""
 	request.URL.Host = ""
@@ -358,6 +365,8 @@ func handleSOCKS5WithBuffer(ctx context.Context, conn net.Conn, proxy domain.Pro
 		return err
 	}
 	defer upstream.Close()
+	// The deadline is a handshake guard, not a lifetime limit for the tunnel.
+	_ = conn.SetDeadline(time.Time{})
 	if err := writeSOCKS5Reply(conn, 0); err != nil {
 		return err
 	}

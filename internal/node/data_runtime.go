@@ -1,7 +1,7 @@
 package node
 
 // This file is the process-level bridge between an applied node snapshot and
-// the Controller-independent AFDP/1 data-plane adapters.  It intentionally
+// the Controller-independent AFDP/2 data-plane adapters.  It intentionally
 // contains no REST, SQLite, YAML or Controller imports: the only inputs are a
 // bootstrap identity, an Engine and a typed DesiredSnapshot.
 
@@ -68,13 +68,14 @@ type DataPlaneRuntime struct {
 	clientTLS     *tls.Config
 	tlsMu         sync.RWMutex
 
-	mu      sync.Mutex
-	applyMu sync.Mutex
-	started bool
-	ctx     context.Context
-	cancel  context.CancelFunc
-	state   *dataGeneration
-	pending *domain.DesiredSnapshot
+	mu                sync.Mutex
+	applyMu           sync.Mutex
+	started           bool
+	ctx               context.Context
+	cancel            context.CancelFunc
+	state             *dataGeneration
+	pending           *domain.DesiredSnapshot
+	oversizeDatagrams atomic.Uint64
 }
 
 type dataGeneration struct {
@@ -179,10 +180,11 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 		Healthy:           state.ctx.Err() == nil,
 		ObservedAt:        time.Now().UTC(),
 		Metrics: map[string]float64{
-			"active_streams":  float64(d.engine.ActiveStreams()),
-			"active_sessions": float64(d.engine.ActiveSessions()),
-			"active_egress":   float64(d.engine.ActiveEgress()),
-			"geoip_up":        boolMetric(dataplane.GeoIPAvailable()),
+			"active_streams":     float64(d.engine.ActiveStreams()),
+			"active_sessions":    float64(d.engine.ActiveSessions()),
+			"active_egress":      float64(d.engine.ActiveEgress()),
+			"udp_oversize_drops": float64(d.oversizeDatagrams.Load()),
+			"geoip_up":           boolMetric(dataplane.GeoIPAvailable()),
 		},
 	}
 	state.sessionMu.RLock()
@@ -250,6 +252,7 @@ func (d *DataPlaneRuntime) UpdateBootstrap(bootstrap Bootstrap) error {
 	d.tlsMu.Unlock()
 	d.mu.Lock()
 	started := d.started
+	applyCtx := d.ctx
 	state := d.state
 	var snapshot *domain.DesiredSnapshot
 	if state != nil {
@@ -260,7 +263,10 @@ func (d *DataPlaneRuntime) UpdateBootstrap(bootstrap Bootstrap) error {
 	if !started || snapshot == nil {
 		return nil
 	}
-	if err := d.applyStarted(*snapshot, nil); err != nil {
+	if applyCtx == nil {
+		applyCtx = context.Background()
+	}
+	if err := d.applyStarted(applyCtx, *snapshot, nil); err != nil {
 		d.tlsMu.Lock()
 		d.serverTLS, d.clientTLS, d.bootstrap = oldServerTLS, oldClientTLS, oldBootstrap
 		d.tlsMu.Unlock()
@@ -318,7 +324,7 @@ func (d *DataPlaneRuntime) Start(ctx context.Context) error {
 	d.pending = nil
 	d.mu.Unlock()
 	if pending != nil {
-		if err := d.applyStarted(*pending, nil); err != nil {
+		if err := d.applyStarted(ctx, *pending, nil); err != nil {
 			d.Close()
 			return err
 		}
@@ -329,9 +335,15 @@ func (d *DataPlaneRuntime) Start(ctx context.Context) error {
 // ApplySnapshot installs listeners/sessions for an already validated engine
 // generation. Before Start it merely records the cached snapshot; this keeps
 // NewRuntime safe to construct without opening sockets during initialization.
-func (d *DataPlaneRuntime) ApplySnapshot(_ context.Context, snapshot domain.DesiredSnapshot, previous *domain.DesiredSnapshot) error {
+func (d *DataPlaneRuntime) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapshot, previous *domain.DesiredSnapshot) error {
 	if d == nil || d.engine == nil {
 		return errors.New("data-plane runtime is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := snapshot.Validate(); err != nil {
 		return err
@@ -344,10 +356,16 @@ func (d *DataPlaneRuntime) ApplySnapshot(_ context.Context, snapshot domain.Desi
 		return nil
 	}
 	d.mu.Unlock()
-	return d.applyStarted(snapshot, previous)
+	return d.applyStarted(ctx, snapshot, previous)
 }
 
-func (d *DataPlaneRuntime) applyStarted(snapshot domain.DesiredSnapshot, _ *domain.DesiredSnapshot) error {
+func (d *DataPlaneRuntime) applyStarted(operationCtx context.Context, snapshot domain.DesiredSnapshot, _ *domain.DesiredSnapshot) error {
+	if operationCtx == nil {
+		operationCtx = context.Background()
+	}
+	if err := operationCtx.Err(); err != nil {
+		return err
+	}
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 	// Keep admission closed while listener ownership and the authenticated
@@ -356,8 +374,9 @@ func (d *DataPlaneRuntime) applyStarted(snapshot domain.DesiredSnapshot, _ *doma
 	// a certificate or listener rebuild happened to succeed.
 	wasDraining := d.engine.IsDraining()
 	d.engine.BeginDrain()
+	admissionRestored := false
 	defer func() {
-		if !wasDraining {
+		if !wasDraining && admissionRestored {
 			d.engine.EndDrain()
 		}
 	}()
@@ -376,16 +395,26 @@ func (d *DataPlaneRuntime) applyStarted(snapshot domain.DesiredSnapshot, _ *doma
 	}
 	state, err := d.buildGeneration(ctx, snapshot)
 	if err != nil {
+		var rollbackErr error
 		if old != nil && started {
-			if restored, restoreErr := d.buildGeneration(ctx, old.snap); restoreErr == nil {
+			restored, restoreErr := d.buildGeneration(ctx, old.snap)
+			if restoreErr != nil {
+				d.logger.Error("data-plane rollback after snapshot failure failed", "generation", old.snap.Generation, "error", restoreErr)
+				rollbackErr = fmt.Errorf("restore previous data-plane generation: %w", restoreErr)
+			} else {
 				d.mu.Lock()
 				if d.started && d.ctx != nil && d.ctx.Err() == nil {
 					d.state = restored
+					admissionRestored = true
 				} else {
 					restored.close()
+					rollbackErr = errors.New("data-plane runtime stopped during rollback")
 				}
 				d.mu.Unlock()
 			}
+		}
+		if rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
 		}
 		return err
 	}
@@ -397,6 +426,7 @@ func (d *DataPlaneRuntime) applyStarted(snapshot domain.DesiredSnapshot, _ *doma
 	}
 	d.state = state
 	d.mu.Unlock()
+	admissionRestored = true
 	return nil
 }
 
@@ -716,7 +746,11 @@ func (d *DataPlaneRuntime) serveGatewayTCP(state *dataGeneration, listener net.L
 }
 
 func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UDPConn, assignmentID string, service domain.Service) {
-	buffer := make([]byte, dataPlaneDatagramMTU-afdp.DatagramHeaderSize())
+	maxPayload := dataPlaneDatagramMTU - afdp.DatagramHeaderSize()
+	// Read one byte beyond the AFDP payload budget. UDP reads truncate
+	// oversized datagrams without returning an error, so an exact-sized buffer
+	// would silently forward corrupted payloads.
+	buffer := make([]byte, maxPayload+1)
 	for {
 		_ = socket.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, remote, err := socket.ReadFromUDP(buffer)
@@ -732,6 +766,11 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 		}
 		if state.ctx.Err() != nil {
 			return
+		}
+		if n > maxPayload {
+			d.oversizeDatagrams.Add(1)
+			d.logger.Warn("data-plane Gateway UDP datagram exceeds AFDP payload limit", "assignment_id", assignmentID, "service_id", service.ID, "limit", maxPayload)
+			continue
 		}
 		state.expireUDPFlows(socket, time.Now())
 		flowKey := assignmentID + "|" + service.ID + "|" + remote.String()
@@ -784,10 +823,16 @@ func (d *DataPlaneRuntime) receiveGatewayDatagrams(state *dataGeneration, sessio
 	for {
 		header, payload, receiveErr := session.ReceiveDatagramPacket(state.ctx, reassembler)
 		if receiveErr != nil {
+			if errors.Is(receiveErr, afdp.ErrTransient) {
+				// UDP reassembly pressure rejects the current datagram only. The
+				// authenticated TCP/session channel remains valid and can carry
+				// other streams while the bounded reassembly state expires.
+				continue
+			}
 			state.removeUDPFlowsForSession(session)
-			// A malformed or resource-exhausting datagram invalidates the
-			// session. Closing it prevents a peer from continuing to use the
-			// reliable TCP paths after its UDP input has failed validation.
+			// A malformed datagram invalidates the session. Closing it prevents
+			// a peer from continuing to use the reliable TCP paths after a
+			// protocol violation.
 			_ = session.Close()
 			return
 		}
@@ -811,6 +856,9 @@ func (d *DataPlaneRuntime) serveGatewayEgress(state *dataGeneration, session *af
 	for {
 		stream, metadata, err := session.AcceptStream(state.ctx)
 		if err != nil {
+			if errors.Is(err, afdp.ErrTransient) || errors.Is(err, afdp.ErrUnauthorizedOpen) {
+				continue
+			}
 			// A peer that sends a malformed Open frame must not leave the
 			// authenticated session alive with no stream consumer. Closing the
 			// session makes the fail-closed decision explicit and lets the Agent
@@ -880,6 +928,10 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 					d.engine.ReleaseSession()
 					_ = session.Close()
 				}
+				// A completed session is a successful connection attempt. Do not
+				// carry an outage-era backoff into the next reconnect after a
+				// healthy session ends.
+				backoff = time.Second
 			} else {
 				d.logger.Warn("data-plane Agent session rejected", "assignment_id", assignment.ID, "gateway", assignment.GatewayID, "error", sessionErr)
 				_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP handshake rejected")
@@ -942,6 +994,9 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 		for {
 			header, payload, receiveErr := session.ReceiveDatagramPacket(ctx, reassembler)
 			if receiveErr != nil {
+				if errors.Is(receiveErr, afdp.ErrTransient) {
+					continue
+				}
 				d.logger.Warn("data-plane Agent datagram receive failed", "assignment_id", assignmentID, "error", receiveErr)
 				errCh <- receiveErr
 				return
@@ -968,6 +1023,9 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 		for {
 			stream, metadata, err := session.AcceptStream(ctx)
 			if err != nil {
+				if errors.Is(err, afdp.ErrTransient) || errors.Is(err, afdp.ErrUnauthorizedOpen) {
+					continue
+				}
 				errCh <- err
 				return
 			}
@@ -1121,7 +1179,8 @@ func (d *DataPlaneRuntime) readAgentUDP(state *dataGeneration, session *afdp.Ses
 		flowMu.Unlock()
 		closeAgentUDPFlow(flow)
 	}()
-	buffer := make([]byte, dataPlaneDatagramMTU-afdp.DatagramHeaderSize())
+	maxPayload := dataPlaneDatagramMTU - afdp.DatagramHeaderSize()
+	buffer := make([]byte, maxPayload+1)
 	for {
 		_ = flow.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, err := flow.conn.Read(buffer)
@@ -1136,6 +1195,11 @@ func (d *DataPlaneRuntime) readAgentUDP(state *dataGeneration, session *afdp.Ses
 				}
 			}
 			return
+		}
+		if n > maxPayload {
+			d.oversizeDatagrams.Add(1)
+			d.logger.Warn("data-plane Agent UDP datagram exceeds AFDP payload limit", "flow_id", flowID, "limit", maxPayload)
+			continue
 		}
 		flow.lastUnixNano.Store(time.Now().UnixNano())
 		sequence := flow.sequence.Add(1) - 1
@@ -1272,12 +1336,10 @@ func afdpObfuscationOptions(policy domain.ObfuscationPolicy) afdp.ObfuscationOpt
 	if mode == "" {
 		mode = afdp.ObfuscationStandard
 	}
-	// KeyCiphertext is opaque to nodes. The Controller encrypts secret material
-	// at rest; AFDP derives a fixed packet key from the opaque snapshot bytes so
-	// both participants can authenticate packets without a second key channel.
 	return afdp.ObfuscationOptions{
 		Mode:               mode,
-		CurrentKey:         append([]byte(nil), policy.KeyCiphertext...),
+		CurrentKey:         append([]byte(nil), policy.Key...),
+		PreviousKey:        append([]byte(nil), policy.PreviousKey...),
 		HandshakeShaping:   policy.HandshakeShaping,
 		MinFragmentBytes:   512,
 		MaxFragmentBytes:   1200,

@@ -24,12 +24,15 @@ import (
 )
 
 type Server struct {
-	store        *Store
-	config       Config
-	http         *http.Server
-	sessions     sync.Map // opaque session id -> session
-	loginLimiter *loginLimiter
-	metrics      *ControllerMetrics
+	store         *Store
+	config        Config
+	http          *http.Server
+	sessions      sync.Map // opaque session id -> session
+	sessionCtx    context.Context
+	sessionCancel context.CancelFunc
+	sessionDone   chan struct{}
+	loginLimiter  *loginLimiter
+	metrics       *ControllerMetrics
 }
 
 type session struct {
@@ -48,8 +51,10 @@ func NewServer(config Config, store *Store) (*Server, error) {
 	if store.metrics == nil {
 		store.metrics = newControllerMetrics()
 	}
-	server := &Server{store: store, config: config, loginLimiter: newLoginLimiter(), metrics: store.metrics}
+	sessionCtx, sessionCancel := context.WithCancel(context.Background())
+	server := &Server{store: store, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: store.metrics}
 	server.http = &http.Server{Addr: config.HTTPListen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second}
+	go server.runSessionReaper()
 	return server, nil
 }
 
@@ -131,10 +136,51 @@ func (s *Server) Serve(listener net.Listener) error {
 	return s.http.Serve(listener)
 }
 func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+	if s.sessionCancel != nil {
+		s.sessionCancel()
+		if s.sessionDone != nil {
+			<-s.sessionDone
+		}
+	}
 	if s.http == nil {
 		return nil
 	}
 	return s.http.Close()
+}
+
+const sessionReapInterval = time.Minute
+
+func (s *Server) runSessionReaper() {
+	if s == nil {
+		return
+	}
+	defer close(s.sessionDone)
+	ticker := time.NewTicker(sessionReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.pruneExpiredSessions(time.Now())
+		case <-s.sessionCtx.Done():
+			return
+		}
+	}
+}
+
+func (s *Server) pruneExpiredSessions(now time.Time) {
+	if s == nil {
+		return
+	}
+	s.sessions.Range(func(key, value any) bool {
+		sess, ok := value.(session)
+		if !ok || !now.Before(sess.ExpiresAt) {
+			s.sessions.Delete(key)
+		}
+		return true
+	})
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -1276,7 +1322,7 @@ func (s *Server) enrollmentTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		plain, token, err := s.store.CreateEnrollmentTokenWithOptions(r.Context(), input.Role, ttl, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_token", err.Error())
+			writeStoreError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"token": plain, "token_metadata": token, "created_by": user.Username})
@@ -1488,7 +1534,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 		}
 	} else if cookie, cookieErr := r.Cookie("af_session"); cookieErr == nil {
 		if value, ok := s.sessions.Load(cookie.Value); ok {
-			sess := value.(session)
+			sess, valid := value.(session)
+			if !valid {
+				s.sessions.Delete(cookie.Value)
+				writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
+				return User{}, false
+			}
 			if time.Now().Before(sess.ExpiresAt) {
 				// Do not let an in-memory session outlive an Admin revocation or
 				// role change. The database remains authoritative after login.
@@ -1620,11 +1671,10 @@ func parseIfMatch(value string) (int64, error) {
 }
 
 func writeStoreError(w http.ResponseWriter, err error) {
-	// modernc.org/sqlite exposes every driver error through Code(), including
-	// UNIQUE constraint failures. Classify duplicate resources before the
-	// generic SQLite availability branch so callers receive a conflict instead
-	// of a misleading database-unavailable response.
-	if strings.Contains(strings.ToLower(err.Error()), "unique constraint") || strings.Contains(strings.ToLower(err.Error()), "already exists") {
+	// modernc.org/sqlite exposes extended result codes through Code(). Classify
+	// duplicate resources from the code rather than matching driver prose, which
+	// may contain SQL fragments, paths, or change between driver versions.
+	if isSQLiteUniqueConstraint(err) {
 		writeError(w, http.StatusConflict, "already_exists", "resource already exists")
 		return
 	}
@@ -1659,7 +1709,9 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller storage is temporarily unavailable")
 		return
 	}
-	writeError(w, http.StatusBadRequest, "request_rejected", err.Error())
+	// Do not reflect unclassified repository/driver errors. They can contain
+	// SQL statements, filesystem paths, or other implementation details.
+	writeError(w, http.StatusBadRequest, "request_rejected", "request was rejected")
 }
 
 type sqliteError interface{ Code() int }
@@ -1667,6 +1719,16 @@ type sqliteError interface{ Code() int }
 func isSQLiteError(err error) bool {
 	var coded sqliteError
 	return errors.As(err, &coded)
+}
+
+func isSQLiteUniqueConstraint(err error) bool {
+	var coded sqliteError
+	if !errors.As(err, &coded) {
+		return false
+	}
+	// SQLITE_CONSTRAINT_PRIMARYKEY and SQLITE_CONSTRAINT_UNIQUE are the
+	// extended result codes used by SQLite for duplicate resource identities.
+	return coded.Code() == 1555 || coded.Code() == 2067
 }
 
 func writeApplyError(w http.ResponseWriter, status int, applyErr *domain.ApplyError) {
