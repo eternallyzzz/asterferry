@@ -74,7 +74,7 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 	}
 	candidates := make([]GatewayCandidate, 0, len(nodes))
 	for _, gateway := range nodes {
-		if !gateway.Enabled {
+		if !gateway.Enabled || gateway.CertificateState == domain.CertificateRevoked || gateway.CertificateState == domain.CertificateExpired {
 			continue
 		}
 		spec, specErr := s.GetGatewaySpec(ctx, gateway.ID)
@@ -191,20 +191,71 @@ func (s *Store) ReconcileAssignments(ctx context.Context, offlineAfter time.Dura
 	if err != nil {
 		return nil, err
 	}
+	return s.reconcileAssignmentSet(ctx, assignments, offlineAfter)
+}
+
+// ReconcileAssignmentsForGateways is the event-driven counterpart to the
+// safety-sweep method above. Heartbeats and resource writes identify the
+// Gateway whose placements may need work, so normal operation avoids reading
+// every assignment in the database.
+func (s *Store) ReconcileAssignmentsForGateways(ctx context.Context, offlineAfter time.Duration, gatewayIDs ...string) (result []domain.Assignment, returnErr error) {
+	finishMetrics := s.metrics.startSchedule()
+	defer func() { finishMetrics(returnErr) }()
+	if offlineAfter <= 0 {
+		offlineAfter = DefaultGatewayOfflineAfter
+	}
+	seen := make(map[string]struct{}, len(gatewayIDs))
+	assignments := make([]domain.Assignment, 0)
+	for _, gatewayID := range gatewayIDs {
+		gatewayID = strings.TrimSpace(gatewayID)
+		if gatewayID == "" {
+			continue
+		}
+		if _, exists := seen[gatewayID]; exists {
+			continue
+		}
+		seen[gatewayID] = struct{}{}
+		items, err := s.ListAssignments(ctx, gatewayID, "")
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, items...)
+	}
+	return s.reconcileAssignmentSet(ctx, assignments, offlineAfter)
+}
+
+func (s *Store) reconcileAssignmentSet(ctx context.Context, assignments []domain.Assignment, offlineAfter time.Duration) (result []domain.Assignment, returnErr error) {
 	now := time.Now().UTC()
 	result = make([]domain.Assignment, 0)
 	for _, assignment := range assignments {
 		if assignment.State == domain.AssignmentDraining {
 			continue
 		}
+		gateway, gatewayErr := s.GetNode(ctx, assignment.GatewayID)
+		if gatewayErr != nil {
+			if errors.Is(gatewayErr, sql.ErrNoRows) {
+				continue
+			}
+			return nil, gatewayErr
+		}
 		observed, observedErr := s.GetObserved(ctx, assignment.GatewayID)
 		if errors.Is(observedErr, sql.ErrNoRows) {
-			continue
+			// A disabled or revoked Gateway is unavailable even when its last
+			// heartbeat still looks healthy. The node transaction has already
+			// quarantined its assignment; let this pass select a replacement
+			// immediately instead of waiting for the old heartbeat to expire.
+			if gateway.Enabled && gateway.CertificateState != domain.CertificateRevoked && gateway.CertificateState != domain.CertificateExpired {
+				continue
+			}
+			observed = domain.ObservedState{Degraded: true}
 		}
 		if observedErr != nil {
-			return nil, observedErr
+			if !errors.Is(observedErr, sql.ErrNoRows) {
+				return nil, observedErr
+			}
 		}
-		stale := observed.Degraded || !observed.Healthy || observed.ObservedAt.IsZero() || now.Sub(observed.ObservedAt) >= offlineAfter
+		nodeUnavailable := !gateway.Enabled || gateway.CertificateState == domain.CertificateRevoked || gateway.CertificateState == domain.CertificateExpired
+		stale := nodeUnavailable || observed.Degraded || !observed.Healthy || observed.ObservedAt.IsZero() || now.Sub(observed.ObservedAt) >= offlineAfter
 		if !stale {
 			continue
 		}
@@ -306,7 +357,7 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 	var explicitConflict error
 	var placementErr error
 	for _, candidate := range ordered {
-		if !candidate.Node.Enabled || candidate.Node.Role != domain.RoleGateway || !candidate.Healthy || !request.AgentSpec.GatewaySelector.Matches(candidate.Node.Labels) {
+		if !candidate.Node.Enabled || candidate.Node.CertificateState == domain.CertificateRevoked || candidate.Node.CertificateState == domain.CertificateExpired || candidate.Node.Role != domain.RoleGateway || !candidate.Healthy || !request.AgentSpec.GatewaySelector.Matches(candidate.Node.Labels) {
 			continue
 		}
 		usedAgents := candidate.Spec.Capacity.UsedAgents

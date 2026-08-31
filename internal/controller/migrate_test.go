@@ -45,10 +45,10 @@ func TestMigrateDatabaseV3DryRunAndPublish(t *testing.T) {
 	}
 	defer store.Close()
 	var relations, idempotency int
-	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM assignment_services`).Scan(&relations); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM assignment_services`).Scan(&relations); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM idempotency_keys`).Scan(&idempotency); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM idempotency_keys`).Scan(&idempotency); err != nil {
 		t.Fatal(err)
 	}
 	if relations != 1 || idempotency != 0 {
@@ -59,6 +59,59 @@ func TestMigrateDatabaseV3DryRunAndPublish(t *testing.T) {
 		t.Fatalf("migrated assignment = %#v, err=%v", assignment, err)
 	}
 	assertSchemaMarker(t, report.BackupPath, legacyDBSchema, legacyDBFingerprint)
+}
+
+func TestMigrateDatabaseV4ToV5PreservesCurrentData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "controller-v4.db")
+	prepareV4Database(t, path)
+
+	dryRun, err := MigrateDatabase(context.Background(), path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dryRun.FromVersion != v4DBSchema || dryRun.ToVersion != currentDBSchema || dryRun.Assignments != 1 || dryRun.AssignmentServices != 1 || dryRun.LegacyIdempotencyKeys != 1 || !dryRun.DryRun {
+		t.Fatalf("unexpected v4 dry-run report: %#v", dryRun)
+	}
+	assertSchemaMarker(t, path, v4DBSchema, v4DBFingerprint)
+
+	report, err := MigrateDatabase(context.Background(), path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BackupPath == "" {
+		t.Fatal("v4 migration did not retain a rollback backup")
+	}
+	assertSchemaMarker(t, path, currentDBSchema, dbSchemaFingerprint)
+
+	db, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var passwordChangedAt, retentionIndex, idempotency int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='password_changed_at'`).Scan(&passwordChangedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_idempotency_created'`).Scan(&retentionIndex); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM idempotency_keys`).Scan(&idempotency); err != nil {
+		t.Fatal(err)
+	}
+	if passwordChangedAt != 1 || retentionIndex != 1 || idempotency != 1 {
+		t.Fatalf("v4 migration markers/retention index/idempotency = %d/%d/%d", passwordChangedAt, retentionIndex, idempotency)
+	}
+
+	store, err := openTestStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assignment, err := store.GetAssignment(context.Background(), "assignment")
+	if err != nil || assignment.ID != "assignment" || len(assignment.ServiceIDs) != 1 || assignment.ServiceIDs[0] != "svc" {
+		t.Fatalf("migrated v4 assignment = %#v, err=%v", assignment, err)
+	}
+	assertSchemaMarker(t, report.BackupPath, v4DBSchema, v4DBFingerprint)
 }
 
 func prepareV3Database(t *testing.T, path string) {
@@ -103,6 +156,54 @@ func prepareV3Database(t *testing.T, path string) {
 		`UPDATE schema_meta SET value='asterferry-controller-sqlite-v3' WHERE key='fingerprint'`,
 		`PRAGMA user_version=3`,
 		`INSERT INTO idempotency_keys(key,request_hash,response_json,created_at) VALUES('legacy-key','legacy-hash','{}','2026-01-01T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func prepareV4Database(t *testing.T, path string) {
+	t.Helper()
+	store, err := openTestStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, node := range []domain.Node{
+		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
+		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+	} {
+		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0"}, WriteOptions{}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.PutAssignment(ctx, domain.Assignment{ID: "assignment", GatewayID: "gw", AgentID: "agent", ServiceIDs: []string{"svc"}, Bindings: []domain.Binding{{ServiceID: "svc", Protocol: domain.ProtocolTCP, Bind: "0.0.0.0", Port: 18080}}, Generation: 1}, WriteOptions{}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	for _, statement := range []string{
+		`DROP INDEX idx_idempotency_created`,
+		`ALTER TABLE users DROP COLUMN password_changed_at`,
+		`UPDATE schema_meta SET value='4' WHERE key='schema_version'`,
+		`UPDATE schema_meta SET value='asterferry-controller-sqlite-v4' WHERE key='fingerprint'`,
+		`PRAGMA user_version=4`,
+		`INSERT INTO idempotency_keys(key,request_hash,response_json,created_at) VALUES('v4-key','v4-hash','{}','2026-01-01T00:00:00Z')`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)

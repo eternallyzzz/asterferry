@@ -18,10 +18,12 @@ import (
 const (
 	legacyDBSchema      = 3
 	legacyDBFingerprint = "asterferry-controller-sqlite-v3"
+	v4DBSchema          = 4
+	v4DBFingerprint     = "asterferry-controller-sqlite-v4"
 )
 
-// MigrationReport describes the v3 -> v4 database migration without exposing
-// any resource document or secret material.
+// MigrationReport describes the v3/v4 -> v5 database migration without
+// exposing any resource document or secret material.
 type MigrationReport struct {
 	Path                  string
 	FromVersion           int
@@ -34,7 +36,7 @@ type MigrationReport struct {
 	BackupPath            string
 }
 
-// MigrateDatabase upgrades an on-disk v3 Controller database to v4. The
+// MigrateDatabase upgrades an on-disk v3 or v4 Controller database to v5. The
 // operation is deliberately separate from OpenStore: a running Controller
 // never performs an implicit schema rewrite. A consistent SQLite copy is
 // upgraded first, then the original file is moved aside and the copy is
@@ -66,24 +68,44 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 	}
 	report.FromVersion = version
 	if version == currentDBSchema && fingerprint == dbSchemaFingerprint {
-		if err := validateTables(ctx, db, currentSchemaTables()); err != nil {
+		if err := validateRequiredTables(ctx, db); err != nil {
 			return report, fmt.Errorf("validate current database: %w", err)
 		}
 		report.AlreadyCurrent = true
 		return report, nil
 	}
-	if version != legacyDBSchema || fingerprint != legacyDBFingerprint {
-		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, version, fingerprint)
+	if version != legacyDBSchema && (version != v4DBSchema || fingerprint != v4DBFingerprint) {
+		return report, fmt.Errorf("%w: migration supports schema %d (%s) or schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, v4DBSchema, v4DBFingerprint, version, fingerprint)
 	}
-	if err := validateTables(ctx, db, legacySchemaTables()); err != nil {
+	if version == legacyDBSchema {
+		if fingerprint != legacyDBFingerprint {
+			return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, version, fingerprint)
+		}
+	} else if fingerprint != v4DBFingerprint {
+		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, v4DBSchema, v4DBFingerprint, version, fingerprint)
+	}
+	tables := legacySchemaTables()
+	if version == v4DBSchema {
+		tables = currentSchemaTables()
+	}
+	if err := validateTables(ctx, db, tables); err != nil {
 		return report, fmt.Errorf("validate legacy database: %w", err)
 	}
-	relations, err := collectAssignmentServices(ctx, db)
-	if err != nil {
-		return report, err
+	relations := migrationRelations{assignments: make(map[string]struct{})}
+	if version == legacyDBSchema {
+		relations, err = collectAssignmentServices(ctx, db)
+		if err != nil {
+			return report, err
+		}
+		report.Assignments = len(relations.assignments)
+		report.AssignmentServices = len(relations.rows)
 	}
-	report.Assignments = len(relations.assignments)
-	report.AssignmentServices = len(relations.rows)
+	if version == v4DBSchema {
+		report.Assignments, report.AssignmentServices, err = countCurrentRelations(ctx, db)
+		if err != nil {
+			return report, err
+		}
+	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM idempotency_keys`).Scan(&report.LegacyIdempotencyKeys); err != nil {
 		return report, fmt.Errorf("count legacy idempotency keys: %w", err)
 	}
@@ -113,7 +135,7 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 		return report, fmt.Errorf("close legacy database: %w", err)
 	}
 
-	if err := upgradeMigrationCopy(ctx, tempPath, relations.rows); err != nil {
+	if err := upgradeMigrationCopy(ctx, tempPath, version, relations.rows); err != nil {
 		return report, err
 	}
 	backupPath, err := publishMigrationCopy(absPath, tempPath)
@@ -141,6 +163,16 @@ type assignmentServiceMigration struct {
 type migrationRelations struct {
 	assignments map[string]struct{}
 	rows        []assignmentServiceMigration
+}
+
+func countCurrentRelations(ctx context.Context, db *sql.DB) (assignments, assignmentServices int, err error) {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignments`).Scan(&assignments); err != nil {
+		return 0, 0, fmt.Errorf("count assignments: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignment_services`).Scan(&assignmentServices); err != nil {
+		return 0, 0, fmt.Errorf("count assignment services: %w", err)
+	}
+	return assignments, assignmentServices, nil
 }
 
 func schemaIdentity(ctx context.Context, db *sql.DB) (int, string, error) {
@@ -240,7 +272,7 @@ func collectAssignmentServices(ctx context.Context, db *sql.DB) (migrationRelati
 	return relations, nil
 }
 
-func upgradeMigrationCopy(ctx context.Context, path string, relations []assignmentServiceMigration) error {
+func upgradeMigrationCopy(ctx context.Context, path string, fromVersion int, relations []assignmentServiceMigration) error {
 	db, err := sql.Open(driverName, sqliteDSN(path))
 	if err != nil {
 		return fmt.Errorf("open migration copy: %w", err)
@@ -253,38 +285,47 @@ func upgradeMigrationCopy(ctx context.Context, path string, relations []assignme
 		return fmt.Errorf("begin migration copy: %w", err)
 	}
 	defer tx.Rollback()
-	statements := []string{
-		`CREATE TABLE assignment_services (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, PRIMARY KEY(assignment_id,service_id), UNIQUE(service_id))`,
-		`CREATE INDEX idx_assignments_agent ON assignments(agent_id)`,
-		`CREATE INDEX idx_assignment_services_service ON assignment_services(service_id)`,
-		`DELETE FROM idempotency_keys`,
-		`UPDATE schema_meta SET value=? WHERE key='schema_version'`,
-		`UPDATE schema_meta SET value=? WHERE key='fingerprint'`,
-	}
-	if _, err := tx.ExecContext(ctx, statements[0]); err != nil {
-		return fmt.Errorf("create assignment service relation: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, statements[1]); err != nil {
-		return fmt.Errorf("create assignment agent index: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, statements[2]); err != nil {
-		return fmt.Errorf("create assignment service index: %w", err)
-	}
-	for _, relation := range relations {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO assignment_services(assignment_id,service_id) VALUES(?,?)`, relation.assignmentID, relation.serviceID); err != nil {
-			return fmt.Errorf("populate assignment service relation: %w", err)
+	if fromVersion == legacyDBSchema {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS assignment_services (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, PRIMARY KEY(assignment_id,service_id), UNIQUE(service_id))`); err != nil {
+			return fmt.Errorf("create assignment service relation: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_assignments_agent ON assignments(agent_id)`); err != nil {
+			return fmt.Errorf("create assignment agent index: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_assignment_services_service ON assignment_services(service_id)`); err != nil {
+			return fmt.Errorf("create assignment service index: %w", err)
+		}
+		for _, relation := range relations {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO assignment_services(assignment_id,service_id) VALUES(?,?)`, relation.assignmentID, relation.serviceID); err != nil {
+				return fmt.Errorf("populate assignment service relation: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency_keys`); err != nil {
+			return fmt.Errorf("clear legacy idempotency keys: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, statements[3]); err != nil {
-		return fmt.Errorf("clear legacy idempotency keys: %w", err)
+	var hasPasswordChangedAt int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='password_changed_at'`).Scan(&hasPasswordChangedAt); err != nil {
+		return fmt.Errorf("inspect users schema: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, statements[4], strconv.Itoa(currentDBSchema)); err != nil {
+	if hasPasswordChangedAt == 0 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE users ADD COLUMN password_changed_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add password change marker: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_changed_at=created_at WHERE password_changed_at=''`); err != nil {
+		return fmt.Errorf("backfill password change marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)`); err != nil {
+		return fmt.Errorf("create idempotency retention index: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='schema_version'`, strconv.Itoa(currentDBSchema)); err != nil {
 		return fmt.Errorf("write migrated schema version: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, statements[5], dbSchemaFingerprint); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='fingerprint'`, dbSchemaFingerprint); err != nil {
 		return fmt.Errorf("write migrated schema fingerprint: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=4`); err != nil {
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=5`); err != nil {
 		return fmt.Errorf("write sqlite user version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -330,7 +371,7 @@ func migrationDatabasePath(path string) (string, error) {
 }
 
 func publishMigrationCopy(originalPath, copyPath string) (string, error) {
-	backupPath, err := reserveMigrationPath(originalPath, ".asterferry-pre-v4-*")
+	backupPath, err := reserveMigrationPath(originalPath, ".asterferry-pre-v5-*")
 	if err != nil {
 		return "", fmt.Errorf("reserve migration backup: %w", err)
 	}

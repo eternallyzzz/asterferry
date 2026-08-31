@@ -95,6 +95,20 @@ func (m *ControllerMetrics) refreshSQLite(store *Store) {
 		return
 	}
 	m.sqliteUp.Set(1)
+	if nodes, err := store.ListNodes(ctx, ""); err == nil {
+		existing := make(map[string]struct{}, len(nodes))
+		for _, node := range nodes {
+			existing[node.ID] = struct{}{}
+		}
+		m.mu.Lock()
+		for nodeID := range m.nodes {
+			if _, ok := existing[nodeID]; !ok {
+				delete(m.nodes, nodeID)
+			}
+		}
+		m.recomputeLocked()
+		m.mu.Unlock()
+	}
 }
 
 func (m *ControllerMetrics) observeHTTP(method, route string, status int, elapsed time.Duration) {
@@ -124,6 +138,21 @@ func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.Obs
 	}
 	m.mu.Lock()
 	m.nodes[nodeID] = current
+	m.recomputeLocked()
+	m.mu.Unlock()
+}
+
+func (m *ControllerMetrics) removeNode(nodeID string) {
+	if m == nil || nodeID == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.nodes, nodeID)
+	m.recomputeLocked()
+	m.mu.Unlock()
+}
+
+func (m *ControllerMetrics) recomputeLocked() {
 	byRole := make(map[string]struct{ healthy, degraded, streams, sessions, egress, generation, geoipUp float64 })
 	listenerTotals := make(map[string]float64)
 	for _, value := range m.nodes {
@@ -164,7 +193,6 @@ func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.Obs
 	for _, protocol := range []string{"tcp", "udp", "http", "socks5"} {
 		m.listeners.WithLabelValues(protocol).Set(listenerTotals[protocol])
 	}
-	m.mu.Unlock()
 }
 
 func (m *ControllerMetrics) startSchedule() func(error) {

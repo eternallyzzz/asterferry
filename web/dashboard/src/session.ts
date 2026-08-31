@@ -1,8 +1,12 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { currentUser, login as controllerLogin, logout as controllerLogout, type ControllerUser } from "./controller-api";
 
 const controllerUser = ref<ControllerUser | null>(null);
 const controllerError = ref("");
+
+// 权限点自原 ControllerShell 平移：viewer 只读、operator 管业务资源、admin 管身份。
+const canOperate = computed(() => controllerUser.value?.role === "operator" || controllerUser.value?.role === "admin");
+const canAdmin = computed(() => controllerUser.value?.role === "admin");
 
 export function useSession() {
   const lock = () => {
@@ -42,5 +46,5 @@ export function useSession() {
     }
   };
 
-  return { controllerUser, controllerError, lock, login, logout, restore };
+  return { controllerUser, controllerError, canOperate, canAdmin, lock, login, logout, restore };
 }

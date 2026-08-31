@@ -27,6 +27,11 @@ type Config struct {
 	MasterKeyPath   string `json:"master_key_path"`
 	DashboardEnable bool   `json:"dashboard_enable"`
 	LogLevel        string `json:"log_level"`
+	// History retention is expressed in operator-friendly units rather than
+	// time.Duration's nanosecond JSON representation. Zero disables cleanup for
+	// the corresponding table.
+	IdempotencyRetentionHours int64 `json:"idempotency_retention_hours"`
+	AuditRetentionDays        int64 `json:"audit_retention_days"`
 	// SourcePath is process-local provenance used by backup helpers. It is not
 	// serialized into controller.json and does not affect configuration
 	// validation.
@@ -36,16 +41,18 @@ type Config struct {
 func DefaultConfig(dir string) Config {
 	dir = filepath.Clean(dir)
 	return Config{
-		HTTPListen:      ":8443",
-		GRPCListen:      ":9443",
-		DatabasePath:    filepath.Join(dir, "controller.db"),
-		CAKeyPath:       filepath.Join(dir, "ca", "ca.key"),
-		CACertPath:      filepath.Join(dir, "ca", "ca.crt"),
-		TLSCertPath:     filepath.Join(dir, "tls", "controller.crt"),
-		TLSKeyPath:      filepath.Join(dir, "tls", "controller.key"),
-		MasterKeyPath:   filepath.Join(dir, "master.key"),
-		DashboardEnable: true,
-		LogLevel:        "info",
+		HTTPListen:                ":8443",
+		GRPCListen:                ":9443",
+		DatabasePath:              filepath.Join(dir, "controller.db"),
+		CAKeyPath:                 filepath.Join(dir, "ca", "ca.key"),
+		CACertPath:                filepath.Join(dir, "ca", "ca.crt"),
+		TLSCertPath:               filepath.Join(dir, "tls", "controller.crt"),
+		TLSKeyPath:                filepath.Join(dir, "tls", "controller.key"),
+		MasterKeyPath:             filepath.Join(dir, "master.key"),
+		DashboardEnable:           true,
+		LogLevel:                  "info",
+		IdempotencyRetentionHours: 24,
+		AuditRetentionDays:        90,
 	}
 }
 
@@ -60,6 +67,9 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("controller %s is required", field)
 		}
+	}
+	if c.IdempotencyRetentionHours < 0 || c.AuditRetentionDays < 0 {
+		return errors.New("controller history retention values cannot be negative")
 	}
 	return nil
 }
@@ -76,6 +86,19 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, errors.New("decode controller config: trailing JSON")
 		}
 		return Config{}, fmt.Errorf("decode controller config: %w", err)
+	}
+	// Preserve the new defaults for configurations generated before retention
+	// settings existed while still allowing an explicit zero to disable a
+	// cleanup job.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err == nil {
+		defaults := DefaultConfig(filepath.Dir(path))
+		if _, ok := fields["idempotency_retention_hours"]; !ok {
+			config.IdempotencyRetentionHours = defaults.IdempotencyRetentionHours
+		}
+		if _, ok := fields["audit_retention_days"]; !ok {
+			config.AuditRetentionDays = defaults.AuditRetentionDays
+		}
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err

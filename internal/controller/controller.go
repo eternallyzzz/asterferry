@@ -34,7 +34,15 @@ type Controller struct {
 	waitDone        chan struct{}
 	waitErr         error
 	logger          *slog.Logger
+	startMu         sync.Mutex
+	started         bool
+	closed          bool
 }
+
+var (
+	ErrControllerAlreadyStarted = errors.New("controller is already started")
+	ErrControllerClosed         = errors.New("controller is closed")
+)
 
 func New(config Config) (*Controller, error) {
 	if err := config.Validate(); err != nil {
@@ -60,17 +68,28 @@ func (c *Controller) Start(ctx context.Context) error {
 	if c == nil || c.Store == nil || c.HTTP == nil {
 		return errors.New("controller is not initialized")
 	}
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	if c.closed {
+		return ErrControllerClosed
+	}
+	if c.started {
+		return ErrControllerAlreadyStarted
+	}
+	c.started = true
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	listener, grpcServer, grpcServeErr, err := StartGRPCWithErrors(runCtx, c.Config, c.Store)
 	if err != nil {
+		c.started = false
 		cancel()
 		return err
 	}
 	httpListener, err := c.HTTP.TLSListener()
 	if err != nil {
+		c.started = false
 		grpcServer.Stop()
 		_ = listener.Close()
 		cancel()
@@ -95,6 +114,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		_ = httpListener.Close()
 	}()
 	go c.reconcileLoop(runCtx)
+	go c.maintenanceLoop(runCtx)
 	go c.monitorServers(runCtx)
 	return nil
 }
@@ -177,23 +197,68 @@ func (c *Controller) logServeFailure(component string, err error) {
 }
 
 func (c *Controller) reconcileLoop(ctx context.Context) {
-	// Run once promptly after startup, then at a bounded interval. The pass is
-	// intentionally best-effort: a transient SQLite or placement error leaves
-	// the assignment degraded and the next tick retries it.
-	ticker := time.NewTicker(5 * time.Second)
+	changes, unsubscribe := c.Store.SubscribeResourceChanges()
+	defer unsubscribe()
+	// Recover stale state once at startup. Normal operation is driven by
+	// coalesced heartbeat/resource hints; the slow sweep remains a repair path
+	// for missed notifications and for the passage of the offline deadline.
+	c.reconcileAll(ctx)
+	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
-		if _, err := c.Store.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter); err != nil && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return
+		case change, ok := <-changes:
+			if !ok {
+				return
+			}
+			if len(change.NodeIDs) > 0 {
+				if _, err := c.Store.ReconcileAssignmentsForGateways(ctx, DefaultGatewayOfflineAfter, change.NodeIDs...); err != nil && ctx.Err() == nil {
+					c.logReconcileFailure(err)
+				}
+			}
+		case <-ticker.C:
+			c.reconcileAll(ctx)
+		}
+	}
+}
+
+func (c *Controller) reconcileAll(ctx context.Context) {
+	if _, err := c.Store.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter); err != nil && ctx.Err() == nil {
+		c.logReconcileFailure(err)
+	}
+}
+
+func (c *Controller) logReconcileFailure(err error) {
+	logger := c.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("controller assignment reconciliation failed", "error", err)
+}
+
+func (c *Controller) maintenanceLoop(ctx context.Context) {
+	cleanup := func() {
+		idempotencyTTL := time.Duration(c.Config.IdempotencyRetentionHours) * time.Hour
+		auditTTL := time.Duration(c.Config.AuditRetentionDays) * 24 * time.Hour
+		if err := c.Store.PruneHistory(ctx, time.Now().UTC(), idempotencyTTL, auditTTL); err != nil && ctx.Err() == nil {
 			logger := c.logger
 			if logger == nil {
 				logger = slog.Default()
 			}
-			logger.Warn("controller assignment reconciliation failed", "error", err)
+			logger.Warn("controller history cleanup failed", "error", err)
 		}
+	}
+	cleanup()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			cleanup()
 		}
 	}
 }
@@ -202,6 +267,9 @@ func (c *Controller) Close() error {
 	if c == nil {
 		return nil
 	}
+	c.startMu.Lock()
+	c.closed = true
+	c.startMu.Unlock()
 	c.closeOnce.Do(func() {
 		if c.reconcileCancel != nil {
 			c.reconcileCancel()

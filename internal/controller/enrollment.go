@@ -261,6 +261,35 @@ func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest, role stri
 	return nil
 }
 
+func (s *Store) validateEnrollmentToken(ctx context.Context, plain, role string) error {
+	if strings.TrimSpace(plain) == "" {
+		return ErrInvalidEnrollmentToken
+	}
+	var storedRole, expires string
+	var used sqlNullString
+	err := s.db.QueryRowContext(ctx, `SELECT role,expires_at,used_at FROM enrollment_tokens WHERE token_hash=?`, HashToken(plain)).Scan(&storedRole, &expires, &used)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidEnrollmentToken
+	}
+	if err != nil {
+		return storageFailure("validate enrollment token", err)
+	}
+	if used.Valid {
+		return ErrEnrollmentTokenUsed
+	}
+	expiresAt, err := parseStoredTime("enrollment_token.expires_at", expires)
+	if err != nil {
+		return err
+	}
+	if !time.Now().UTC().Before(expiresAt) {
+		return ErrEnrollmentTokenExpired
+	}
+	if storedRole != role {
+		return ErrEnrollmentRoleMismatch
+	}
+	return nil
+}
+
 // sqlNullString is kept local to avoid leaking database/sql implementation
 // details into the public enrollment model.
 type sqlNullString struct {
@@ -289,6 +318,9 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	if role != domain.RoleGateway && role != domain.RoleAgent {
 		return Certificate{}, fmt.Errorf("%w: node role must be gateway or agent", ErrInvalidEnrollmentRequest)
 	}
+	if err := s.validateEnrollmentToken(ctx, token, role); err != nil {
+		return Certificate{}, err
+	}
 	node, err := s.GetNode(ctx, nodeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -312,7 +344,11 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	if err := validateCSRIdentity(request, nodeID, role); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
-	certificate, err := signNodeCertificate(config, nodeID, role, request.PublicKey)
+	caCert, caKey, err := readCA(config.CACertPath, config.CAKeyPath)
+	if err != nil {
+		return Certificate{}, err
+	}
+	caPEM, err := os.ReadFile(config.CACertPath)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -321,12 +357,6 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 		return Certificate{}, storageFailure("begin enrollment transaction", err)
 	}
 	defer tx.Rollback()
-	if err := consumeEnrollmentTokenTx(ctx, tx, HashToken(token), role); err != nil {
-		if !isCredentialError(err) && !errors.Is(err, ErrInvalidEnrollmentRequest) {
-			return Certificate{}, storageFailure("consume enrollment token", err)
-		}
-		return Certificate{}, err
-	}
 	var revision int64
 	var currentRole, certificateState string
 	var enabled int
@@ -341,6 +371,19 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	// can revoke/disable a node while CSR parsing and signing are in progress.
 	if currentRole != role || enabled == 0 || certificateState == domain.CertificateRevoked {
 		return Certificate{}, fmt.Errorf("%w: node is disabled or role does not match", ErrNodeEnrollmentNotAllowed)
+	}
+	// Consume the one-time token before performing the CA signature while the
+	// transaction is still open. Any signing or persistence failure rolls the
+	// transaction back, so a valid token is not lost to an internal error.
+	if err := consumeEnrollmentTokenTx(ctx, tx, HashToken(token), role); err != nil {
+		if !isCredentialError(err) && !errors.Is(err, ErrInvalidEnrollmentRequest) {
+			return Certificate{}, storageFailure("consume enrollment token", err)
+		}
+		return Certificate{}, err
+	}
+	certificate, err := signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, role, request.PublicKey)
+	if err != nil {
+		return Certificate{}, err
 	}
 	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND role=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, role, domain.CertificateRevoked)
@@ -464,6 +507,17 @@ func signNodeCertificate(config Config, nodeID, role string, publicKey any) (Cer
 	if err != nil {
 		return Certificate{}, err
 	}
+	caPEM, err := os.ReadFile(config.CACertPath)
+	if err != nil {
+		return Certificate{}, err
+	}
+	return signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, role, publicKey)
+}
+
+func signNodeCertificateWithCA(caCert *x509.Certificate, caKey ed25519.PrivateKey, caPEM []byte, nodeID, role string, publicKey any) (Certificate, error) {
+	if caCert == nil || len(caKey) == 0 || len(caPEM) == 0 {
+		return Certificate{}, errors.New("CA signing material is incomplete")
+	}
 	serial, err := randomSerial()
 	if err != nil {
 		return Certificate{}, err
@@ -472,10 +526,6 @@ func signNodeCertificate(config Config, nodeID, role string, publicKey any) (Cer
 	uri := domain.NodeIdentityURI(nodeID)
 	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, publicKey, caKey)
-	if err != nil {
-		return Certificate{}, err
-	}
-	caPEM, err := os.ReadFile(config.CACertPath)
 	if err != nil {
 		return Certificate{}, err
 	}

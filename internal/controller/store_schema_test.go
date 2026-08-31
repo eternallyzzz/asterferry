@@ -70,10 +70,10 @@ func TestOpenStoreCreatesCurrentGenerationMarker(t *testing.T) {
 	}
 	defer store.Close()
 	var version, fingerprint string
-	if err := store.DB().QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+	if err := store.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRow(`SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
+	if err := store.db.QueryRow(`SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
 		t.Fatal(err)
 	}
 	if version != strconv.Itoa(currentDBSchema) || fingerprint != dbSchemaFingerprint {

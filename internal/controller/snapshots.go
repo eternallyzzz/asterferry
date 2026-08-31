@@ -52,10 +52,20 @@ func (s *Store) SubscribeSnapshotChanges(nodeID string) (<-chan struct{}, func()
 	}
 }
 
-func (s *Store) notifySnapshotChanges() {
+func (s *Store) notifySnapshotChanges(nodeIDs ...string) {
+	if len(nodeIDs) == 0 {
+		return
+	}
+	targets := make(map[string]struct{}, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		if strings.TrimSpace(nodeID) != "" {
+			targets[nodeID] = struct{}{}
+		}
+	}
 	s.actionMu.Lock()
 	defer s.actionMu.Unlock()
-	for _, subscribers := range s.snapshotSubs {
+	for nodeID := range targets {
+		subscribers := s.snapshotSubs[nodeID]
 		for _, subscriber := range subscribers {
 			select {
 			case subscriber.ch <- struct{}{}:
@@ -65,11 +75,27 @@ func (s *Store) notifySnapshotChanges() {
 	}
 }
 
-func (s *Store) commitAndNotify(tx *sql.Tx) error {
+func (s *Store) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifySnapshotChanges()
+	s.notifySnapshotChanges(nodeIDs...)
+	return nil
+}
+
+func (s *Store) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
+	if err := s.commitAndNotify(tx, nodeIDs...); err != nil {
+		return err
+	}
+	s.notifyResourceChanges(nodeIDs...)
+	return nil
+}
+
+func (s *Store) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyResourceChanges(nodeIDs...)
 	return nil
 }
 
@@ -146,6 +172,20 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 	for _, assignment := range snapshot.Assignments {
 		if assignment.Generation > snapshot.Generation {
 			snapshot.Generation = assignment.Generation
+		}
+	}
+	// Legacy v3 assignments may contain Controller-encrypted key material
+	// without the plaintext-derived KeyID. Normalize the storage form before
+	// calculating a checksum so the persisted document and the decrypted wire
+	// document share one canonical identity.
+	if snapshot.Gateway != nil {
+		if err := s.protectObfuscationPolicy(&snapshot.Gateway.Obfuscation); err != nil {
+			return domain.DesiredSnapshot{}, err
+		}
+	}
+	for index := range snapshot.Assignments {
+		if err := s.protectObfuscationPolicy(&snapshot.Assignments[index].Obfuscation); err != nil {
+			return domain.DesiredSnapshot{}, fmt.Errorf("assignment %q obfuscation: %w", snapshot.Assignments[index].ID, err)
 		}
 	}
 

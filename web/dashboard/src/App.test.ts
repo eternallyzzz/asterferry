@@ -30,7 +30,7 @@ describe("App authentication gate", () => {
     const wrapper = mount(App, { global: { plugins: [router] } });
     wrappers.push(wrapper);
     expect(wrapper.find(".auth-shell").exists()).toBe(true);
-    expect(wrapper.find(".controller-shell").exists()).toBe(false);
+    expect(wrapper.find(".app-shell").exists()).toBe(false);
   });
 
   it("renders the Controller shell for an authenticated user", () => {
@@ -38,6 +38,6 @@ describe("App authentication gate", () => {
     session.controllerUser.value = { id: "u1", username: "admin", role: "admin", enabled: true, revision: 1 };
     const wrapper = mount(App, { global: { plugins: [router] } });
     wrappers.push(wrapper);
-    expect(wrapper.find(".controller-shell").exists()).toBe(true);
+    expect(wrapper.find(".app-shell").exists()).toBe(true);
   });
 });

@@ -69,6 +69,21 @@ port collisions are transactional conflicts; zero ports are allocated from the
 Gateway's protocol-specific pool. Every desired snapshot has one node scope,
 monotonic generation, schema version and SHA-256 checksum.
 
+### Controller database upgrades
+
+Controller schema upgrades are explicit maintenance operations. Stop the
+Controller, run a validation-only pass, then publish the migration:
+
+```powershell
+asterferry controller migrate --config ./controller/controller.json --dry-run
+asterferry controller migrate --config ./controller/controller.json
+```
+
+The command upgrades schema v3 or v4 to v5, keeps the original database as a
+rollback backup, and never runs while `controller run` is active. Existing
+v3/v4 databases are not rewritten by `OpenStore`; take a complete Controller
+backup before the maintenance window.
+
 ## Node behavior
 
 Nodes have only bootstrap identity material, Controller address, cache location
@@ -97,6 +112,10 @@ fragment header, bounded reassembly, duplicate rejection and expiry. Stream,
 datagram, message, fragment and buffer limits are negotiated and malformed
 input fails closed. Routing, egress, quotas and obfuscation policy come from
 the node snapshot; the Controller never enters the business data path.
+
+AFDP/1 and AFDP/2 are not wire-compatible: the ALPN and version byte changed,
+and there is no fallback codec. Upgrade Gateway and Agent binaries together
+with the Controller-side rollout before opening new data-plane sessions.
 
 The first release supports multiple Gateways only when each has an independent
 reachable public endpoint. Shared VIP takeover, transparent connection

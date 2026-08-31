@@ -32,11 +32,15 @@ import (
 
 type ControlServer struct {
 	v1.UnimplementedControlServer
-	store    *Store
-	config   Config
-	streams  map[string]*controlStream // node id -> active stream
-	streamMu sync.Mutex
-	metrics  *ControllerMetrics
+	store          *Store
+	config         Config
+	streams        map[string]*controlStream // node id -> active stream
+	streamMu       sync.Mutex
+	metrics        *ControllerMetrics
+	enrollLimiter  *admissionLimiter
+	connectLimiter *admissionLimiter
+	enrollSlots    chan struct{}
+	connectSlots   chan struct{}
 }
 
 type controlStream struct {
@@ -58,7 +62,13 @@ func NewControlServer(config Config, store *Store) (*ControlServer, error) {
 	if store.metrics == nil {
 		store.metrics = newControllerMetrics()
 	}
-	return &ControlServer{store: store, config: config, streams: make(map[string]*controlStream), metrics: store.metrics}, nil
+	return &ControlServer{
+		store: store, config: config, streams: make(map[string]*controlStream), metrics: store.metrics,
+		enrollLimiter:  newAdmissionLimiter(6, time.Minute, 4096),
+		connectLimiter: newAdmissionLimiter(30, time.Minute, 4096),
+		enrollSlots:    make(chan struct{}, 16),
+		connectSlots:   make(chan struct{}, 256),
+	}, nil
 }
 
 func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (response *v1.EnrollResponse, returnErr error) {
@@ -73,6 +83,15 @@ func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (
 	}()
 	if request == nil || request.GetToken() == "" || request.GetNodeId() == "" || len(request.GetCsrDer()) == 0 || len(request.GetCsrDer()) > 128<<10 {
 		return nil, status.Error(codes.InvalidArgument, "token, node_id and csr_der are required")
+	}
+	if allowed, retry := s.enrollLimiter.allow(peerAddressKey(ctx)); !allowed {
+		return nil, status.Errorf(codes.ResourceExhausted, "enrollment rate limit exceeded; retry after %s", retry.Round(time.Second))
+	}
+	select {
+	case s.enrollSlots <- struct{}{}:
+		defer func() { <-s.enrollSlots }()
+	default:
+		return nil, status.Error(codes.ResourceExhausted, "enrollment capacity is temporarily exhausted")
 	}
 	role, err := protoRole(request.GetRole())
 	if err != nil {
@@ -102,6 +121,21 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			s.metrics.observeGRPC("Connect", code)
 		}
 	}()
+	if allowed, retry := s.connectLimiter.allow(peerAddressKey(stream.Context())); !allowed {
+		return status.Errorf(codes.ResourceExhausted, "control connection rate limit exceeded; retry after %s", retry.Round(time.Second))
+	}
+	connectSlotHeld := false
+	select {
+	case s.connectSlots <- struct{}{}:
+		connectSlotHeld = true
+		defer func() {
+			if connectSlotHeld {
+				<-s.connectSlots
+			}
+		}()
+	default:
+		return status.Error(codes.ResourceExhausted, "control connection capacity is temporarily exhausted")
+	}
 	first, err := stream.Recv()
 	if err != nil {
 		return err
@@ -147,26 +181,33 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	if err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
+	// Authenticate the certificate identity before consulting SQLite. This
+	// keeps unknown node IDs, disabled nodes and role mismatches from becoming
+	// an externally observable lookup oracle.
+	if err := verifyPeerIdentity(stream.Context(), hello.GetNodeId()); err != nil {
+		return status.Error(codes.PermissionDenied, "control stream authentication failed")
+	}
 	node, err := s.store.GetNode(stream.Context(), hello.GetNodeId())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return status.Error(codes.PermissionDenied, "node is not enrolled")
+			return status.Error(codes.PermissionDenied, "control stream authentication failed")
 		}
 		slog.Default().Error("control stream node lookup failed", "node_id", hello.GetNodeId(), "error", err)
 		return status.Error(codes.Unavailable, "controller storage is temporarily unavailable")
 	}
 	if node.Role != role || !node.Enabled || node.CertificateState != domain.CertificateActive {
-		return status.Error(codes.PermissionDenied, "node is disabled or role does not match")
-	}
-	if err := verifyPeerIdentity(stream.Context(), hello.GetNodeId()); err != nil {
-		return status.Error(codes.PermissionDenied, err.Error())
+		return status.Error(codes.PermissionDenied, "control stream authentication failed")
 	}
 	if certificate, certErr := peerCertificate(stream.Context()); certErr != nil || node.CertificateSerial == "" || !strings.EqualFold(certificate.SerialNumber.Text(16), node.CertificateSerial) {
 		// A rotated certificate keeps the same node identity but invalidates the
 		// previous serial immediately. This closes a stream opened with an old
 		// certificate even before its natural expiry.
-		return status.Error(codes.PermissionDenied, "certificate serial is not current")
+		return status.Error(codes.PermissionDenied, "control stream authentication failed")
 	}
+	// The expensive pre-auth admission slot is no longer needed after the
+	// certificate and current serial have been checked.
+	<-s.connectSlots
+	connectSlotHeld = false
 	// Subscribe before materializing the initial snapshot. A resource write
 	// racing this handshake is coalesced into the buffered notification instead
 	// of waiting for a periodic poll.

@@ -13,3 +13,8 @@ DATAGRAM with the fixed AFDP/2 version/flow/sequence/fragment header.
 There is no fallback or compatibility codec. Unknown schema versions,
 stale generations, bad checksums, malformed frames, and resource-limit
 violations are rejected before allocation or state mutation.
+
+AFDP/1 to AFDP/2 is an intentional hard break rather than a negotiated
+downgrade: both the QUIC ALPN and the version byte changed. A mixed old/new
+Gateway or Agent deployment cannot establish a data-plane session; upgrade
+the node fleet as one coordinated rollout.

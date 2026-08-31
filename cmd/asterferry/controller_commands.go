@@ -102,8 +102,8 @@ func newControllerMigrateCommand() *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "upgrade a stopped v3 Controller database to schema v4",
-		Long:  "validate and upgrade a v3 Controller database in a maintenance window; the original database is retained as a rollback backup",
+		Short: "upgrade a stopped v3 or v4 Controller database to schema v5",
+		Long:  "validate and upgrade a stopped v3 or v4 Controller database in a maintenance window; the original database is retained as a rollback backup",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			config, err := controller.LoadConfig(path)
@@ -119,7 +119,7 @@ func newControllerMigrateCommand() *cobra.Command {
 				return err
 			}
 			if dryRun {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "migration dry-run passed: schema v%d -> v%d, assignments: %d, assignment services: %d, legacy idempotency keys to clear: %d\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.LegacyIdempotencyKeys)
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "migration dry-run passed: schema v%d -> v%d, assignments: %d, assignment services: %d, idempotency keys observed: %d\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.LegacyIdempotencyKeys)
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "controller database migrated: schema v%d -> v%d, assignments: %d, assignment services: %d, rollback backup: %s\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.BackupPath)

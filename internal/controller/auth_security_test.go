@@ -1,9 +1,16 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestPasswordIdempotencyRequestDoesNotContainPasswordDigest(t *testing.T) {
@@ -27,5 +34,49 @@ func TestPasswordIdempotencyRequestDoesNotContainPasswordDigest(t *testing.T) {
 func TestDummyPasswordHashIsValidArgon2id(t *testing.T) {
 	if !VerifyPassword(dummyPasswordHash, "asterferry-dummy-password") {
 		t.Fatal("fixed dummy password hash does not verify")
+	}
+}
+
+func TestPasswordChangeRevokesTokensAndSessions(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	user, err := store.CreateUser(ctx, "password-owner", "old-password", RoleAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainToken, _, err := store.CreateAPIToken(ctx, user.ID, "before-password-change", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateToken(ctx, plainToken); err != nil {
+		t.Fatalf("token was not valid before password change: %v", err)
+	}
+
+	server := &Server{store: store, sessions: sync.Map{}}
+	cookieValue := "session-before-password-change"
+	server.sessions.Store(cookieValue, session{User: user, ExpiresAt: time.Now().UTC().Add(time.Hour), CSRF: "csrf"})
+	newPassword := "new-password"
+	if _, err := store.UpdateUser(ctx, user.ID, UserUpdate{Password: &newPassword}, WriteOptions{IfMatch: user.Revision, Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AuthenticateToken(ctx, plainToken); !errors.Is(err, ErrInvalidAPIToken) {
+		t.Fatalf("old API token error = %v, want ErrInvalidAPIToken", err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	request.AddCookie(&http.Cookie{Name: "af_session", Value: cookieValue})
+	response := httptest.NewRecorder()
+	if _, ok := server.authorize(response, request, RoleViewer); ok {
+		t.Fatal("session remained authorized after password change")
+	}
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("stale session status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if _, ok := server.sessions.Load(cookieValue); ok {
+		t.Fatal("stale session was not removed")
 	}
 }

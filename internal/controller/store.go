@@ -23,8 +23,8 @@ import (
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 4
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v4"
+	currentDBSchema     = 5
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v5"
 	maxSnapshotDocument = 16 << 20
 )
 
@@ -44,6 +44,8 @@ type Store struct {
 	actionMu     sync.Mutex
 	actionSubs   map[string]map[uint64]*actionSubscription
 	snapshotSubs map[string]map[uint64]*snapshotSubscription
+	changeMu     sync.Mutex
+	changeSubs   map[uint64]*resourceChangeSubscription
 	// Snapshot materialization reads a previous generation and then writes a
 	// replacement. Serialize that check-and-write pair so concurrent control
 	// streams cannot publish the same generation with different content.
@@ -143,27 +145,16 @@ func attributesWithMessage(attributes map[string]string, message, eventID string
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at FROM users ORDER BY username`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := []User{}
 	for rows.Next() {
-		var user User
-		var enabled int
-		var created, updated string
-		if err := rows.Scan(&user.ID, &user.Username, &user.Role, &enabled, &user.Revision, &created, &updated); err != nil {
-			return nil, err
-		}
-		user.Enabled = enabled != 0
-		user.CreatedAt, err = parseStoredTime("user.created_at", created)
-		if err != nil {
-			return nil, err
-		}
-		user.UpdatedAt, err = parseStoredTime("user.updated_at", updated)
-		if err != nil {
-			return nil, err
+		user, scanErr := scanUser(rows)
+		if scanErr != nil {
+			return nil, scanErr
 		}
 		result = append(result, user)
 	}
@@ -171,48 +162,43 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
-	var user User
-	var enabled int
-	var created, updated string
-	if err := s.db.QueryRowContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at FROM users WHERE id=?`, id).Scan(&user.ID, &user.Username, &user.Role, &enabled, &user.Revision, &created, &updated); err != nil {
-		return User{}, err
-	}
-	user.Enabled = enabled != 0
-	parsed, err := parseStoredTime("user.created_at", created)
-	if err != nil {
-		return User{}, err
-	}
-	user.CreatedAt = parsed
-	parsed, err = parseStoredTime("user.updated_at", updated)
-	if err != nil {
-		return User{}, err
-	}
-	user.UpdatedAt = parsed
-	return user, nil
+	return scanUser(s.db.QueryRowContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users WHERE id=?`, id))
 }
 
 func getUserTx(ctx context.Context, tx *sql.Tx, field, value string) (User, error) {
 	if field != "id" && field != "username" {
 		return User{}, errors.New("invalid user lookup field")
 	}
-	query := `SELECT id,username,role,enabled,revision,created_at,updated_at FROM users WHERE ` + field + `=?`
+	query := `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users WHERE ` + field + `=?`
+	return scanUser(tx.QueryRowContext(ctx, query, value))
+}
+
+/*
+The public User model deliberately does not expose PasswordChangedAt, but
+the controller keeps it on every authenticated copy so in-memory sessions
+can be invalidated without retaining or comparing password material.
+*/
+func scanUser(row scanner) (User, error) {
 	var user User
 	var enabled int
-	var created, updated string
-	if err := tx.QueryRowContext(ctx, query, value).Scan(&user.ID, &user.Username, &user.Role, &enabled, &user.Revision, &created, &updated); err != nil {
+	var created, updated, passwordChanged string
+	if err := row.Scan(&user.ID, &user.Username, &user.Role, &enabled, &user.Revision, &created, &updated, &passwordChanged); err != nil {
 		return User{}, err
 	}
 	user.Enabled = enabled != 0
-	parsed, err := parseStoredTime("user.created_at", created)
+	var err error
+	user.CreatedAt, err = parseStoredTime("user.created_at", created)
 	if err != nil {
 		return User{}, err
 	}
-	user.CreatedAt = parsed
-	parsed, err = parseStoredTime("user.updated_at", updated)
+	user.UpdatedAt, err = parseStoredTime("user.updated_at", updated)
 	if err != nil {
 		return User{}, err
 	}
-	user.UpdatedAt = parsed
+	user.PasswordChangedAt, err = parseStoredTime("user.password_changed_at", passwordChanged)
+	if err != nil {
+		return User{}, err
+	}
 	return user, nil
 }
 
@@ -533,7 +519,11 @@ func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapsh
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, requestSnapshot, map[string]any{"node_id": snapshot.NodeID, "generation": snapshot.Generation, "checksum": snapshot.Checksum}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	affectedNodes := []string{snapshot.NodeID}
+	for _, assignment := range snapshot.Assignments {
+		affectedNodes = append(affectedNodes, assignment.GatewayID, assignment.AgentID)
+	}
+	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
 func OpenStore(path string, masterKey []byte) (*Store, error) {
@@ -577,7 +567,6 @@ func OpenStore(path string, masterKey []byte) (*Store, error) {
 
 func NewStore(path string, masterKey []byte) (*Store, error) { return OpenStore(path, masterKey) }
 
-func (s *Store) DB() *sql.DB  { return s.db }
 func (s *Store) Path() string { return s.path }
 
 func (s *Store) configure() error {
@@ -626,6 +615,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
+			password_changed_at TEXT NOT NULL,
 			role TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			revision INTEGER NOT NULL DEFAULT 1,
@@ -672,6 +662,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX idx_assignment_services_service ON assignment_services(service_id)`,
 		`CREATE INDEX idx_assignment_acks_generation ON assignment_acks(assignment_id,generation)`,
 		`CREATE INDEX idx_audit_created ON audit_events(created_at)`,
+		`CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at)`,
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -712,13 +703,56 @@ func inspectDatabase(ctx context.Context, db *sql.DB) (compatible, empty bool, e
 }
 
 func validateRequiredTables(ctx context.Context, db *sql.DB) error {
-	for _, table := range []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_services", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"} {
+	for _, table := range currentSchemaTables() {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
 			return err
 		}
 		if count != 1 {
 			return fmt.Errorf("required table %q is missing", table)
+		}
+	}
+	// A matching marker alone is not enough to make a database compatible:
+	// database/sql can be pointed at a partially copied or manually edited
+	// file. Validate the columns that are read by the store before accepting
+	// the marker, especially the v5 password invalidation marker.
+	requiredColumns := map[string][]string{
+		"schema_meta":         {"key", "value"},
+		"users":               {"id", "username", "password_hash", "password_changed_at", "role", "enabled", "revision", "created_at", "updated_at"},
+		"api_tokens":          {"id", "user_id", "token_hash", "name", "expires_at", "revoked_at", "created_at"},
+		"nodes":               {"id", "role", "name", "labels_json", "enabled", "certificate_state", "certificate_serial", "revision", "created_at", "updated_at"},
+		"gateway_specs":       {"node_id", "document_json", "revision", "updated_at"},
+		"agent_specs":         {"node_id", "document_json", "revision", "updated_at"},
+		"services":            {"id", "agent_id", "document_json", "revision", "updated_at"},
+		"service_bindings":    {"service_id", "gateway_id", "protocol", "bind", "port"},
+		"assignments":         {"id", "gateway_id", "agent_id", "document_json", "generation", "revision", "updated_at"},
+		"assignment_services": {"assignment_id", "service_id"},
+		"assignment_acks":     {"assignment_id", "node_id", "generation", "status", "error_code", "updated_at"},
+		"desired_snapshots":   {"node_id", "generation", "checksum", "document_json", "created_at"},
+		"observed_states":     {"node_id", "generation", "document_json", "updated_at"},
+		"audit_events":        {"id", "actor", "action", "resource", "resource_id", "revision", "attributes_json", "created_at"},
+		"idempotency_keys":    {"key", "request_hash", "response_json", "created_at"},
+		"enrollment_tokens":   {"id", "token_hash", "role", "expires_at", "used_at", "created_at"},
+	}
+	for table, columns := range requiredColumns {
+		for _, column := range columns {
+			var count int
+			query := fmt.Sprintf("SELECT count(*) FROM pragma_table_info('%s') WHERE name=?", table)
+			if err := db.QueryRowContext(ctx, query, column).Scan(&count); err != nil {
+				return err
+			}
+			if count != 1 {
+				return fmt.Errorf("required column %q.%q is missing", table, column)
+			}
+		}
+	}
+	for _, index := range []string{"idx_nodes_role_enabled", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created"} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil {
+			return err
+		}
+		if count != 1 {
+			return fmt.Errorf("required index %q is missing", index)
 		}
 	}
 	return nil
@@ -744,6 +778,12 @@ func (s *Store) Close() error {
 			delete(s.snapshotSubs, nodeID)
 		}
 		s.actionMu.Unlock()
+		s.changeMu.Lock()
+		for id, subscription := range s.changeSubs {
+			close(subscription.ch)
+			delete(s.changeSubs, id)
+		}
+		s.changeMu.Unlock()
 		s.err = s.db.Close()
 	})
 	return s.err
@@ -795,7 +835,7 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": node.ID, "revision": node.Revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, node.ID)
 }
 
 func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
@@ -823,6 +863,127 @@ func (s *Store) ListNodes(ctx context.Context, role string) ([]domain.Node, erro
 			return nil, err
 		}
 		result = append(result, node)
+	}
+	return result, rows.Err()
+}
+
+// GatewayView and AgentView are one-query list projections used by the REST
+// list endpoints. Keeping the optional spec in the projection avoids an N+1
+// Get*Spec query for every node while preserving the existing JSON response.
+type GatewayView struct {
+	Node domain.Node
+	Spec *domain.GatewaySpec
+}
+
+type AgentView struct {
+	Node domain.Node
+	Spec *domain.AgentSpec
+}
+
+func (s *Store) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.role,n.name,n.labels_json,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,g.document_json,g.revision FROM nodes n LEFT JOIN gateway_specs g ON g.node_id=n.id WHERE n.role=? ORDER BY n.id`, domain.RoleGateway)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]GatewayView, 0)
+	for rows.Next() {
+		var node domain.Node
+		var labels, document []byte
+		var enabled int
+		var created, updated string
+		var specRevision sql.NullInt64
+		if err := rows.Scan(&node.ID, &node.Role, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated, &document, &specRevision); err != nil {
+			return nil, err
+		}
+		if len(labels) > 0 {
+			if err := json.Unmarshal(labels, &node.Labels); err != nil {
+				return nil, err
+			}
+		}
+		node.Enabled = enabled != 0
+		var parseErr error
+		node.CreatedAt, parseErr = parseStoredTime("node.created_at", created)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		node.UpdatedAt, parseErr = parseStoredTime("node.updated_at", updated)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if err := node.Validate(); err != nil {
+			return nil, fmt.Errorf("stored gateway node is invalid: %w", err)
+		}
+		view := GatewayView{Node: node}
+		if len(document) > 0 && specRevision.Valid {
+			var spec domain.GatewaySpec
+			if err := json.Unmarshal(document, &spec); err != nil {
+				return nil, err
+			}
+			if spec.NodeID != node.ID {
+				return nil, &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "gateway.node_id", Message: "stored gateway spec node id does not match its row"}
+			}
+			spec.Revision = specRevision.Int64
+			if err := spec.Validate(); err != nil {
+				return nil, fmt.Errorf("stored gateway spec is invalid: %w", err)
+			}
+			view.Spec = &spec
+		}
+		result = append(result, view)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListAgentViews(ctx context.Context) ([]AgentView, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.role,n.name,n.labels_json,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,a.document_json,a.revision FROM nodes n LEFT JOIN agent_specs a ON a.node_id=n.id WHERE n.role=? ORDER BY n.id`, domain.RoleAgent)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]AgentView, 0)
+	for rows.Next() {
+		var node domain.Node
+		var labels, document []byte
+		var enabled int
+		var created, updated string
+		var specRevision sql.NullInt64
+		if err := rows.Scan(&node.ID, &node.Role, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated, &document, &specRevision); err != nil {
+			return nil, err
+		}
+		if len(labels) > 0 {
+			if err := json.Unmarshal(labels, &node.Labels); err != nil {
+				return nil, err
+			}
+		}
+		node.Enabled = enabled != 0
+		var parseErr error
+		node.CreatedAt, parseErr = parseStoredTime("node.created_at", created)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		node.UpdatedAt, parseErr = parseStoredTime("node.updated_at", updated)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if err := node.Validate(); err != nil {
+			return nil, fmt.Errorf("stored agent node is invalid: %w", err)
+		}
+		view := AgentView{Node: node}
+		if len(document) > 0 && specRevision.Valid {
+			var spec domain.AgentSpec
+			if err := json.Unmarshal(document, &spec); err != nil {
+				return nil, err
+			}
+			if spec.NodeID != node.ID {
+				return nil, &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "agent.node_id", Message: "stored agent spec node id does not match its row"}
+			}
+			spec.Revision = specRevision.Int64
+			if err := spec.Validate(); err != nil {
+				return nil, fmt.Errorf("stored agent spec is invalid: %w", err)
+			}
+			view.Spec = &spec
+		}
+		result = append(result, view)
 	}
 	return result, rows.Err()
 }
@@ -868,6 +1029,11 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 	if currentRole != node.Role {
 		return &domain.ApplyError{Code: "immutable_field", Path: "role", Message: "node role cannot be changed"}
 	}
+	affectedNodes, err := assignmentParticipantIDsTx(ctx, tx, node.ID)
+	if err != nil {
+		return err
+	}
+	affectedNodes = append(affectedNodes, node.ID)
 	node.Revision = current + 1
 	_, err = tx.ExecContext(ctx, `UPDATE nodes SET role=?, name=?, labels_json=?, enabled=?, certificate_state=?, certificate_serial=?, revision=?, updated_at=? WHERE id=? AND revision=?`, node.Role, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
 	if err != nil {
@@ -903,7 +1069,7 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": node.ID, "revision": node.Revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
 // quarantineAssignmentsForNodeTx moves every placement that references an
@@ -1022,7 +1188,13 @@ func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions)
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	if err := s.commitAndNotifyResources(tx, id); err != nil {
+		return err
+	}
+	if s.metrics != nil {
+		s.metrics.removeNode(id)
+	}
+	return nil
 }
 
 func (s *Store) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, options WriteOptions) error {
@@ -1194,7 +1366,8 @@ func (s *Store) DeleteService(ctx context.Context, id string, options WriteOptio
 		return nil
 	}
 	var revision int64
-	if err := tx.QueryRowContext(ctx, `SELECT revision FROM services WHERE id=?`, id).Scan(&revision); err != nil {
+	var agentID string
+	if err := tx.QueryRowContext(ctx, `SELECT revision,agent_id FROM services WHERE id=?`, id).Scan(&revision, &agentID); err != nil {
 		return err
 	}
 	if options.IfMatch <= 0 || options.IfMatch != revision {
@@ -1214,7 +1387,7 @@ func (s *Store) DeleteService(ctx context.Context, id string, options WriteOptio
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, agentID)
 }
 
 func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment, options WriteOptions) error {
@@ -1242,22 +1415,6 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	if assignment.Generation > math.MaxInt64 {
 		return &domain.ApplyError{Code: "invalid_generation", Path: "generation", Message: "assignment generation exceeds repository limit"}
 	}
-	if node, err := s.GetNode(ctx, assignment.GatewayID); err != nil || node.Role != domain.RoleGateway {
-		if err != nil {
-			return err
-		}
-		return errors.New("assignment gateway has the wrong role")
-	} else if !node.Enabled {
-		return &domain.ApplyError{Code: "node_disabled", Path: "gateway_id", Message: "assignment gateway is disabled"}
-	}
-	if node, err := s.GetNode(ctx, assignment.AgentID); err != nil || node.Role != domain.RoleAgent {
-		if err != nil {
-			return err
-		}
-		return errors.New("assignment agent has the wrong role")
-	} else if !node.Enabled {
-		return &domain.ApplyError{Code: "node_disabled", Path: "agent_id", Message: "assignment agent is disabled"}
-	}
 	requestAssignment := assignment
 	requestAssignment.Revision = 0
 	requestAssignment.UpdatedAt = time.Time{}
@@ -1277,6 +1434,29 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	}
 	if hit {
 		return nil
+	}
+	// Node identity and lifecycle checks are authoritative only inside the
+	// assignment transaction. A preflight GetNode can race a role/enable
+	// change and allow a placement to commit against a different identity.
+	var gatewayRole, agentRole string
+	var gatewayEnabled, agentEnabled int
+	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM nodes WHERE id=?`, assignment.GatewayID).Scan(&gatewayRole, &gatewayEnabled); err != nil {
+		return err
+	}
+	if gatewayRole != domain.RoleGateway {
+		return errors.New("assignment gateway has the wrong role")
+	}
+	if gatewayEnabled == 0 {
+		return &domain.ApplyError{Code: "node_disabled", Path: "gateway_id", Message: "assignment gateway is disabled"}
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM nodes WHERE id=?`, assignment.AgentID).Scan(&agentRole, &agentEnabled); err != nil {
+		return err
+	}
+	if agentRole != domain.RoleAgent {
+		return errors.New("assignment agent has the wrong role")
+	}
+	if agentEnabled == 0 {
+		return &domain.ApplyError{Code: "node_disabled", Path: "agent_id", Message: "assignment agent is disabled"}
 	}
 	var gatewayLabelsJSON []byte
 	if err := tx.QueryRowContext(ctx, `SELECT labels_json FROM nodes WHERE id=?`, assignment.GatewayID).Scan(&gatewayLabelsJSON); err != nil {
@@ -1494,7 +1674,14 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": assignment.ID, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	affectedNodes := []string{assignment.GatewayID, assignment.AgentID}
+	if hadPrevious {
+		affectedNodes = append(affectedNodes, previous.GatewayID, previous.AgentID)
+	}
+	for _, old := range superseded {
+		affectedNodes = append(affectedNodes, old.GatewayID, old.AgentID)
+	}
+	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
 func serviceAssignedElsewhere(ctx context.Context, tx *sql.Tx, serviceID, assignmentID string) (bool, error) {
@@ -1625,8 +1812,9 @@ func (s *Store) DeleteAssignment(ctx context.Context, id string, options WriteOp
 		return nil
 	}
 	var revision int64
+	var gatewayID, agentID string
 	var document []byte
-	if err := tx.QueryRowContext(ctx, `SELECT revision,document_json FROM assignments WHERE id=?`, id).Scan(&revision, &document); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT revision,gateway_id,agent_id,document_json FROM assignments WHERE id=?`, id).Scan(&revision, &gatewayID, &agentID, &document); err != nil {
 		return err
 	}
 	if options.IfMatch <= 0 || options.IfMatch != revision {
@@ -1650,7 +1838,7 @@ func (s *Store) DeleteAssignment(ctx context.Context, id string, options WriteOp
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, gatewayID, agentID)
 }
 
 // UpdateAssignmentState changes only the lifecycle state of an assignment.
@@ -1697,7 +1885,7 @@ func (s *Store) UpdateAssignmentState(ctx context.Context, id, state string, opt
 		if err := json.Unmarshal(document, &assignment); err != nil {
 			return domain.Assignment{}, err
 		}
-		return assignment, s.commitAndNotify(tx)
+		return assignment, s.commitAndNotifyResources(tx, assignment.GatewayID, assignment.AgentID)
 	}
 	var revision int64
 	var document []byte
@@ -1738,7 +1926,7 @@ func (s *Store) UpdateAssignmentState(ctx context.Context, id, state string, opt
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": assignment.Revision, "state": state}); err != nil {
 		return domain.Assignment{}, err
 	}
-	return assignment, s.commitAndNotify(tx)
+	return assignment, s.commitAndNotifyResources(tx, assignment.GatewayID, assignment.AgentID)
 }
 
 // applyNodeResult records the lifecycle consequence of a node applying its
@@ -1860,7 +2048,11 @@ func (s *Store) applyNodeResultWithError(ctx context.Context, nodeID string, gen
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.commitAndNotify(tx); err != nil {
+	changedNodes := make([]string, 0, len(changed)*2)
+	for _, assignment := range changed {
+		changedNodes = append(changedNodes, assignment.GatewayID, assignment.AgentID)
+	}
+	if err := s.commitAndNotifyResources(tx, changedNodes...); err != nil {
 		return nil, err
 	}
 	return changed, nil
@@ -2004,7 +2196,7 @@ func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, record.NodeID, record.Generation, record.Checksum, record.Document, record.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotify(tx, record.NodeID)
 }
 
 func (s *Store) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
@@ -2137,7 +2329,7 @@ func (s *Store) SaveObserved(ctx context.Context, record ObservedRecord) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO observed_states(node_id,generation,document_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,document_json=excluded.document_json,updated_at=excluded.updated_at`, record.NodeID, record.Generation, record.Document, record.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndNotifyResourceOnly(tx, record.NodeID)
 }
 
 func (s *Store) LoadObserved(ctx context.Context, nodeID string) (ObservedRecord, error) {
@@ -2240,6 +2432,14 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	if hit {
 		return nil
 	}
+	affectedNodes := []string{nodeID}
+	if table == "gateway_specs" {
+		participants, err := assignmentParticipantIDsTx(ctx, tx, nodeID)
+		if err != nil {
+			return err
+		}
+		affectedNodes = append(affectedNodes, participants...)
+	}
 	if table == "gateway_specs" {
 		gateway, ok := value.(domain.GatewaySpec)
 		if !ok {
@@ -2315,7 +2515,7 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
 // updateAssignmentEndpointsTx keeps the derived assignment dial target
@@ -2496,7 +2696,7 @@ func (s *Store) deleteDocument(ctx context.Context, table, nodeID string, option
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, nodeID)
 }
 
 func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, options WriteOptions) error {
@@ -2521,6 +2721,12 @@ func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, 
 	if hit {
 		return nil
 	}
+	affectedNodes := []string{service.AgentID}
+	participants, err := assignmentParticipantIDsForServiceTx(ctx, tx, service.ID)
+	if err != nil {
+		return err
+	}
+	affectedNodes = append(affectedNodes, participants...)
 	var revision int64
 	var previousDocument []byte
 	var previous domain.Service
@@ -2546,6 +2752,10 @@ func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, 
 		if decodeErr := json.Unmarshal(previousDocument, &previous); decodeErr != nil {
 			return fmt.Errorf("decode existing service: %w", decodeErr)
 		}
+		// An unassigned service may move between Agents. The old Agent's
+		// node-scoped snapshot must be invalidated too, otherwise targeted
+		// notifications leave the old node serving a stale service document.
+		affectedNodes = append(affectedNodes, previous.AgentID)
 		if previous.AgentID != service.AgentID || previous.Protocol != service.Protocol || previous.PublicBind != service.PublicBind || previous.PublicPort != service.PublicPort {
 			assigned, assignmentErr := serviceHasAssignment(ctx, tx, service.ID)
 			if assignmentErr != nil {
@@ -2604,7 +2814,41 @@ func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, 
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": service.ID, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotify(tx)
+	return s.commitAndNotifyResources(tx, affectedNodes...)
+}
+
+func assignmentParticipantIDsTx(ctx context.Context, tx *sql.Tx, nodeID string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT gateway_id,agent_id FROM assignments WHERE gateway_id=? OR agent_id=?`, nodeID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0)
+	for rows.Next() {
+		var gatewayID, agentID string
+		if err := rows.Scan(&gatewayID, &agentID); err != nil {
+			return nil, err
+		}
+		result = append(result, gatewayID, agentID)
+	}
+	return result, rows.Err()
+}
+
+func assignmentParticipantIDsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT assignments.gateway_id,assignments.agent_id FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=?`, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0)
+	for rows.Next() {
+		var gatewayID, agentID string
+		if err := rows.Scan(&gatewayID, &agentID); err != nil {
+			return nil, err
+		}
+		result = append(result, gatewayID, agentID)
+	}
+	return result, rows.Err()
 }
 
 // bumpAssignmentsForServiceTx invalidates the shared placement generation for

@@ -21,6 +21,18 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
+For an existing schema v3 or v4 database, stop the Controller and run the
+explicit v5 migration during a maintenance window. Validate first; the publish
+step retains the original file as a rollback backup:
+
+```sh
+asterferry controller migrate --config /var/lib/asterferry/controller.json --dry-run
+asterferry controller migrate --config /var/lib/asterferry/controller.json
+```
+
+`OpenStore` does not perform implicit schema rewrites. Do not start the
+Controller until the migration command has completed successfully.
+
 `deploy/asterferry-controller.service` is a single-replica systemd unit; the
 Controller is not advertised as highly available. Nodes retain their encrypted
 last-known-good snapshot while it is unavailable.
@@ -74,6 +86,10 @@ rotation never mutates the Kubernetes Secret.
 Each Gateway must have its own reachable public endpoint. Shared VIP takeover,
 transparent connection migration and Controller HA are outside the first
 release.
+
+AFDP/1 to AFDP/2 is a deliberate hard wire break: QUIC ALPN and the protocol
+version byte both changed, and there is no fallback. Roll out Gateway and
+Agent binaries in coordination with the Controller-side release.
 
 ## Operations and verification
 

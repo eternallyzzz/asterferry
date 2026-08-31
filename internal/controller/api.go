@@ -507,16 +507,16 @@ func (s *Server) gateways(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		nodes, err := s.store.ListNodes(r.Context(), domain.RoleGateway)
+		views, err := s.store.ListGatewayViews(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		items := make([]map[string]any, 0, len(nodes))
-		for _, node := range nodes {
-			item := map[string]any{"node": node}
-			if spec, specErr := s.store.GetGatewaySpec(r.Context(), node.ID); specErr == nil {
-				item["spec"] = spec
+		items := make([]map[string]any, 0, len(views))
+		for _, view := range views {
+			item := map[string]any{"node": view.Node}
+			if view.Spec != nil {
+				item["spec"] = view.Spec
 			}
 			items = append(items, item)
 		}
@@ -690,16 +690,16 @@ func (s *Server) agents(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		nodes, err := s.store.ListNodes(r.Context(), domain.RoleAgent)
+		views, err := s.store.ListAgentViews(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		items := make([]map[string]any, 0, len(nodes))
-		for _, node := range nodes {
-			item := map[string]any{"node": node}
-			if spec, specErr := s.store.GetAgentSpec(r.Context(), node.ID); specErr == nil {
-				item["spec"] = spec
+		items := make([]map[string]any, 0, len(views))
+		for _, view := range views {
+			item := map[string]any{"node": view.Node}
+			if view.Spec != nil {
+				item["spec"] = view.Spec
 			}
 			items = append(items, item)
 		}
@@ -1555,6 +1555,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 					return User{}, false
 				}
 				if !fresh.Enabled {
+					s.sessions.Delete(cookie.Value)
+					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
+					return User{}, false
+				}
+				if !fresh.PasswordChangedAt.Equal(sess.User.PasswordChangedAt) {
+					// Password changes invalidate every in-memory session even when
+					// the session itself has not expired.
 					s.sessions.Delete(cookie.Value)
 					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
 					return User{}, false

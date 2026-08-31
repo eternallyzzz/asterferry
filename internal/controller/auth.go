@@ -21,13 +21,14 @@ const (
 )
 
 type User struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Role      string    `json:"role"`
-	Enabled   bool      `json:"enabled"`
-	Revision  int64     `json:"revision"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	Username          string    `json:"username"`
+	Role              string    `json:"role"`
+	Enabled           bool      `json:"enabled"`
+	Revision          int64     `json:"revision"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	PasswordChangedAt time.Time `json:"-"`
 }
 
 type APIToken struct {
@@ -91,7 +92,7 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 	if hit {
 		return getUserTx(ctx, tx, "username", username)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO users(id,username,password_hash,role,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, id, username, hash, role, 1, 1, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO users(id,username,password_hash,password_changed_at,role,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, id, username, hash, now.Format(time.RFC3339Nano), role, 1, 1, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return User{}, fmt.Errorf("create user: %w", err)
 	}
@@ -104,7 +105,7 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
-	return User{ID: id, Username: username, Role: role, Enabled: true, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
+	return User{ID: id, Username: username, Role: role, Enabled: true, Revision: 1, CreatedAt: now, UpdatedAt: now, PasswordChangedAt: now}, nil
 }
 
 // dummyPasswordHash is a fixed, valid Argon2id value used for failed logins
@@ -114,9 +115,9 @@ const dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$YXN0ZXJmZXJyeS1kdW1teS
 
 func (s *Store) Authenticate(ctx context.Context, username, password string) (User, error) {
 	var user User
-	var hash, created, updated string
+	var hash, created, updated, passwordChanged string
 	var enabled int
-	err := s.db.QueryRowContext(ctx, `SELECT id,username,password_hash,role,enabled,revision,created_at,updated_at FROM users WHERE username=?`, strings.TrimSpace(username)).Scan(&user.ID, &user.Username, &hash, &user.Role, &enabled, &user.Revision, &created, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT id,username,password_hash,password_changed_at,role,enabled,revision,created_at,updated_at FROM users WHERE username=?`, strings.TrimSpace(username)).Scan(&user.ID, &user.Username, &hash, &passwordChanged, &user.Role, &enabled, &user.Revision, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = VerifyPassword(dummyPasswordHash, password)
 		return User{}, ErrInvalidCredentials
@@ -140,6 +141,10 @@ func (s *Store) Authenticate(ctx context.Context, username, password string) (Us
 	if parseErr != nil {
 		return User{}, parseErr
 	}
+	user.PasswordChangedAt, parseErr = parseStoredTime("user.password_changed_at", passwordChanged)
+	if parseErr != nil {
+		return User{}, parseErr
+	}
 	return user, nil
 }
 
@@ -153,12 +158,24 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 	}
 	defer tx.Rollback()
 	var user User
-	var hash, created, updated string
+	var hash, created, updated, passwordChanged string
 	var enabled int
-	if err := tx.QueryRowContext(ctx, `SELECT id,username,password_hash,role,enabled,revision,created_at,updated_at FROM users WHERE id=?`, id).Scan(&user.ID, &user.Username, &hash, &user.Role, &enabled, &user.Revision, &created, &updated); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,username,password_hash,password_changed_at,role,enabled,revision,created_at,updated_at FROM users WHERE id=?`, id).Scan(&user.ID, &user.Username, &hash, &passwordChanged, &user.Role, &enabled, &user.Revision, &created, &updated); err != nil {
 		return User{}, err
 	}
 	user.Enabled = enabled != 0
+	user.CreatedAt, err = parseStoredTime("user.created_at", created)
+	if err != nil {
+		return User{}, err
+	}
+	user.UpdatedAt, err = parseStoredTime("user.updated_at", updated)
+	if err != nil {
+		return User{}, err
+	}
+	user.PasswordChangedAt, err = parseStoredTime("user.password_changed_at", passwordChanged)
+	if err != nil {
+		return User{}, err
+	}
 	if update.Username != nil {
 		name := strings.TrimSpace(*update.Username)
 		if err := validateUsername(name); err != nil {
@@ -193,12 +210,6 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 		}
 		user.Enabled = *update.Enabled
 	}
-	if update.Password != nil {
-		hash, err = HashPassword(*update.Password)
-		if err != nil {
-			return User{}, err
-		}
-	}
 	request := map[string]any{"id": id, "username": update.Username, "password_changed": update.Password != nil, "role": update.Role, "enabled": update.Enabled, "if_match": options.IfMatch}
 	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
 	if err != nil {
@@ -211,9 +222,21 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 		return User{}, &RevisionConflictError{Resource: "user", Expected: options.IfMatch, Actual: user.Revision}
 	}
 	now := time.Now().UTC()
+	if update.Password != nil {
+		hash, err = HashPassword(*update.Password)
+		if err != nil {
+			return User{}, err
+		}
+		user.PasswordChangedAt = now
+	}
 	newRevision := user.Revision + 1
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET username=?,password_hash=?,role=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, user.Username, hash, user.Role, boolInt(user.Enabled), newRevision, now.Format(time.RFC3339Nano), id, user.Revision); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET username=?,password_hash=?,password_changed_at=?,role=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, user.Username, hash, user.PasswordChangedAt.Format(time.RFC3339Nano), user.Role, boolInt(user.Enabled), newRevision, now.Format(time.RFC3339Nano), id, user.Revision); err != nil {
 		return User{}, err
+	}
+	if update.Password != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, now.Format(time.RFC3339Nano), id); err != nil {
+			return User{}, err
+		}
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "update", "user", id, newRevision, map[string]string{"username": user.Username, "role": user.Role}); err != nil {
 		return User{}, err
@@ -222,10 +245,6 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 		return User{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return User{}, err
-	}
-	user.CreatedAt, err = parseStoredTime("user.created_at", created)
-	if err != nil {
 		return User{}, err
 	}
 	user.Revision = newRevision
@@ -439,7 +458,8 @@ func (s *Store) AuthenticateToken(ctx context.Context, token string) (User, erro
 	var revision int64
 	var created, updated string
 	var expires sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.username,u.role,u.enabled,u.revision,u.created_at,u.updated_at,t.expires_at FROM api_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.revoked_at IS NULL`, digest).Scan(&user.ID, &user.Username, &user.Role, &enabled, &revision, &created, &updated, &expires)
+	var passwordChanged string
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.username,u.role,u.enabled,u.revision,u.created_at,u.updated_at,u.password_changed_at,t.expires_at FROM api_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.revoked_at IS NULL`, digest).Scan(&user.ID, &user.Username, &user.Role, &enabled, &revision, &created, &updated, &passwordChanged, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrInvalidAPIToken
 	}
@@ -466,6 +486,10 @@ func (s *Store) AuthenticateToken(ctx context.Context, token string) (User, erro
 		return User{}, parseErr
 	}
 	user.UpdatedAt, parseErr = parseStoredTime("user.updated_at", updated)
+	if parseErr != nil {
+		return User{}, parseErr
+	}
+	user.PasswordChangedAt, parseErr = parseStoredTime("user.password_changed_at", passwordChanged)
 	if parseErr != nil {
 		return User{}, parseErr
 	}
