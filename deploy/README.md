@@ -5,6 +5,10 @@ Agent data-plane nodes. The Controller owns SQLite state, PKI, scheduling, RBAC
 and audit. Nodes receive typed snapshots and never expose a management HTTP API
 or read business YAML.
 
+For a copy-and-run three-server walkthrough in both languages, see the
+[English end-to-end quick start](../docs/quickstart.en.md) and the
+[中文端到端快速开始](../docs/quickstart.zh-CN.md).
+
 ## Controller
 
 ```sh

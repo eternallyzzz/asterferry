@@ -20,6 +20,12 @@ Supervisor, management API, or v6 codec compatibility layer.
 
 ## Quick start
 
+For a complete three-server deployment (Controller, Gateway and Agent), use
+the copy-and-run guides:
+
+- [End-to-end quick start in English](docs/quickstart.en.md)
+- [中文端到端快速开始](docs/quickstart.zh-CN.md)
+
 Initialize the Controller. The generated Admin password is printed once when
 no password is supplied:
 

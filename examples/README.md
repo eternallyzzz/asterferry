@@ -1,5 +1,9 @@
 # Controller API examples
 
+For a complete Controller + public Gateway + private Agent deployment, see
+the [English end-to-end quick start](../docs/quickstart.en.md) or the
+[中文端到端快速开始](../docs/quickstart.zh-CN.md).
+
 Business configuration is owned by the Controller and is not represented by
 repository YAML files. Use the Dashboard or the `/api/v1` API to create nodes,
 Gateway/Agent specs, services and assignments.
