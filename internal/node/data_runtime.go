@@ -24,6 +24,7 @@ import (
 	"asterferry/internal/afdp"
 	"asterferry/internal/dataplane"
 	"asterferry/internal/domain"
+	"asterferry/internal/duplex"
 	"github.com/quic-go/quic-go"
 )
 
@@ -1327,24 +1328,7 @@ func dataBindingKey(assignmentID string, binding domain.Binding) string {
 }
 
 func copyDataDuplexLimited(left io.ReadWriteCloser, right io.ReadWriteCloser, maxBuffer int) {
-	bufferSize := 32 << 10
-	if maxBuffer > 0 {
-		bufferSize = maxBuffer / 2
-		if bufferSize < 1 {
-			bufferSize = 1
-		}
-		if bufferSize > 32<<10 {
-			bufferSize = 32 << 10
-		}
-	}
-	leftBuffer := make([]byte, bufferSize)
-	rightBuffer := make([]byte, bufferSize)
-	var once sync.Once
-	closeBoth := func() { once.Do(func() { _ = left.Close(); _ = right.Close() }) }
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.CopyBuffer(left, right, leftBuffer); closeBoth(); done <- struct{}{} }()
-	go func() { _, _ = io.CopyBuffer(right, left, rightBuffer); closeBoth(); done <- struct{}{} }()
-	<-done
+	_ = duplex.CopyDuplex(left, right, maxBuffer)
 }
 
 type afdpStreamConn struct {
@@ -1362,6 +1346,18 @@ type egressConn struct {
 	net.Conn
 	release func()
 	once    sync.Once
+}
+
+// CloseWrite preserves TCP FIN semantics through the wrapper that owns the
+// egress reservation. The reservation remains active until full Close.
+func (c *egressConn) CloseWrite() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	if halfCloser, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return halfCloser.CloseWrite()
+	}
+	return duplex.ErrHalfCloseUnsupported
 }
 
 func (c *egressConn) Close() error {
@@ -1383,14 +1379,48 @@ func (c *afdpStreamConn) SetDeadline(t time.Time) error      { return c.stream.S
 func (c *afdpStreamConn) SetReadDeadline(t time.Time) error  { return c.stream.SetReadDeadline(t) }
 func (c *afdpStreamConn) SetWriteDeadline(t time.Time) error { return c.stream.SetWriteDeadline(t) }
 func (c *afdpStreamConn) Close() error {
+	if c == nil || c.stream == nil {
+		return net.ErrClosed
+	}
 	var err error
 	c.once.Do(func() {
+		// Close the receive half as well. The normal duplex path has already
+		// observed EOF before this final close; on an abort this unblocks a
+		// pending read without changing idempotent lease release.
+		c.stream.CancelRead(quic.StreamErrorCode(0))
 		err = c.stream.Close()
 		if c.release != nil {
 			c.release()
 		}
 	})
 	return err
+}
+
+// CloseWrite propagates a normal EOF without releasing the stream reservation
+// or aborting the receive half. quic.Stream.Close is explicitly a send-side
+// close, so expose that meaning through the net.Conn wrapper used by proxies.
+func (c *afdpStreamConn) CloseWrite() error {
+	if c == nil || c.stream == nil {
+		return net.ErrClosed
+	}
+	return c.stream.Close()
+}
+
+// Abort terminates both QUIC stream halves after a copy error. It is separate
+// from CloseWrite so a failed direction cannot turn into a graceful FIN and
+// leave the opposite copy goroutine blocked forever.
+func (c *afdpStreamConn) Abort() error {
+	if c == nil || c.stream == nil {
+		return net.ErrClosed
+	}
+	c.once.Do(func() {
+		c.stream.CancelRead(quic.StreamErrorCode(0))
+		c.stream.CancelWrite(quic.StreamErrorCode(0))
+		if c.release != nil {
+			c.release()
+		}
+	})
+	return nil
 }
 
 type dataPlaneAddr string

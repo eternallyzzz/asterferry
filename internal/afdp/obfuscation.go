@@ -224,11 +224,7 @@ func (c *obfuscationPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		}
 		return len(p), nil
 	}
-	wire, err := c.encodeData(p)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := c.conn.WriteTo(wire, addr); err != nil {
+	if err := c.writeData(p, addr); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -278,6 +274,15 @@ func (c *obfuscationPacketConn) encodeData(payload []byte) ([]byte, error) {
 	return wire, nil
 }
 
+func (c *obfuscationPacketConn) writeData(payload []byte, addr net.Addr) error {
+	wire, err := c.encodeData(payload)
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.WriteTo(wire, addr)
+	return err
+}
+
 func (c *obfuscationPacketConn) writeFragments(packet []byte, addr net.Addr) error {
 	maxWire := int(c.opts.MaxFragmentBytes)
 	if maxWire <= fragmentHeaderBytes+obfuscationSaltBytes+obfuscationTagBytes {
@@ -289,8 +294,10 @@ func (c *obfuscationPacketConn) writeFragments(packet []byte, addr net.Addr) err
 	}
 	total := (len(packet) + chunkSize - 1) / chunkSize
 	if total < 2 {
-		total = 2
-		chunkSize = (len(packet) + total - 1) / total
+		// The fragment wire format requires at least two fragments. A packet
+		// that fits in one fragment therefore stays a normal authenticated data
+		// datagram instead of advertising a second fragment that is never sent.
+		return c.writeData(packet, addr)
 	}
 	if total > maxFragmentCount {
 		return errors.New("QUIC datagram requires too many camouflage fragments")

@@ -70,19 +70,14 @@ func ServeUDPReverse(ctx context.Context, engine *Engine, session *afdp.Session,
 				}
 				return
 			}
-			flowsMu.Lock()
-			flow := findReverseFlow(flows, header.FlowID)
-			flowsMu.Unlock()
-			if flow != nil {
-				if _, writeErr := socket.WriteToUDP(payload, flow.addr); writeErr != nil {
-					if ctx.Err() == nil {
-						select {
-						case recvErr <- fmt.Errorf("write UDP reverse payload: %w", writeErr):
-						default:
-						}
+			if writeErr := writeReverseFlowPacket(socket, &flowsMu, flows, header.FlowID, payload); writeErr != nil {
+				if ctx.Err() == nil {
+					select {
+					case recvErr <- fmt.Errorf("write UDP reverse payload: %w", writeErr):
+					default:
 					}
-					return
 				}
+				return
 			}
 		}
 	}()
@@ -368,6 +363,21 @@ func findReverseFlow(flows map[string]*udpReverseFlow, id uint64) *udpReverseFlo
 		}
 	}
 	return nil
+}
+
+// writeReverseFlowPacket keeps the flow address protected by flowsMu through
+// the UDP write. Expiration and shutdown can remove a flow concurrently, so
+// copying the flow pointer and unlocking before WriteToUDP would allow a
+// packet to be sent using stale flow state.
+func writeReverseFlowPacket(socket *net.UDPConn, flowsMu *sync.Mutex, flows map[string]*udpReverseFlow, flowID uint64, payload []byte) error {
+	flowsMu.Lock()
+	defer flowsMu.Unlock()
+	flow := findReverseFlow(flows, flowID)
+	if flow == nil || flow.addr == nil {
+		return nil
+	}
+	_, err := socket.WriteToUDP(payload, flow.addr)
+	return err
 }
 
 func expireUDPReverseFlows(flows map[string]*udpReverseFlow, now time.Time, timeout time.Duration, session *afdp.Session, engine *Engine) {

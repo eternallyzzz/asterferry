@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"asterferry/internal/domain"
+	"asterferry/internal/duplex"
 )
 
 const (
@@ -406,20 +407,5 @@ func writeSOCKS5Reply(conn net.Conn, code byte) error {
 }
 
 func copyProxyDuplexReaderLimited(client net.Conn, clientReader io.Reader, upstream net.Conn, maxBuffer int) error {
-	bufferSize := 32 << 10
-	if maxBuffer > 0 {
-		bufferSize = maxBuffer / 2
-		if bufferSize < 1 {
-			bufferSize = 1
-		}
-		if bufferSize > 32<<10 {
-			bufferSize = 32 << 10
-		}
-	}
-	clientBuffer := make([]byte, bufferSize)
-	upstreamBuffer := make([]byte, bufferSize)
-	result := make(chan error, 2)
-	go func() { _, err := io.CopyBuffer(client, upstream, clientBuffer); result <- err }()
-	go func() { _, err := io.CopyBuffer(upstream, clientReader, upstreamBuffer); result <- err }()
-	return <-result
+	return duplex.CopyDuplexWithReader(client, clientReader, upstream, maxBuffer)
 }

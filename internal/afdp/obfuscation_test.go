@@ -45,6 +45,23 @@ func TestObfuscatingPacketConnRoundTripAndTamperRejection(t *testing.T) {
 		t.Fatalf("reassembled payload mismatch: got %d bytes", n)
 	}
 
+	// A handshake-shaped packet that fits in one fragment must use the normal
+	// authenticated data frame; advertising two fragments for it would leave
+	// the receiver waiting forever for a fragment that is never sent.
+	small := []byte{0x80}
+	if _, err := l.WriteTo(small, right.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got = make([]byte, len(small)+1)
+	n, _, err = r.ReadFrom(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got[:n], small) {
+		t.Fatalf("single-fragment payload mismatch: got %d bytes", n)
+	}
+
 	// A packet with a modified authenticated tail must be discarded rather
 	// than returned to quic-go. Use the underlying socket to inject a validly
 	// shaped but unauthenticated datagram.

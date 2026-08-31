@@ -9,10 +9,10 @@ import (
 	"errors"
 	"io"
 	"net"
-	"sync"
 
 	"asterferry/internal/afdp"
 	"asterferry/internal/domain"
+	"asterferry/internal/duplex"
 	"github.com/quic-go/quic-go"
 )
 
@@ -123,26 +123,10 @@ func ServeTCPAgent(ctx context.Context, engine *Engine, session *afdp.Session, d
 }
 
 // copyDuplexLimited keeps the two directional buffers within the node's
-// declared MaxBufferBytes budget. The default remains two 32 KiB buffers;
-// small configured budgets are honored by shrinking each side to half the
-// total instead of silently falling back to io.Copy's allocation.
+// declared MaxBufferBytes budget and preserves TCP/QUIC half-close semantics.
+// The default remains two 32 KiB buffers; small configured budgets are honored
+// by shrinking each side to half the total instead of silently falling back to
+// io.Copy's allocation.
 func copyDuplexLimited(left, right io.ReadWriteCloser, maxBuffer int) {
-	bufferSize := 32 << 10
-	if maxBuffer > 0 {
-		bufferSize = maxBuffer / 2
-		if bufferSize < 1 {
-			bufferSize = 1
-		}
-		if bufferSize > 32<<10 {
-			bufferSize = 32 << 10
-		}
-	}
-	leftBuffer := make([]byte, bufferSize)
-	rightBuffer := make([]byte, bufferSize)
-	var once sync.Once
-	closeBoth := func() { once.Do(func() { _ = left.Close(); _ = right.Close() }) }
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.CopyBuffer(left, right, leftBuffer); closeBoth(); done <- struct{}{} }()
-	go func() { _, _ = io.CopyBuffer(right, left, rightBuffer); closeBoth(); done <- struct{}{} }()
-	<-done
+	_ = duplex.CopyDuplex(left, right, maxBuffer)
 }
