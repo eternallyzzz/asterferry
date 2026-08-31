@@ -5,9 +5,6 @@
 package domain
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -393,92 +390,6 @@ type DesiredSnapshot struct {
 	Assignments   []Assignment `json:"assignments,omitempty"`
 }
 
-// SnapshotIntent is the immutable, data-plane-facing part of a desired
-// snapshot.  Controller revisions and timestamps intentionally do not exist
-// in this type; they belong to the repository records returned by the API.
-// Keeping an explicit projection makes checksum construction inclusion-based
-// instead of relying on a fragile list of metadata fields to clear.
-type SnapshotIntent struct {
-	SchemaVersion uint32             `json:"schema_version"`
-	NodeID        string             `json:"node_id"`
-	Generation    uint64             `json:"generation"`
-	Gateway       *GatewayIntent     `json:"gateway,omitempty"`
-	Agent         *AgentIntent       `json:"agent,omitempty"`
-	Services      []ServiceIntent    `json:"services,omitempty"`
-	Assignments   []AssignmentIntent `json:"assignments,omitempty"`
-}
-
-type GatewayIntent struct {
-	NodeID          string            `json:"node_id"`
-	PublicEndpoints []string          `json:"public_endpoints"`
-	Listeners       []Listener        `json:"listeners,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Capacity        Capacity          `json:"capacity"`
-	PortPool        PortPool          `json:"port_pool"`
-	Transport       TransportPolicy   `json:"transport"`
-	Obfuscation     ObfuscationPolicy `json:"obfuscation"`
-	Egress          EgressPolicy      `json:"egress"`
-}
-
-type AgentIntent struct {
-	NodeID          string        `json:"node_id"`
-	GatewaySelector Selector      `json:"gateway_selector"`
-	Proxies         []ProxySpec   `json:"proxies,omitempty"`
-	Routes          []RouteRule   `json:"routes,omitempty"`
-	Limits          AgentLimits   `json:"limits"`
-	Egress          EgressPolicy  `json:"egress"`
-	Logging         LoggingPolicy `json:"logging"`
-}
-
-type ServiceIntent struct {
-	ID              string   `json:"id"`
-	AgentID         string   `json:"agent_id"`
-	Protocol        string   `json:"protocol"`
-	LocalTarget     string   `json:"local_target"`
-	PublicBind      string   `json:"public_bind"`
-	PublicPort      uint16   `json:"public_port"`
-	GatewaySelector Selector `json:"gateway_selector"`
-	Enabled         bool     `json:"enabled"`
-}
-
-type AssignmentIntent struct {
-	ID             string            `json:"id"`
-	GatewayID      string            `json:"gateway_id"`
-	AgentID        string            `json:"agent_id"`
-	ServiceIDs     []string          `json:"service_ids"`
-	Bindings       []Binding         `json:"bindings,omitempty"`
-	Generation     uint64            `json:"generation"`
-	State          string            `json:"state"`
-	PublicEndpoint string            `json:"public_endpoint,omitempty"`
-	Obfuscation    ObfuscationPolicy `json:"obfuscation,omitempty"`
-}
-
-// Intent projects repository records into a canonical checksum document.
-func (s DesiredSnapshot) Intent() SnapshotIntent {
-	canonical := s.Normalize()
-	intent := SnapshotIntent{SchemaVersion: canonical.SchemaVersion, NodeID: canonical.NodeID, Generation: canonical.Generation}
-	if canonical.Gateway != nil {
-		g := canonical.Gateway
-		intent.Gateway = &GatewayIntent{NodeID: g.NodeID, PublicEndpoints: append([]string(nil), g.PublicEndpoints...), Listeners: append([]Listener(nil), g.Listeners...), Labels: cloneLabels(g.Labels), Capacity: g.Capacity, PortPool: PortPool{TCP: append([]PortRange(nil), g.PortPool.TCP...), UDP: append([]PortRange(nil), g.PortPool.UDP...)}, Transport: g.Transport, Obfuscation: obfuscationIntent(g.Obfuscation), Egress: cloneEgress(g.Egress)}
-	}
-	if canonical.Agent != nil {
-		a := canonical.Agent
-		intent.Agent = &AgentIntent{NodeID: a.NodeID, GatewaySelector: Selector{MatchLabels: cloneLabels(a.GatewaySelector.MatchLabels)}, Proxies: append([]ProxySpec(nil), a.Proxies...), Routes: append([]RouteRule(nil), a.Routes...), Limits: a.Limits, Egress: cloneEgress(a.Egress), Logging: a.Logging}
-		for i := range intent.Agent.Routes {
-			intent.Agent.Routes[i].CIDRs = append([]string(nil), intent.Agent.Routes[i].CIDRs...)
-			intent.Agent.Routes[i].Domains = append([]string(nil), intent.Agent.Routes[i].Domains...)
-			intent.Agent.Routes[i].GeoIP = append([]string(nil), intent.Agent.Routes[i].GeoIP...)
-		}
-	}
-	for _, service := range canonical.Services {
-		intent.Services = append(intent.Services, ServiceIntent{ID: service.ID, AgentID: service.AgentID, Protocol: service.Protocol, LocalTarget: service.LocalTarget, PublicBind: service.PublicBind, PublicPort: service.PublicPort, GatewaySelector: Selector{MatchLabels: cloneLabels(service.GatewaySelector.MatchLabels)}, Enabled: service.Enabled})
-	}
-	for _, assignment := range canonical.Assignments {
-		intent.Assignments = append(intent.Assignments, AssignmentIntent{ID: assignment.ID, GatewayID: assignment.GatewayID, AgentID: assignment.AgentID, ServiceIDs: append([]string(nil), assignment.ServiceIDs...), Bindings: append([]Binding(nil), assignment.Bindings...), Generation: assignment.Generation, State: assignment.State, PublicEndpoint: assignment.PublicEndpoint, Obfuscation: obfuscationIntent(assignment.Obfuscation)})
-	}
-	return intent
-}
-
 func cloneLabels(value map[string]string) map[string]string {
 	if value == nil {
 		return nil
@@ -496,27 +407,6 @@ func cloneEgress(value EgressPolicy) EgressPolicy {
 	value.AllowCIDRs = append([]string(nil), value.AllowCIDRs...)
 	value.AllowSpecialCIDRs = append([]string(nil), value.AllowSpecialCIDRs...)
 	return value
-}
-
-func obfuscationIntent(value ObfuscationPolicy) ObfuscationPolicy {
-	result := ObfuscationPolicy{Mode: value.Mode, KeyID: value.KeyID, PreviousKeyID: value.PreviousKeyID, MaxPaddingBytes: value.MaxPaddingBytes, HandshakeShaping: value.HandshakeShaping}
-	if result.KeyID == "" && (len(value.Key) > 0 || len(value.KeyCiphertext) > 0) {
-		source := value.Key
-		if len(source) == 0 {
-			source = value.KeyCiphertext
-		}
-		digest := sha256.Sum256(source)
-		result.KeyID = hex.EncodeToString(digest[:])
-	}
-	if result.PreviousKeyID == "" && (len(value.PreviousKey) > 0 || len(value.PreviousKeyCiphertext) > 0) {
-		source := value.PreviousKey
-		if len(source) == 0 {
-			source = value.PreviousKeyCiphertext
-		}
-		digest := sha256.Sum256(source)
-		result.PreviousKeyID = hex.EncodeToString(digest[:])
-	}
-	return result
 }
 
 type SessionSummary struct {
@@ -1180,18 +1070,6 @@ func ValidateID(value, path string) error {
 		return &ApplyError{Code: "invalid_id", Path: path, Message: "id must not end with punctuation"}
 	}
 	return nil
-}
-
-// ComputeChecksum hashes only the canonical SnapshotIntent. Repository
-// revisions/timestamps are therefore structurally unable to affect a desired
-// generation checksum.
-func (s DesiredSnapshot) ComputeChecksum() (string, error) {
-	b, err := json.Marshal(s.Intent())
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(b)
-	return hex.EncodeToString(digest[:]), nil
 }
 
 func (s DesiredSnapshot) WithChecksum() (DesiredSnapshot, error) {
