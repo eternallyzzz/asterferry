@@ -93,40 +93,62 @@ function defaultSpec(node: ControllerNode): SpecDocument {
   };
 }
 
-async function loadSpec() {
-  if (!props.node) return;
+let specRequestVersion = 0;
+
+function resetDetailState() {
+  section.value = "info";
+  visited.value = new Set(["info"]);
+  specDoc.value = undefined;
+  specText.value = "";
+  specRevision.value = undefined;
+  specValid.value = true;
+  specError.value = "";
+}
+
+async function loadSpec(node: ControllerNode) {
+  const requestVersion = ++specRequestVersion;
   specLoading.value = true;
   specError.value = "";
   try {
-    const result = props.node.role === "gateway" ? await getGateway(props.node.id) : await getAgent(props.node.id);
+    const result = node.role === "gateway" ? await getGateway(node.id) : await getAgent(node.id);
+    if (requestVersion !== specRequestVersion || props.node?.id !== node.id) return;
     const doc = result && typeof result === "object" ? (result as SpecDocument) : undefined;
     specDoc.value = doc;
     specRevision.value = typeof doc?.revision === "number" ? doc.revision : undefined;
-    specText.value = prettyJson(doc ?? defaultSpec(props.node));
+    specText.value = prettyJson(doc ?? defaultSpec(node));
   } catch (caught) {
+    if (requestVersion !== specRequestVersion || props.node?.id !== node.id) return;
     if (caught instanceof ControllerAPIError && caught.status === 404) {
       specDoc.value = undefined;
       specRevision.value = undefined;
-      specText.value = prettyJson(defaultSpec(props.node));
+      specText.value = prettyJson(defaultSpec(node));
     } else {
       specError.value = describeError(caught);
     }
   } finally {
-    specLoading.value = false;
+    if (requestVersion === specRequestVersion) specLoading.value = false;
   }
 }
 
 watch(
-  () => [props.open, props.node?.id],
-  ([open]) => {
-    if (open && props.node) {
-      section.value = "info";
-      visited.value = new Set(["info"]);
-      void loadSpec();
-    }
+  () => [props.open, props.node?.id, props.node?.role] as const,
+  ([open, nodeId, nodeRole], previous) => {
+    if (!open || !nodeId || !nodeRole || !props.node) return;
+    const [wasOpen, previousNodeId, previousNodeRole] = previous ?? [];
+    const opening = wasOpen !== true;
+    const changingNode = nodeId !== previousNodeId || nodeRole !== previousNodeRole;
+    if (!opening && !changingNode) return;
+
+    const node = props.node;
+    resetDetailState();
+    void loadSpec(node);
   },
   { immediate: true },
 );
+
+function reloadSpec() {
+  if (props.node) void loadSpec(props.node);
+}
 
 function select(id: Section) {
   section.value = id;
@@ -259,7 +281,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             :node-id="node.id"
             :revision="specRevision"
             :initial="specEgress"
-            @saved="loadSpec"
+            @saved="reloadSpec"
           />
         </PanelCard>
 
@@ -269,7 +291,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             :node-id="node.id"
             :revision="specRevision"
             :items="specProxies"
-            @changed="loadSpec"
+            @changed="reloadSpec"
           />
         </PanelCard>
 
@@ -279,7 +301,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             :node-id="node.id"
             :revision="specRevision"
             :items="specRoutes"
-            @changed="loadSpec"
+            @changed="reloadSpec"
           />
         </PanelCard>
 
