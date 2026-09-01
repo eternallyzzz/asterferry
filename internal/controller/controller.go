@@ -217,6 +217,14 @@ func (c *Controller) reconcileLoop(ctx context.Context) {
 				if _, err := c.Store.ReconcileAssignmentsForGateways(ctx, DefaultGatewayOfflineAfter, change.NodeIDs...); err != nil && ctx.Err() == nil {
 					c.logReconcileFailure(err)
 				}
+				if _, err := c.Store.ReconcileAssignmentsForAgents(ctx, change.NodeIDs...); err != nil && ctx.Err() == nil {
+					c.logReconcileFailure(err)
+				}
+				if change.PendingServices {
+					if _, err := c.Store.ReconcilePendingServices(ctx); err != nil && ctx.Err() == nil {
+						c.logReconcileFailure(err)
+					}
+				}
 			}
 		case <-ticker.C:
 			c.reconcileAll(ctx)
@@ -226,6 +234,9 @@ func (c *Controller) reconcileLoop(ctx context.Context) {
 
 func (c *Controller) reconcileAll(ctx context.Context) {
 	if _, err := c.Store.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter); err != nil && ctx.Err() == nil {
+		c.logReconcileFailure(err)
+	}
+	if _, err := c.Store.ReconcilePendingServices(ctx); err != nil && ctx.Err() == nil {
 		c.logReconcileFailure(err)
 	}
 }

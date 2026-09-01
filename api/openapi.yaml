@@ -91,6 +91,22 @@ paths:
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Deleted }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/bootstrap:
+    post:
+      tags: [operations]
+      operationId: bootstrapNode
+      description: Create a node-bound enrollment token and return a platform-specific one-line installer command. Existing node specs are not replaced.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapRequest' } } }
+      responses:
+        '201':
+          description: One-time installer command generated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
+        '409': { description: Idempotency key already created the one-time token, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
+        '503': { description: Controller bootstrap configuration is unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /nodes/{nodeId}/snapshot:
     get:
       tags: [nodes]
@@ -392,6 +408,25 @@ components:
       type: object
       required: [id, role, name]
       properties: { id: { type: string }, role: { type: string, enum: [gateway, agent] }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean } }
+    NodeBootstrapRequest:
+      type: object
+      required: [platform, arch]
+      properties:
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        gateway_spec: { $ref: '#/components/schemas/GatewaySpec' }
+        agent_spec: { $ref: '#/components/schemas/AgentSpec' }
+    NodeBootstrapResponse:
+      type: object
+      required: [node_id, role, platform, arch, version, expires_at, command]
+      properties:
+        node_id: { type: string }
+        role: { type: string, enum: [gateway, agent] }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+        expires_at: { type: string, format: date-time }
+        command: { type: string }
     NodePatch:
       type: object
       properties: { role: { type: string, enum: [gateway, agent] }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean }, certificate_state: { type: string }, certificate_serial: { type: string } }

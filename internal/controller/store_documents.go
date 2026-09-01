@@ -401,6 +401,9 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
 		return err
 	}
+	if table == "gateway_specs" {
+		return s.commitAndNotifyPendingServices(tx, affectedNodes...)
+	}
 	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 

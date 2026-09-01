@@ -20,13 +20,16 @@ import (
 )
 
 type InitOptions struct {
-	Dir        string
-	HTTPListen string
-	GRPCListen string
-	Username   string
-	Password   string
-	Force      bool
-	Now        func() time.Time
+	Dir            string
+	HTTPListen     string
+	GRPCListen     string
+	GRPCAdvertise  string
+	ReleaseBaseURL string
+	ReleaseVersion string
+	Username       string
+	Password       string
+	Force          bool
+	Now            func() time.Time
 }
 
 type InitResult struct {
@@ -60,6 +63,15 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	}
 	if options.GRPCListen != "" {
 		config.GRPCListen = options.GRPCListen
+	}
+	if options.GRPCAdvertise != "" {
+		config.GRPCAdvertise = options.GRPCAdvertise
+	}
+	if options.ReleaseBaseURL != "" {
+		config.ReleaseBaseURL = options.ReleaseBaseURL
+	}
+	if options.ReleaseVersion != "" {
+		config.ReleaseVersion = options.ReleaseVersion
 	}
 	if err := config.Validate(); err != nil {
 		return InitResult{}, err
@@ -98,6 +110,9 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	stagedConfig := DefaultConfig(staging)
 	stagedConfig.HTTPListen = config.HTTPListen
 	stagedConfig.GRPCListen = config.GRPCListen
+	stagedConfig.GRPCAdvertise = config.GRPCAdvertise
+	stagedConfig.ReleaseBaseURL = config.ReleaseBaseURL
+	stagedConfig.ReleaseVersion = config.ReleaseVersion
 	stagedConfig.DashboardEnable = config.DashboardEnable
 	stagedConfig.LogLevel = config.LogLevel
 	for _, path := range []string{staging, filepath.Dir(stagedConfig.CAKeyPath), filepath.Dir(stagedConfig.CACertPath), filepath.Dir(stagedConfig.TLSKeyPath), filepath.Dir(stagedConfig.TLSCertPath)} {
@@ -329,7 +344,11 @@ func writeServerCertificate(config Config, nowFn func() time.Time) error {
 	now := nowFn().UTC()
 	dnsNames := []string{"localhost"}
 	ipAddresses := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
-	for _, listen := range []string{config.HTTPListen, config.GRPCListen} {
+	// Nodes dial GRPCAdvertise, which may be a public DNS name or address
+	// different from the local bind address. Include it in the certificate SAN
+	// at initialization time or generated one-line enrollment commands would
+	// fail TLS verification on a correctly configured reverse/NAT deployment.
+	for _, listen := range []string{config.HTTPListen, config.GRPCListen, config.GRPCAdvertise} {
 		host, _, splitErr := net.SplitHostPort(listen)
 		if splitErr != nil || host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
 			continue

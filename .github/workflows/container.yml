@@ -223,6 +223,12 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package node installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/install-node.sh dist/install-node.sh
+          cp scripts/install-node.ps1 dist/install-node.ps1
       - name: Package release Helm chart
         shell: bash
         run: |
@@ -245,7 +251,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.tgz' -o -name '*.spdx.json' \) -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.tgz' -o -name '*.spdx.json' -o -name '*.sh' -o -name '*.ps1' \) -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
           sha256sum -c SHA256SUMS
       - name: Upload release build
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -417,6 +423,8 @@ jobs:
             dist/*.zip
             dist/*.tgz
             dist/*.spdx.json
+            dist/*.sh
+            dist/*.ps1
             dist/SHA256SUMS
             dist/release-manifest.json
       - name: Create GitHub Release

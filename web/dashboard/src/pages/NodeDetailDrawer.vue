@@ -11,7 +11,8 @@ import ProxyRouteManager from "../components/nodes/ProxyRouteManager.vue";
 import ObservedView from "../components/nodes/ObservedView.vue";
 import SnapshotView from "../components/nodes/SnapshotView.vue";
 import {
-  ControllerAPIError,
+	bootstrapNode,
+	ControllerAPIError,
   createAgent,
   createGateway,
   deleteAgent,
@@ -20,12 +21,14 @@ import {
   getGateway,
   nodeAction,
   updateAgent,
-  updateGateway,
-  type ControllerNode,
-  type EgressPolicy,
+	updateGateway,
+	type ControllerNode,
+	type EgressPolicy,
+	type NodeBootstrapResponse,
   type ProxySpec,
   type RouteRule,
 } from "../controller-api";
+import { buildGatewayBootstrapSpec, formatPortRanges } from "../node-bootstrap";
 import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
 import { certificateTone, describeError, formatTime, newIdempotencyKey, parseObject, prettyJson, roleLabel } from "../utils/format";
@@ -50,6 +53,16 @@ const specSaving = ref(false);
 const specError = ref("");
 const confirmDeleteSpec = ref(false);
 const deletingSpec = ref(false);
+const installOpen = ref(false);
+const installPlatform = ref<"linux" | "windows">("linux");
+const installArch = ref<"amd64" | "arm64">("amd64");
+const installEndpoint = ref("");
+const installTCPPool = ref("28080-28999");
+const installUDPPool = ref("28080-28999");
+const installResult = ref<NodeBootstrapResponse | null>(null);
+const installError = ref("");
+const installing = ref(false);
+const copiedInstallCommand = ref(false);
 
 const sections = computed(() => {
   const base: Array<{ id: Section; label: string }> = [
@@ -77,7 +90,7 @@ function defaultSpec(node: ControllerNode): SpecDocument {
       labels: {},
       capacity: { max_agents: 128, max_connections: 4096, max_services: 4096 },
       port_pool: { tcp: [{ min: 20000, max: 20100 }], udp: [{ min: 21000, max: 21100 }] },
-      transport: { alpn: "asterferry-data/1", max_streams: 1024, max_frame_bytes: 65536, max_datagram_bytes: 65536, handshake_timeout_seconds: 10, idle_timeout_seconds: 300 },
+      transport: { alpn: "asterferry-data/2", max_streams: 1024, max_frame_bytes: 65536, max_datagram_bytes: 65536, handshake_timeout_seconds: 10, idle_timeout_seconds: 300 },
       obfuscation: { mode: "standard", max_padding_bytes: 0, handshake_shaping: false },
       egress: { enabled: false, max_connections: 0 },
     };
@@ -148,6 +161,60 @@ watch(
 
 function reloadSpec() {
   if (props.node) void loadSpec(props.node);
+}
+
+function openInstall() {
+  if (!props.node) return;
+  installPlatform.value = "linux";
+  installArch.value = "amd64";
+  installError.value = "";
+  copiedInstallCommand.value = false;
+  installResult.value = null;
+  if (props.node.role === "gateway") {
+    installEndpoint.value = Array.isArray(specDoc.value?.public_endpoints) && typeof specDoc.value.public_endpoints[0] === "string" ? specDoc.value.public_endpoints[0] as string : "";
+    const pool = specDoc.value?.port_pool as { tcp?: unknown; udp?: unknown } | undefined;
+    installTCPPool.value = formatPortRanges(pool?.tcp) || "28080-28999";
+    installUDPPool.value = formatPortRanges(pool?.udp) || "28080-28999";
+  }
+  installOpen.value = true;
+}
+
+function changeInstallPlatform() {
+  if (installPlatform.value === "windows") installArch.value = "amd64";
+}
+
+async function generateInstallCommand() {
+  if (!props.node) return;
+  installing.value = true;
+  installError.value = "";
+  try {
+    const input = {
+      platform: installPlatform.value,
+      arch: installArch.value,
+      ...(props.node.role === "gateway" ? { gateway_spec: buildGatewayBootstrapSpec(props.node, installEndpoint.value, installTCPPool.value, installUDPPool.value) } : {}),
+    };
+    installResult.value = await bootstrapNode(props.node.id, input, undefined, newIdempotencyKey());
+    copiedInstallCommand.value = false;
+  } catch (caught) {
+    installError.value = describeError(caught);
+  } finally {
+    installing.value = false;
+  }
+}
+
+async function copyInstallCommand() {
+  if (!installResult.value) return;
+  try {
+    await navigator.clipboard.writeText(installResult.value.command);
+    copiedInstallCommand.value = true;
+    notify.success("安装命令已复制。请尽快执行，命令中的 Token 只在短时间内有效。");
+  } catch {
+    notify.error("无法访问剪贴板，请手动复制命令。");
+  }
+}
+
+function selectInstallCommand(event: FocusEvent) {
+  (event.target as HTMLTextAreaElement | null)?.select();
 }
 
 function select(id: Section) {
@@ -244,6 +311,10 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             <button type="button" class="af-button secondary" @click="runAction('reconnect')">重连</button>
             <button type="button" class="af-button secondary" @click="runAction('drain')">排空</button>
           </div>
+          <div v-if="session.canAdmin.value" class="action-row">
+            <span class="muted action-label">节点安装</span>
+            <button type="button" class="af-button secondary" @click="openInstall">生成安装命令</button>
+          </div>
         </PanelCard>
 
         <PanelCard v-show="section === 'spec'">
@@ -320,6 +391,36 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
       <template #footer>
         <button type="button" class="af-button secondary" @click="confirmDeleteSpec = false">取消</button>
         <button type="button" class="af-button danger" :disabled="deletingSpec" @click="removeSpec">{{ deletingSpec ? "删除中…" : "确认删除" }}</button>
+      </template>
+    </ModalDialog>
+
+    <ModalDialog :open="installOpen" title="一键安装注册命令" width="680px" @close="installOpen = false">
+      <div class="install-dialog">
+        <template v-if="!installResult">
+          <div class="install-grid">
+            <label>目标平台<select v-model="installPlatform" @change="changeInstallPlatform"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>
+            <label>架构<select v-model="installArch"><option value="amd64">amd64</option><option v-if="installPlatform === 'linux'" value="arm64">arm64</option></select></label>
+          </div>
+          <template v-if="node?.role === 'gateway'">
+            <label>公网 AFDP 地址<input v-model="installEndpoint" placeholder="gateway.example.com:4433" /></label>
+            <div class="install-grid">
+              <label>TCP 端口池<input v-model="installTCPPool" placeholder="28080-28999" /></label>
+              <label>UDP 端口池<input v-model="installUDPPool" placeholder="28080-28999" /></label>
+            </div>
+          </template>
+          <p v-if="installError" class="section-error">{{ installError }}</p>
+        </template>
+        <template v-else>
+          <p class="form-note">{{ installResult.role.toUpperCase() }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
+          <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。</p>
+          <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
+          <p class="form-note">请在对应机器的管理员 PowerShell 或 root shell 中执行。</p>
+        </template>
+      </div>
+      <template #footer>
+        <button type="button" class="af-button secondary" @click="installOpen = false">关闭</button>
+        <button v-if="!installResult" type="button" class="af-button primary" :disabled="installing" @click="generateInstallCommand">{{ installing ? "生成中…" : "生成命令" }}</button>
+        <button v-else type="button" class="af-button primary" @click="copyInstallCommand">{{ copiedInstallCommand ? "已复制" : "复制安装命令" }}</button>
       </template>
     </ModalDialog>
   </DrawerPanel>
@@ -408,6 +509,22 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
   color: var(--af-muted);
   line-height: 1.7;
 }
+.install-dialog { display: flex; flex-direction: column; gap: 10px; }
+.install-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.install-dialog label { display: flex; flex-direction: column; gap: 5px; color: var(--af-faint); font-size: 12px; }
+.install-dialog input, .install-dialog select { width: 100%; box-sizing: border-box; }
+.install-command {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--af-border);
+  border-radius: 8px;
+  background: var(--af-panel-soft);
+  color: var(--af-text);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.warning { color: var(--af-amber, #d99b35); }
 @media (max-width: 640px) {
   .drawer-layout { flex-direction: column; }
   .section-nav {
@@ -418,5 +535,6 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
     padding-bottom: 4px;
   }
   .section-link { white-space: nowrap; }
+  .install-grid { grid-template-columns: 1fr; }
 }
 </style>

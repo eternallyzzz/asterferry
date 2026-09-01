@@ -10,18 +10,21 @@ import EmptyState from "../components/ui/EmptyState.vue";
 import Spinner from "../components/ui/Spinner.vue";
 import NodeDetailDrawer from "./NodeDetailDrawer.vue";
 import {
-  createNode,
+	bootstrapNode,
+	createNode,
   deleteNode,
   listNodes,
   nodeAction,
   updateNode,
-  type ControllerNode,
-  type CreateNodeInput,
+	type ControllerNode,
+	type NodeBootstrapResponse,
+	type CreateNodeInput,
 } from "../controller-api";
 import { usePolling } from "../composables/usePolling";
 import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
 import { certificateTone, describeError, newIdempotencyKey, parseLabels, prettyJson, roleLabel } from "../utils/format";
+import { buildGatewayBootstrapSpec } from "../node-bootstrap";
 
 const notify = useNotify();
 const session = useSession();
@@ -32,13 +35,16 @@ const drawerNode = ref<ControllerNode | null>(null);
 const drawerOpen = ref(false);
 
 const formOpen = ref(false);
-const form = ref({ id: "", role: "gateway" as ControllerNode["role"], name: "", labels: "{}", enabled: true });
+const form = ref({ id: "", role: "gateway" as ControllerNode["role"], name: "", labels: "{}", enabled: true, platform: "linux" as "linux" | "windows", arch: "amd64" as "amd64" | "arm64", publicEndpoint: "", tcpPool: "28080-28999", udpPool: "28080-28999" });
 const editID = ref("");
 const editRevision = ref(0);
 const formError = ref("");
 const saving = ref(false);
 const pendingDelete = ref<ControllerNode | null>(null);
 const deleting = ref(false);
+const installOpen = ref(false);
+const installResult = ref<NodeBootstrapResponse | null>(null);
+const copiedInstallCommand = ref(false);
 
 async function load() {
   try {
@@ -64,7 +70,7 @@ function openDrawer(node: ControllerNode) {
 }
 
 function openCreate() {
-  form.value = { id: "", role: "gateway", name: "", labels: "{}", enabled: true };
+	form.value = { id: "", role: "gateway", name: "", labels: "{}", enabled: true, platform: "linux", arch: "amd64", publicEndpoint: "", tcpPool: "28080-28999", udpPool: "28080-28999" };
   editID.value = "";
   editRevision.value = 0;
   formError.value = "";
@@ -72,7 +78,7 @@ function openCreate() {
 }
 
 function openEdit(node: ControllerNode) {
-  form.value = { id: node.id, role: node.role, name: node.name, labels: prettyJson(node.labels || {}), enabled: node.enabled };
+  form.value = { id: node.id, role: node.role, name: node.name, labels: prettyJson(node.labels || {}), enabled: node.enabled, platform: "linux", arch: "amd64", publicEndpoint: "", tcpPool: "28080-28999", udpPool: "28080-28999" };
   editID.value = node.id;
   editRevision.value = node.revision;
   formError.value = "";
@@ -94,8 +100,23 @@ async function save() {
       await updateNode(editID.value, { role: input.role, name: input.name, labels: input.labels, enabled: input.enabled }, editRevision.value, undefined, newIdempotencyKey());
       notify.success(`节点 ${editID.value} 已更新。`);
     } else {
-      await createNode(input, undefined, newIdempotencyKey());
+      const created = await createNode(input, undefined, newIdempotencyKey());
       notify.success(`节点 ${input.id} 已创建。`);
+      formOpen.value = false;
+      await refresh();
+      try {
+        const bootstrap = await bootstrapNode(created.id, {
+          platform: form.value.platform,
+          arch: form.value.arch,
+          ...(input.role === "gateway" ? { gateway_spec: buildGatewayBootstrapSpec(created, form.value.publicEndpoint, form.value.tcpPool, form.value.udpPool) } : {}),
+        }, undefined, newIdempotencyKey());
+        installResult.value = bootstrap;
+        copiedInstallCommand.value = false;
+        installOpen.value = true;
+      } catch (caught) {
+        notify.error(`节点已创建，但安装命令生成失败：${describeError(caught)}`);
+      }
+      return;
     }
     formOpen.value = false;
     await refresh();
@@ -103,6 +124,25 @@ async function save() {
     formError.value = describeError(caught);
   } finally {
     saving.value = false;
+  }
+}
+
+function changePlatform() {
+  if (form.value.platform === "windows") form.value.arch = "amd64";
+}
+
+function selectInstallCommand(event: FocusEvent) {
+  (event.target as HTMLTextAreaElement | null)?.select();
+}
+
+async function copyInstallCommand() {
+  if (!installResult.value) return;
+  try {
+    await navigator.clipboard.writeText(installResult.value.command);
+    copiedInstallCommand.value = true;
+    notify.success("安装命令已复制。请尽快执行，命令中的 Token 只在短时间内有效。" );
+  } catch {
+    notify.error("无法访问剪贴板，请手动复制命令。" );
   }
 }
 
@@ -171,7 +211,7 @@ async function confirmDelete() {
           </tr>
         </tbody>
         <template #empty>
-          <EmptyState title="暂无节点" description="注册第一个 Gateway 或 Agent，然后在管理页签发 enrollment token 完成接入。" />
+          <EmptyState title="暂无节点" description="注册第一个 Gateway 或 Agent，Dashboard 会生成一条安装注册命令。" />
         </template>
       </DataTable>
     </PanelCard>
@@ -189,22 +229,61 @@ async function confirmDelete() {
             <option value="agent">Agent</option>
           </select>
         </FormField>
+        <template v-if="!editID">
+          <FormField label="目标平台">
+            <select v-model="form.platform" @change="changePlatform">
+              <option value="linux">Linux</option>
+              <option value="windows">Windows</option>
+            </select>
+          </FormField>
+          <FormField label="架构">
+            <select v-model="form.arch">
+              <option value="amd64">amd64</option>
+              <option v-if="form.platform === 'linux'" value="arm64">arm64</option>
+            </select>
+          </FormField>
+        </template>
         <FormField label="名称">
           <input v-model="form.name" required placeholder="East Gateway" />
         </FormField>
         <FormField label="标签 JSON">
           <textarea v-model="form.labels" rows="3" spellcheck="false" placeholder='{"region":"east"}' />
         </FormField>
+        <template v-if="!editID && form.role === 'gateway'">
+          <FormField label="公网 AFDP 地址" hint="Agent 连接 Gateway 的地址，例如 gateway.example.com:4433">
+            <input v-model="form.publicEndpoint" required placeholder="gateway.example.com:4433" />
+          </FormField>
+          <div />
+          <FormField label="TCP 端口池" hint="逗号分隔端口或范围">
+            <input v-model="form.tcpPool" placeholder="28080-28999" />
+          </FormField>
+          <FormField label="UDP 端口池" hint="逗号分隔端口或范围">
+            <input v-model="form.udpPool" placeholder="28080-28999" />
+          </FormField>
+        </template>
         <label class="check-label">
           <input v-model="form.enabled" type="checkbox" /> 启用节点
         </label>
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <p v-if="editID" class="form-note">If-Match revision: {{ editRevision }}。并发修改会被 Controller 拒绝。</p>
-        <p v-else class="form-note">注册后在「管理」页创建 enrollment token，再运行节点 enroll。</p>
+        <p v-else class="form-note">创建后会自动生成平台专用安装命令；Agent 使用默认规格，Gateway 需要上面的公网地址和端口池。</p>
       </form>
       <template #footer>
         <button type="button" class="af-button secondary" @click="formOpen = false">取消</button>
         <button type="button" class="af-button primary" :disabled="saving" @click="save">{{ saving ? "保存中…" : editID ? "保存节点" : "注册节点" }}</button>
+      </template>
+    </ModalDialog>
+
+    <ModalDialog :open="installOpen" title="一键安装注册命令" width="680px" @close="installOpen = false">
+      <div v-if="installResult" class="install-dialog">
+        <p class="form-note">{{ installResult.role.toUpperCase() }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
+        <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。不要发到公开聊天或日志中。</p>
+        <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
+        <p class="form-note">在对应机器的管理员 PowerShell 或 root shell 中执行。执行完成后节点会自动上线。</p>
+      </div>
+      <template #footer>
+        <button type="button" class="af-button secondary" @click="installOpen = false">稍后复制</button>
+        <button type="button" class="af-button primary" @click="copyInstallCommand">{{ copiedInstallCommand ? "已复制" : "复制安装命令" }}</button>
       </template>
     </ModalDialog>
 
@@ -264,4 +343,17 @@ async function confirmDelete() {
   color: var(--af-muted);
   line-height: 1.7;
 }
+.install-dialog { display: flex; flex-direction: column; gap: 10px; }
+.install-command {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 12px;
+  border: 1px solid var(--af-border);
+  border-radius: 8px;
+  background: var(--af-panel-soft);
+  color: var(--af-text);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.warning { color: var(--af-amber, #d99b35); }
 </style>

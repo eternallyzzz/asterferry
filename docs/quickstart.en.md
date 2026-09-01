@@ -104,7 +104,7 @@ Do not put the password directly in the command line, where it may enter shell h
 
 ### 3.2 Initialize
 
-The host portions of `--http-listen` and `--grpc-listen` should be stable names or IPs that C can bind and that clients will actually use. The generated Controller certificate includes these names in its SAN. Do not replace the stable name with `0.0.0.0` in this remote deployment example.
+The host portions of `--http-listen`, `--grpc-listen` and `--grpc-advertise` should be stable C names or IPs. The generated Controller certificate includes these addresses in its SAN. Do not replace the stable name with `0.0.0.0` in this remote deployment example.
 
 ```powershell
 # Windows; replace the example host with C's real DNS name or fixed IP
@@ -113,7 +113,9 @@ asterferry.exe controller init `
   --username admin `
   --password-file .\admin-password.txt `
   --http-listen controller.example.com:8443 `
-  --grpc-listen controller.example.com:9443
+  --grpc-listen controller.example.com:9443 `
+  --grpc-advertise controller.example.com:9443 `
+  --release-version 1.0.0
 ```
 
 ```sh
@@ -123,8 +125,16 @@ asterferry.exe controller init `
   --username admin \
   --password-file ./admin-password.txt \
   --http-listen controller.example.com:8443 \
-  --grpc-listen controller.example.com:9443
+  --grpc-listen controller.example.com:9443 \
+  --grpc-advertise controller.example.com:9443 \
+  --release-version 1.0.0
 ```
+
+`--grpc-advertise` is the address that A and B use to reach C. Replace
+`--release-version` with a version already published under `release_base_url`.
+Initialization includes the advertised address in the Controller certificate
+SAN. A private release mirror can be selected with `--release-base-url`, but
+it must use HTTPS.
 
 If neither `--password-file` nor `--password` is supplied, the CLI generates a random password and prints it once in the initialization output. The password is not stored in `controller.json`.
 
@@ -154,173 +164,53 @@ https://controller.example.com:8443/dashboard/
 
 Initialization creates a self-signed Controller CA. In production, install `controller/ca/ca.crt` in the admin client's trust store. For temporary development, you may accept the browser warning manually. Never copy `ca.key`, `master.key`, or the Controller TLS private key to A or B.
 
-## 4. Register nodes and configure their specs in the Dashboard
+## 4. One-click node installation and enrollment from the Dashboard
 
-Log in to the Dashboard and follow this order. All business configuration is written to the Controller; A and B do not read business YAML.
+Open `https://controller.example.com:8443/dashboard/` and go to **Nodes**.
+The Controller remains the only owner of business configuration; A and B do
+not read business YAML.
 
-### 4.1 Register the Gateway and Agent
+### 4.1 Create the Gateway
 
-Open the Nodes page and create:
+Click **Register node**, enter the Node ID, name and labels, choose `Gateway`,
+then select B's actual platform and architecture. A Gateway also requires:
 
-| Node ID | Role | Name | Labels |
-| --- | --- | --- | --- |
-| `gw-public` | Gateway | Public Gateway | `{"site":"public"}` |
-| `agent-internal` | Agent | Internal Agent | `{"site":"internal"}` |
+- **Public AFDP endpoint**, for example `gateway.example.com:4433`. This is
+  the UDP address that A uses to reach B, not a business service port.
+- **TCP port pool** and **UDP port pool**, for example `28080-28999`. These
+  pools are used when services are created with automatic public ports.
 
-Node IDs become identity names after enrollment and should be treated as immutable. Certificate state may initially be `pending`; it becomes `active` after enrollment.
+After submission, the Dashboard returns a one-time installer command. Copy it
+to B and run it in a root shell on Linux or an elevated PowerShell on Windows.
 
-### 4.2 Configure the Gateway spec
+### 4.2 Create the Agent
 
-Open `gw-public` → **Spec** and save this minimum working example. Replace `gateway.example.com` with B's public address; B must accept UDP `4433`.
+Click **Register node** again, choose `Agent`, and enter A's platform and
+architecture. The Controller creates a usable default Agent spec. Copy the
+resulting command to A and run it once.
 
-```json
-{
-  "node_id": "gw-public",
-  "public_endpoints": ["gateway.example.com:4433"],
-  "listeners": [],
-  "labels": {"site": "public"},
-  "capacity": {
-    "max_agents": 128,
-    "max_connections": 4096,
-    "max_services": 4096
-  },
-  "port_pool": {
-    "tcp": [{"min": 28080, "max": 28080}],
-    "udp": [{"min": 28081, "max": 28081}]
-  },
-  "transport": {
-    "alpn": "asterferry-data/2",
-    "max_streams": 1024,
-    "max_frame_bytes": 65536,
-    "max_datagram_bytes": 65536,
-    "handshake_timeout_seconds": 10,
-    "idle_timeout_seconds": 300
-  },
-  "obfuscation": {
-    "mode": "standard",
-    "max_padding_bytes": 0,
-    "handshake_shaping": false
-  },
-  "egress": {
-    "enabled": false,
-    "max_connections": 0
-  }
-}
-```
+The installer downloads the exact release configured by the Controller,
+verifies its SHA-256 checksum, writes the CA and bootstrap/cache files into a
+private state directory, uses the node-bound enrollment token to obtain the
+certificate, and creates, enables and starts the system service:
 
-Notes:
+- Linux: `asterferry-gateway.service` or `asterferry-agent.service`.
+- Windows: `AsterFerry-gateway` or `AsterFerry-agent` Windows service.
 
-- `public_endpoints` is the AFDP/2 address that the Agent uses to reach B, not a public service port.
-- `listeners` is normally empty. After a Service is created, the Controller sends Assignment bindings to the Gateway.
-- `port_pool` must cover ports available for automatic service allocation. This example reserves `28080/tcp` and `28081/udp`.
-- The current protocol ALPN is `asterferry-data/2`; do not use the AFDP/1 `/1` value.
-- If the Dashboard spec editor is prefilled with `asterferry-data/1`, change it to `asterferry-data/2` before saving.
+The token is single-use and valid for 15 minutes. It can only enroll its own
+Node ID and role. Do not paste the command into public chats, tickets or logs.
+If it expires or is lost, generate a new command from the node details. B and
+A do not need a manually copied CA, edited bootstrap JSON or second start
+command.
 
-### 4.3 Configure the Agent spec
+### 4.3 Legacy/manual enrollment
 
-Open `agent-internal` → **Spec** and save:
+The `enroll-token create`, `gateway enroll`, `agent enroll` and system-service
+templates remain available for offline images, private release mirrors and
+custom service accounts. They use the same 15-minute role-bound tokens; never
+mix a Gateway token with an Agent.
 
-```json
-{
-  "node_id": "agent-internal",
-  "gateway_selector": {
-    "match_labels": {"site": "public"}
-  },
-  "proxies": [],
-  "routes": [],
-  "limits": {
-    "max_connections": 4096,
-    "max_streams": 1024,
-    "max_buffer_bytes": 67108864
-  },
-  "egress": {
-    "enabled": false,
-    "max_connections": 0
-  },
-  "logging": {
-    "level": "info",
-    "format": "json"
-  }
-}
-```
-
-`gateway_selector.match_labels` must match the Gateway labels, otherwise the Agent has no eligible Gateway.
-
-## 5. Create enrollment tokens on C
-
-An enrollment token is single-use, role-bound, and valid for at most 15 minutes by default. Run these commands on C; the plaintext appears only in the command output:
-
-```sh
-asterferry enroll-token create \
-  --config ./controller/controller.json \
-  --role gateway
-
-asterferry enroll-token create \
-  --config ./controller/controller.json \
-  --role agent
-```
-
-Save the `token:` value from each output separately. Do not use the Gateway token for the Agent. Securely copy the matching token and `controller/ca/ca.crt` to B and A; copy only the CA certificate, never the CA private key.
-
-## 6. Enroll and start the nodes on B and A
-
-### 6.1 B: Gateway
-
-On B, create private directories and place C's `ca.crt` at `./ca/ca.crt`:
-
-```sh
-mkdir -p ./ca ./state
-./asterferry gateway enroll \
-  --controller controller.example.com:9443 \
-  --server-name controller.example.com \
-  --token '<gateway-token>' \
-  --node-id gw-public \
-  --ca ./ca/ca.crt \
-  --output ./gateway-bootstrap.json \
-  --cache ./state/snapshot.cache
-
-./asterferry gateway run --bootstrap ./gateway-bootstrap.json
-```
-
-Windows PowerShell example:
-
-```powershell
-New-Item -ItemType Directory -Force .\ca, .\state | Out-Null
-.\asterferry.exe gateway enroll `
-  --controller controller.example.com:9443 `
-  --server-name controller.example.com `
-  --token '<gateway-token>' `
-  --node-id gw-public `
-  --ca .\ca\ca.crt `
-  --output .\gateway-bootstrap.json `
-  --cache .\state\snapshot.cache
-
-.\asterferry.exe gateway run --bootstrap .\gateway-bootstrap.json
-```
-
-The Gateway first connects to C for a snapshot, then listens on the UDP endpoint represented by `gateway.example.com:4433` and on the service ports from applied Assignments.
-
-### 6.2 A: Agent
-
-On A, create private directories and place C's `ca.crt` at `./ca/ca.crt`:
-
-```sh
-mkdir -p ./ca ./state
-./asterferry agent enroll \
-  --controller controller.example.com:9443 \
-  --server-name controller.example.com \
-  --token '<agent-token>' \
-  --node-id agent-internal \
-  --ca ./ca/ca.crt \
-  --output ./agent-bootstrap.json \
-  --cache ./state/snapshot.cache
-
-./asterferry agent run --bootstrap ./agent-bootstrap.json
-```
-
-The Agent actively connects to C and then actively connects to B's AFDP/2 endpoint when the Controller creates an Assignment. A does not need to expose a management port to the Internet.
-
-## 7. Create the first TCP service
+## 5. Create the first TCP service
 
 First make sure the real service on A listens at `127.0.0.1:18080`. For a temporary test server:
 
@@ -341,13 +231,13 @@ In the Dashboard, open **Services** → **Create service**:
 | Gateway selector JSON | `{"match_labels":{"site":"public"}}` |
 | Enabled | checked |
 
-After saving, the Controller selects a matching healthy Gateway. If no Assignment appears, open **Assignments** and click **Reschedule** for `agent-internal`.
+After saving, the Controller automatically selects a matching healthy Gateway and creates the Assignment; normally no manual reschedule is needed. If a Gateway is not online yet or its port pool is temporarily full, the service remains pending and the Controller retries when resources recover.
 
 Setting `public_port` to `0` asks the Gateway port pool to allocate a port automatically. This example uses `28080`, so clients connect to `B:28080`.
 
 Configure a UDP service the same way, changing the protocol to UDP and the port to `28081`, and make sure the UDP target on A is reachable from the Agent process.
 
-## 8. Verify the path
+## 6. Verify the path
 
 In the Dashboard, check:
 
@@ -380,9 +270,9 @@ Test-NetConnection gateway.example.com -Port 28080
 
 UDP cannot be validated with a TCP probe. Use Dashboard Assignment/Observed state, node logs and firewall packet capture together.
 
-## 9. WSL and Windows host networking
+## 7. WSL and Windows host networking
 
-### 9.1 Simplest local development layout
+### 7.1 Simplest local development layout
 
 If Controller, Gateway and Agent all run inside the same WSL instance:
 
@@ -393,7 +283,7 @@ If Controller, Gateway and Agent all run inside the same WSL instance:
 
 If A, B and C are different machines or network namespaces, do not use `127.0.0.1` as a cross-host address. Use a reachable DNS name or IP instead.
 
-### 9.2 WSL reaching a Windows-hosted service
+### 7.2 WSL reaching a Windows-hosted service
 
 In the default WSL2 NAT mode, Linux processes normally reach a Windows service through the host IP:
 
@@ -417,7 +307,7 @@ networkingMode=mirrored
 wsl --shutdown
 ```
 
-### 9.3 Exposing WSL TCP services to the LAN
+### 7.3 Exposing WSL TCP services to the LAN
 
 The WSL2 NAT address may change after a restart. To publish TCP ports from the Windows host, run the following from an elevated PowerShell:
 
@@ -450,7 +340,7 @@ netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=28080
 
 See [Microsoft's WSL networking documentation](https://learn.microsoft.com/en-us/windows/wsl/networking) for WSL networking modes, localhost forwarding and `netsh portproxy`.
 
-## 10. Troubleshooting
+## 8. Troubleshooting
 
 ### The Dashboard does not open
 
@@ -462,7 +352,7 @@ Verify that:
 
 - enrollment uses C's CA certificate, not a node certificate from A or B;
 - `--server-name` matches the Controller certificate SAN;
-- `controller init` used a stable C hostname or IP in `--http-listen` and `--grpc-listen`, rather than generating a certificate containing only `localhost`;
+- `controller init` used stable C hostnames or IPs in `--http-listen`, `--grpc-listen` and `--grpc-advertise`; the advertised address is also included in the certificate SAN;
 - A and B reach `C_HOST:9443` and TCP 9443 is allowed.
 
 Use `--insecure` only for a temporary local experiment, never for production enrollment.
@@ -483,7 +373,7 @@ Confirm that `127.0.0.1:18080` is reachable from the Agent process on A. `local_
 
 Nodes receive snapshots with a generation and checksum over the mTLS gRPC control channel. Check the Controller and node logs and the applied Generation under Observed. Do not edit the database or bootstrap JSON directly.
 
-## 11. Backup, upgrade and shutdown
+## 9. Backup, upgrade and shutdown
 
 Back up the complete Controller installation before upgrades:
 
@@ -504,7 +394,7 @@ When the Controller is temporarily unavailable, nodes continue using their encry
 
 See [`deploy/README.md`](../deploy/README.md) for systemd, Docker Compose and Kubernetes deployment details.
 
-## 12. Completion checklist
+## 10. Completion checklist
 
 - [ ] C's `8443/tcp` and `9443/tcp` are listening and reachable.
 - [ ] The Dashboard accepts login and both nodes are registered.

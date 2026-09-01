@@ -17,6 +17,8 @@ import (
 
 const DefaultGatewayOfflineAfter = 30 * time.Second
 
+var ErrNoHealthyGateway = errors.New("no healthy gateway satisfies the selector and capacity constraints")
+
 type GatewayCandidate struct {
 	Node         domain.Node
 	Spec         domain.GatewaySpec
@@ -106,6 +108,93 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 		}
 	}
 	return s.ListAssignments(ctx, "", agentID)
+}
+
+// ReconcileAssignmentsForAgents schedules newly-created services as well as
+// repairing an Agent's existing placements. Resource notifications identify
+// the affected Agent, so normal service creation no longer requires a second
+// manual schedule action from the operator.
+func (s *Store) ReconcileAssignmentsForAgents(ctx context.Context, agentIDs ...string) (result []domain.Assignment, returnErr error) {
+	seen := make(map[string]struct{}, len(agentIDs))
+	result = make([]domain.Assignment, 0)
+	for _, agentID := range agentIDs {
+		agentID = strings.TrimSpace(agentID)
+		if agentID == "" {
+			continue
+		}
+		if _, exists := seen[agentID]; exists {
+			continue
+		}
+		seen[agentID] = struct{}{}
+		node, err := s.GetNode(ctx, agentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if node.Role != domain.RoleAgent || !node.Enabled {
+			continue
+		}
+		if _, err := s.GetAgentSpec(ctx, agentID); errors.Is(err, sql.ErrNoRows) {
+			// A node created through the legacy API may not have a spec yet.
+			// Leave its services untouched until the operator supplies one.
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		services, err := s.ListServices(ctx, agentID)
+		if err != nil {
+			return nil, err
+		}
+		if len(filterEnabledServices(services)) == 0 {
+			continue
+		}
+		// This is an internal repair pass, not an API retry boundary. A stable
+		// idempotency key would make a later service change collide with the
+		// old reconciliation request hash, so deliberately leave it empty.
+		assignments, err := s.ScheduleAgent(ctx, agentID, WriteOptions{Actor: "system"})
+		if errors.Is(err, ErrNoHealthyGateway) {
+			// Pending services will be retried when a Gateway resource changes
+			// and by the periodic repair sweep.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, assignments...)
+	}
+	return result, nil
+}
+
+// ReconcilePendingServices retries enabled services that do not yet have an
+// assignment. It is used when a Gateway first becomes available, because the
+// service may have been created while no Gateway matched its selector.
+func (s *Store) ReconcilePendingServices(ctx context.Context) (result []domain.Assignment, returnErr error) {
+	finishMetrics := s.metrics.startSchedule()
+	defer func() { finishMetrics(returnErr) }()
+	nodes, err := s.ListNodes(ctx, domain.RoleAgent)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range nodes {
+		if !node.Enabled {
+			continue
+		}
+		var pending int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM services s LEFT JOIN assignment_services a ON a.service_id=s.id WHERE s.agent_id=? AND s.enabled=1 AND a.service_id IS NULL`, node.ID).Scan(&pending); err != nil {
+			return nil, err
+		}
+		if pending == 0 {
+			continue
+		}
+		assignments, scheduleErr := s.ReconcileAssignmentsForAgents(ctx, node.ID)
+		if scheduleErr != nil {
+			return result, scheduleErr
+		}
+		result = append(result, assignments...)
+	}
+	return result, nil
 }
 
 func servicesForAssignment(assignment domain.Assignment, serviceByID map[string]domain.Service) []domain.Service {
@@ -636,7 +725,7 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 	if placementErr != nil {
 		return domain.Assignment{}, placementErr
 	}
-	return domain.Assignment{}, errors.New("no healthy gateway satisfies the selector and capacity constraints")
+	return domain.Assignment{}, ErrNoHealthyGateway
 }
 
 func filterEnabledServices(values []domain.Service) []domain.Service {

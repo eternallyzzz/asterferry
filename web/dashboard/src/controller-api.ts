@@ -28,6 +28,23 @@ export interface ControllerNode {
 
 export type CreateNodeInput = Pick<ControllerNode, "id" | "role" | "name" | "labels" | "enabled">;
 
+export interface NodeBootstrapRequest {
+  platform: "linux" | "windows";
+  arch: "amd64" | "arm64";
+  gateway_spec?: unknown;
+  agent_spec?: unknown;
+}
+
+export interface NodeBootstrapResponse {
+  node_id: string;
+  role: "gateway" | "agent";
+  platform: "linux" | "windows";
+  arch: "amd64" | "arm64";
+  version: string;
+  expires_at: string;
+  command: string;
+}
+
 export interface ControllerService {
   id: string;
   agent_id: string;
@@ -139,6 +156,7 @@ export function getNode(id: string, token?: string): Promise<ControllerNode> { r
 export function createNode(node: CreateNodeInput, token?: string, idempotencyKey?: string): Promise<ControllerNode> { return request<ControllerNode>("/nodes", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(node) }, token); }
 export function updateNode(id: string, node: Partial<ControllerNode>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerNode> { return request<ControllerNode>(`/nodes/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(node) }, token); }
 export function deleteNode(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
+export function bootstrapNode(id: string, input: NodeBootstrapRequest, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>(`/nodes/${encodeURIComponent(id)}/bootstrap`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
 export function nodeAction(id: string, action: "drain" | "reconnect" | "resync", token?: string, idempotencyKey?: string): Promise<{ state: string }> { return request<{ state: string }>(`/nodes/${encodeURIComponent(id)}/actions/${action}`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function listGateways(token?: string): Promise<{ items: Array<{ node: ControllerNode; spec?: unknown }> }> { return request(`/gateways`, {}, token); }
 export function createGateway(spec: unknown, token?: string, idempotencyKey?: string): Promise<unknown> { return request(`/gateways`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }

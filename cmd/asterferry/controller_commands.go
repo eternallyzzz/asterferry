@@ -26,7 +26,7 @@ func newControllerCommand() *cobra.Command {
 }
 
 func newControllerInitCommand() *cobra.Command {
-	var dir, username, password, passwordFile, httpListen, grpcListen string
+	var dir, username, password, passwordFile, httpListen, grpcListen, grpcAdvertise, releaseBaseURL, releaseVersion string
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -49,7 +49,7 @@ func newControllerInitCommand() *cobra.Command {
 				}
 				generated = true
 			}
-			result, err := controller.Init(cmd.Context(), controller.InitOptions{Dir: dir, HTTPListen: httpListen, GRPCListen: grpcListen, Username: username, Password: password, Force: force})
+			result, err := controller.Init(cmd.Context(), controller.InitOptions{Dir: dir, HTTPListen: httpListen, GRPCListen: grpcListen, GRPCAdvertise: grpcAdvertise, ReleaseBaseURL: releaseBaseURL, ReleaseVersion: releaseVersion, Username: username, Password: password, Force: force})
 			if err != nil {
 				return err
 			}
@@ -67,6 +67,9 @@ func newControllerInitCommand() *cobra.Command {
 	cmd.Flags().StringVar(&passwordFile, "password-file", "", "read the initial Admin password from a protected file")
 	cmd.Flags().StringVar(&httpListen, "http-listen", "", "HTTPS listen address (default :8443)")
 	cmd.Flags().StringVar(&grpcListen, "grpc-listen", "", "mTLS gRPC listen address (default :9443)")
+	cmd.Flags().StringVar(&grpcAdvertise, "grpc-advertise", "", "public Controller gRPC address used by generated node install commands")
+	cmd.Flags().StringVar(&releaseBaseURL, "release-base-url", "", "official release download base URL used by generated node install commands")
+	cmd.Flags().StringVar(&releaseVersion, "release-version", "", "release version used by generated node install commands (defaults to the binary version)")
 	cmd.Flags().BoolVar(&force, "force", false, "initialize an empty or existing directory")
 	return cmd
 }

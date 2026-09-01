@@ -84,10 +84,18 @@ func (s *Store) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
 }
 
 func (s *Store) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
+	return s.commitAndNotifyResourcesWithOptions(tx, false, nodeIDs...)
+}
+
+func (s *Store) commitAndNotifyPendingServices(tx *sql.Tx, nodeIDs ...string) error {
+	return s.commitAndNotifyResourcesWithOptions(tx, true, nodeIDs...)
+}
+
+func (s *Store) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
 	if err := s.commitAndNotify(tx, nodeIDs...); err != nil {
 		return err
 	}
-	s.notifyResourceChanges(nodeIDs...)
+	s.notifyResourceChangesWithOptions(pendingServices, nodeIDs...)
 	return nil
 }
 

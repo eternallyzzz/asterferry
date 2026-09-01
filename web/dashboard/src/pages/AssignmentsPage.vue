@@ -105,7 +105,7 @@ async function schedule(agent: ControllerNode) {
           </template>
         </tbody>
         <template #empty>
-          <EmptyState title="暂无 assignment" description="创建服务并为 Agent 点击「重新调度」后，Controller 会生成 assignment。" />
+          <EmptyState title="暂无 assignment" description="创建服务后 Controller 会自动生成 assignment；这里的手动调度仅用于故障修复。" />
         </template>
       </DataTable>
     </PanelCard>
@@ -128,7 +128,7 @@ async function schedule(agent: ControllerNode) {
           >{{ scheduling === agent.id ? "调度中…" : "重新调度" }}</button>
         </div>
       </div>
-      <EmptyState v-else title="暂无 Agent" description="注册 Agent 节点后即可在此触发重新调度。" />
+      <EmptyState v-else title="暂无 Agent" description="注册 Agent 节点后，创建服务即可自动调度；此处按钮用于故障修复。" />
     </PanelCard>
   </div>
 </template>

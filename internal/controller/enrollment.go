@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -46,6 +47,27 @@ func (s *Store) CreateEnrollmentToken(ctx context.Context, role string, ttl time
 }
 
 func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+	return s.createEnrollmentTokenWithOptions(ctx, "", role, ttl, options)
+}
+
+// CreateNodeEnrollmentToken creates a short-lived enrollment credential that
+// is cryptographically bound to one pre-created node. The binding is encoded
+// in the one-time plaintext token and is covered by the stored token hash, so
+// this feature does not require a schema change to the generic enrollment
+// token table. Generic administrator-created enrollment tokens remain
+// role-bound for backwards compatibility.
+func (s *Store) CreateNodeEnrollmentToken(ctx context.Context, nodeID, role string, ttl time.Duration) (string, EnrollmentToken, error) {
+	return s.CreateNodeEnrollmentTokenWithOptions(ctx, nodeID, role, ttl, WriteOptions{Actor: "system"})
+}
+
+func (s *Store) CreateNodeEnrollmentTokenWithOptions(ctx context.Context, nodeID, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
+		return "", EnrollmentToken{}, err
+	}
+	return s.createEnrollmentTokenWithOptions(ctx, nodeID, role, ttl, options)
+}
+
+func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
 	if role != domain.RoleGateway && role != domain.RoleAgent {
 		return "", EnrollmentToken{}, errors.New("enrollment token role must be gateway or agent")
 	}
@@ -58,6 +80,9 @@ func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role strin
 	now := time.Now().UTC()
 	expires := now.Add(ttl)
 	request := map[string]any{"role": role, "ttl_seconds": int64(ttl / time.Second)}
+	if nodeID != "" {
+		request["node_id"] = nodeID
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", EnrollmentToken{}, err
@@ -109,6 +134,21 @@ func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role strin
 	if err != nil {
 		return "", EnrollmentToken{}, err
 	}
+	if nodeID != "" {
+		var enabled int
+		var storedRole string
+		if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM nodes WHERE id=?`, nodeID).Scan(&storedRole, &enabled); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", EnrollmentToken{}, ErrNodeNotEnrolled
+			}
+			return "", EnrollmentToken{}, err
+		}
+		if storedRole != role || enabled == 0 {
+			return "", EnrollmentToken{}, fmt.Errorf("%w: node is disabled or role does not match", ErrNodeEnrollmentNotAllowed)
+		}
+		plain = nodeEnrollmentToken(nodeID, plain)
+		digest = HashToken(plain)
+	}
 	// Enrollment tokens use the same one-way digest format as API tokens. The
 	// plaintext is returned exactly once and is never persisted.
 	id, err := randomID()
@@ -129,6 +169,32 @@ func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role strin
 		return "", EnrollmentToken{}, err
 	}
 	return plain, EnrollmentToken{ID: id, Role: role, ExpiresAt: expires, CreatedAt: now}, nil
+}
+
+const nodeEnrollmentTokenPrefix = "afn_"
+
+func nodeEnrollmentToken(nodeID, randomToken string) string {
+	return nodeEnrollmentTokenPrefix + hex.EncodeToString([]byte(nodeID)) + "_" + strings.TrimPrefix(randomToken, "af_")
+}
+
+func parseNodeEnrollmentToken(token string) (nodeID string, bound bool, err error) {
+	if !strings.HasPrefix(token, nodeEnrollmentTokenPrefix) {
+		return "", false, nil
+	}
+	rest := strings.TrimPrefix(token, nodeEnrollmentTokenPrefix)
+	parts := strings.SplitN(rest, "_", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", true, errors.New("node enrollment token is malformed")
+	}
+	decoded, err := hex.DecodeString(parts[0])
+	if err != nil || len(decoded) == 0 {
+		return "", true, errors.New("node enrollment token node binding is malformed")
+	}
+	nodeID = string(decoded)
+	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
+		return "", true, errors.New("node enrollment token node binding is invalid")
+	}
+	return nodeID, true, nil
 }
 
 func (s *Store) ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, error) {
@@ -320,6 +386,11 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	}
 	if role != domain.RoleGateway && role != domain.RoleAgent {
 		return Certificate{}, fmt.Errorf("%w: node role must be gateway or agent", ErrInvalidEnrollmentRequest)
+	}
+	if boundNodeID, bound, err := parseNodeEnrollmentToken(token); err != nil {
+		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
+	} else if bound && boundNodeID != nodeID {
+		return Certificate{}, ErrEnrollmentNodeMismatch
 	}
 	if err := s.validateEnrollmentToken(ctx, token, role); err != nil {
 		return Certificate{}, err

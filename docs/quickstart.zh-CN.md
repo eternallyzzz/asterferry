@@ -104,7 +104,7 @@ unset ADMIN_PASSWORD
 
 ### 3.2 初始化
 
-`--http-listen` 和 `--grpc-listen` 的主机部分应使用 C 上可以绑定、且客户端实际访问的稳定名称或 IP。初始化时生成的 Controller 证书会把这个名称写入证书 SAN；不要在这个远程部署示例中用 `0.0.0.0` 代替稳定名称。
+`--http-listen`、`--grpc-listen` 和 `--grpc-advertise` 应使用稳定的 C 主机名或 IP。初始化时生成的 Controller 证书会把这些地址写入证书 SAN；不要在这个远程部署示例中用 `0.0.0.0` 代替稳定名称。
 
 ```powershell
 # Windows；把 C_HOST 替换成 C 的真实 DNS 或固定 IP
@@ -113,7 +113,9 @@ asterferry.exe controller init `
   --username admin `
   --password-file .\admin-password.txt `
   --http-listen controller.example.com:8443 `
-  --grpc-listen controller.example.com:9443
+  --grpc-listen controller.example.com:9443 `
+  --grpc-advertise controller.example.com:9443 `
+  --release-version 1.0.0
 ```
 
 ```sh
@@ -123,8 +125,12 @@ asterferry.exe controller init `
   --username admin \
   --password-file ./admin-password.txt \
   --http-listen controller.example.com:8443 \
-  --grpc-listen controller.example.com:9443
+  --grpc-listen controller.example.com:9443 \
+  --grpc-advertise controller.example.com:9443 \
+  --release-version 1.0.0
 ```
+
+`--grpc-advertise` 是 A、B 实际连接的 C 地址；`--release-version` 必须替换为已经发布到 `release_base_url` 的版本。初始化会把广播地址写入 Controller 证书 SAN。自建发布镜像可通过 `--release-base-url` 指定，但必须是 HTTPS。
 
 不提供 `--password-file` 或 `--password` 时，CLI 会生成随机密码并在初始化输出中显示一次。密码不会保存到 `controller.json`。
 
@@ -154,173 +160,36 @@ https://controller.example.com:8443/dashboard/
 
 初始化会生成自签名 CA。生产环境应把 `controller/ca/ca.crt` 安装到管理端的信任库；临时开发环境可以手动接受浏览器证书警告。不要把 `ca.key`、`master.key` 或 Controller TLS 私钥复制到 A、B。
 
-## 4. 在 Dashboard 注册节点和配置规格
+## 4. 在 Dashboard 一键安装并注册 A、B
 
-登录 Dashboard 后按以下顺序操作。所有业务配置都写入 Controller，A、B 不读取业务 YAML。
+登录 `https://controller.example.com:8443/dashboard/`，打开“节点”页。
+所有业务配置仍由 Controller 管理，A、B 不读取业务 YAML。
 
-### 4.1 注册 Gateway 和 Agent
+### 4.1 创建 Gateway
 
-进入“节点”页，创建：
+点击“注册节点”，填写 Node ID、名称、标签，角色选择 `Gateway`，再选择 B 的实际平台和架构。Gateway 额外填写：
 
-| Node ID | 角色 | 名称 | 标签 |
-| --- | --- | --- | --- |
-| `gw-public` | Gateway | Public Gateway | `{"site":"public"}` |
-| `agent-internal` | Agent | Internal Agent | `{"site":"internal"}` |
+- `公网 AFDP 地址`：例如 `gateway.example.com:4433`。这是 A 连接 B 的 UDP 地址，不是业务服务端口。
+- `TCP 端口池`、`UDP 端口池`：例如 `28080-28999`，用于 Dashboard 创建服务时自动分配公网端口。
 
-Node ID 注册后作为身份使用，不能随意更改。证书状态初始可能是 `pending`，完成 enrollment 后会变为 `active`。
+提交后 Dashboard 会立即返回一条只显示一次的安装命令。把命令复制到 B：Linux 在 root shell 执行，Windows 在“以管理员身份运行”的 PowerShell 执行。
 
-### 4.2 配置 Gateway 规格
+### 4.2 创建 Agent
 
-打开 `gw-public` →“规格”，保存下面的最小可用示例。将 `gateway.example.com` 替换成 B 的公网地址；B 必须能在 UDP `4433` 接收连接。
+再次点击“注册节点”，角色选择 `Agent`，填写 A 的平台和架构即可；Agent 会自动生成可用的默认规格。提交后把命令复制到 A 执行。
 
-```json
-{
-  "node_id": "gw-public",
-  "public_endpoints": ["gateway.example.com:4433"],
-  "listeners": [],
-  "labels": {"site": "public"},
-  "capacity": {
-    "max_agents": 128,
-    "max_connections": 4096,
-    "max_services": 4096
-  },
-  "port_pool": {
-    "tcp": [{"min": 28080, "max": 28080}],
-    "udp": [{"min": 28081, "max": 28081}]
-  },
-  "transport": {
-    "alpn": "asterferry-data/2",
-    "max_streams": 1024,
-    "max_frame_bytes": 65536,
-    "max_datagram_bytes": 65536,
-    "handshake_timeout_seconds": 10,
-    "idle_timeout_seconds": 300
-  },
-  "obfuscation": {
-    "mode": "standard",
-    "max_padding_bytes": 0,
-    "handshake_shaping": false
-  },
-  "egress": {
-    "enabled": false,
-    "max_connections": 0
-  }
-}
-```
+安装命令会下载与 Controller 配置版本完全一致的官方发布包，校验 SHA-256，写入 CA 和 bootstrap/cache 私有目录，调用一次性节点 Token 完成证书 enrollment，并创建、启用和启动系统服务：
 
-说明：
+- Linux：`asterferry-gateway.service` 或 `asterferry-agent.service`。
+- Windows：`AsterFerry-gateway` 或 `AsterFerry-agent` Windows 服务。
 
-- `public_endpoints` 是 Agent 连接 B 的 AFDP/2 地址，不是业务服务端口。
-- `listeners` 通常留空；保存 Service 后，Controller 会把 Assignment 的业务绑定下发给 Gateway。
-- `port_pool` 必须覆盖允许自动分配的业务端口。本例固定使用 `28080/tcp` 和 `28081/udp`。
-- 当前协议 ALPN 是 `asterferry-data/2`，不要填写 AFDP/1 的 `/1`。
-- 如果 Dashboard 规格编辑器预填了 `asterferry-data/1`，保存前必须改为 `asterferry-data/2`。
+Token 默认 15 分钟有效，只能用于创建它对应的 Node ID 和角色。命令不要发到公开聊天、工单或日志中；过期或丢失时，在节点详情中重新生成即可。B、A 不需要手工复制 CA、编辑 bootstrap JSON 或执行第二条启动命令。
 
-### 4.3 配置 Agent 规格
+### 4.3 旧版/高级手工 enrollment
 
-打开 `agent-internal` →“规格”，保存：
+仍可使用 `enroll-token create`、`gateway enroll`、`agent enroll` 和 systemd/Windows 服务模板完成手工部署，适合离线镜像、私有发布源或自定义服务账户。手工流程与一键命令使用相同的 15 分钟角色绑定 Token；不要混用 Gateway 和 Agent Token。
 
-```json
-{
-  "node_id": "agent-internal",
-  "gateway_selector": {
-    "match_labels": {"site": "public"}
-  },
-  "proxies": [],
-  "routes": [],
-  "limits": {
-    "max_connections": 4096,
-    "max_streams": 1024,
-    "max_buffer_bytes": 67108864
-  },
-  "egress": {
-    "enabled": false,
-    "max_connections": 0
-  },
-  "logging": {
-    "level": "info",
-    "format": "json"
-  }
-}
-```
-
-`gateway_selector.match_labels` 必须匹配 Gateway 的标签，否则 Agent 没有可用的 Gateway。
-
-## 5. 在 C 生成 enrollment token
-
-Token 是一次性、角色绑定、默认最多 15 分钟有效的 enrollment 凭据。命令在 C 上执行，明文只在命令输出中出现：
-
-```sh
-asterferry enroll-token create \
-  --config ./controller/controller.json \
-  --role gateway
-
-asterferry enroll-token create \
-  --config ./controller/controller.json \
-  --role agent
-```
-
-分别保存两个输出中的 `token:` 值，不能把 Gateway token 用于 Agent。通过安全方式把对应 token 和 `controller/ca/ca.crt` 复制到 B、A；只复制 CA 证书，不复制 CA 私钥。
-
-## 6. 在 B 和 A 上 enrollment 并启动节点
-
-### 6.1 B：Gateway
-
-在 B 创建私有目录，把 C 的 `ca.crt` 放到 `./ca/ca.crt`：
-
-```sh
-mkdir -p ./ca ./state
-./asterferry gateway enroll \
-  --controller controller.example.com:9443 \
-  --server-name controller.example.com \
-  --token '<gateway-token>' \
-  --node-id gw-public \
-  --ca ./ca/ca.crt \
-  --output ./gateway-bootstrap.json \
-  --cache ./state/snapshot.cache
-
-./asterferry gateway run --bootstrap ./gateway-bootstrap.json
-```
-
-Windows PowerShell 示例：
-
-```powershell
-New-Item -ItemType Directory -Force .\ca, .\state | Out-Null
-.\asterferry.exe gateway enroll `
-  --controller controller.example.com:9443 `
-  --server-name controller.example.com `
-  --token '<gateway-token>' `
-  --node-id gw-public `
-  --ca .\ca\ca.crt `
-  --output .\gateway-bootstrap.json `
-  --cache .\state\snapshot.cache
-
-.\asterferry.exe gateway run --bootstrap .\gateway-bootstrap.json
-```
-
-Gateway 会先连接 C 获取快照，然后在 B 上监听 `gateway.example.com:4433` 对应的 UDP 端点和已应用 Assignment 的业务端口。
-
-### 6.2 A：Agent
-
-在 A 创建私有目录，把 C 的 `ca.crt` 放到 `./ca/ca.crt`：
-
-```sh
-mkdir -p ./ca ./state
-./asterferry agent enroll \
-  --controller controller.example.com:9443 \
-  --server-name controller.example.com \
-  --token '<agent-token>' \
-  --node-id agent-internal \
-  --ca ./ca/ca.crt \
-  --output ./agent-bootstrap.json \
-  --cache ./state/snapshot.cache
-
-./asterferry agent run --bootstrap ./agent-bootstrap.json
-```
-
-Agent 运行后会主动连接 C，并在 Controller 生成 Assignment 后主动连接 B 的 AFDP/2 端点。A 不需要对公网开放管理端口。
-
-## 7. 创建第一个 TCP 服务
+## 5. 创建第一个 TCP 服务
 
 先确保 A 上的真实服务已经监听 `127.0.0.1:18080`。例如仅用于测试：
 
@@ -341,13 +210,13 @@ python3 -m http.server 18080 --bind 127.0.0.1
 | Gateway selector JSON | `{"match_labels":{"site":"public"}}` |
 | 启用服务 | 勾选 |
 
-保存后，Controller 会选择匹配且健康的 Gateway。若 Assignment 没有出现，进入“调度”页，对 `agent-internal` 点击“重新调度”。
+保存后，Controller 会自动选择匹配且健康的 Gateway 并生成 Assignment；通常不需要再点“重新调度”。如果 Gateway 尚未上线或端口池暂时没有可用端口，服务会保持待调度状态，资源恢复后 Controller 会自动重试。
 
 `public_port` 填 `0` 表示由 Gateway 的端口池自动分配；本例填 `28080`，因此客户端访问 `B:28080`。
 
 UDP 服务的配置方式相同，只需把协议改为 UDP、端口改为 `28081`，并确保 A 上的 UDP 目标可访问。
 
-## 8. 验证链路
+## 6. 验证链路
 
 在 Dashboard 检查：
 
@@ -380,9 +249,9 @@ Test-NetConnection gateway.example.com -Port 28080
 
 UDP 端口不能用 TCP 检查工具判断是否可用，应结合 Dashboard 的 Assignment/观测状态、节点日志和防火墙抓包验证。
 
-## 9. WSL 与 Windows 宿主机通信
+## 7. WSL 与 Windows 宿主机通信
 
-### 9.1 最简单的本机开发方式
+### 7.1 最简单的本机开发方式
 
 如果 Controller、Gateway、Agent 都在同一个 WSL 实例中运行：
 
@@ -393,7 +262,7 @@ UDP 端口不能用 TCP 检查工具判断是否可用，应结合 Dashboard 的
 
 如果 A、B、C 分别在不同机器或不同网络命名空间，不能使用 `127.0.0.1` 作为跨主机地址，必须使用实际可达的 DNS/IP。
 
-### 9.2 WSL 访问 Windows 宿主机服务
+### 7.2 WSL 访问 Windows 宿主机服务
 
 WSL2 默认 NAT 模式下，Linux 进程访问 Windows 上的服务通常使用宿主机 IP：
 
@@ -417,7 +286,7 @@ networkingMode=mirrored
 wsl --shutdown
 ```
 
-### 9.3 从局域网访问 WSL 中的 TCP 服务
+### 7.3 从局域网访问 WSL 中的 TCP 服务
 
 WSL2 NAT 地址可能在重启后变化。需要从 Windows 宿主机对外发布 TCP 端口时，可以用管理员 PowerShell 创建端口转发：
 
@@ -450,7 +319,7 @@ netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=28080
 
 WSL 网络模式、localhost forwarding 和 `netsh portproxy` 的背景说明见 [Microsoft WSL networking 文档](https://learn.microsoft.com/en-us/windows/wsl/networking)。
 
-## 10. 常见问题
+## 8. 常见问题
 
 ### Dashboard 打不开
 
@@ -462,7 +331,7 @@ WSL 网络模式、localhost forwarding 和 `netsh portproxy` 的背景说明见
 
 - enrollment 使用了 C 的 CA 证书，而不是 B/A 的文件。
 - `--server-name` 与 Controller 证书 SAN 一致。
-- `controller init` 时 `--http-listen`/`--grpc-listen` 使用了稳定的 C 主机名或 IP，而不是只生成 `localhost` 的默认证书。
+- `controller init` 时 `--http-listen`、`--grpc-listen` 和 `--grpc-advertise` 使用了稳定的 C 主机名或 IP；广播地址也会写入证书 SAN。
 - A、B 访问的是 `C_HOST:9443`，且防火墙允许 TCP 9443。
 
 仅用于临时本地实验时可以显式使用 `--insecure`，生产环境不要这样做。
@@ -483,7 +352,7 @@ Gateway 只有在收到并应用有效快照、Assignment 状态为 applied 后�
 
 节点通过 mTLS gRPC 从 Controller 拉取带 generation 和 checksum 的快照。检查 Controller、节点日志和“观测”中的已应用 Generation。不要直接编辑数据库或 bootstrap JSON。
 
-## 11. 备份、升级和停机
+## 9. 备份、升级和停机
 
 升级前先备份完整 Controller 目录：
 
@@ -504,7 +373,7 @@ Controller 暂时不可用时，节点会继续使用加密的 last-known-good �
 
 更多 systemd、Docker Compose 和 Kubernetes 部署细节见 [`deploy/README.md`](../deploy/README.md)。
 
-## 12. 完成清单
+## 10. 完成清单
 
 - [ ] C 的 `8443/tcp` 和 `9443/tcp` 已监听并可达。
 - [ ] Dashboard 可以登录，Gateway 和 Agent 已注册。

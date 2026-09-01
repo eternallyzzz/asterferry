@@ -26,16 +26,27 @@ the copy-and-run guides:
 - [End-to-end quick start in English](docs/quickstart.en.md)
 - [中文端到端快速开始](docs/quickstart.zh-CN.md)
 
-Initialize the Controller. The generated Admin password is printed once when
-no password is supplied:
+Initialize the Controller. Set `--grpc-advertise` to the address that Gateway
+and Agent hosts can reach, and set `--release-version` to an existing release
+asset version. The generated Admin password is printed once when no password
+is supplied:
 
 ```powershell
-asterferry controller init --dir ./controller
+asterferry controller init --dir ./controller `
+  --grpc-advertise controller.example.com:9443 `
+  --release-version 1.0.0
 asterferry controller run --config ./controller/controller.json
 ```
 
-Register a node in the Controller, create a short-lived role-bound token, and
-enroll its bootstrap identity:
+Then open the Dashboard at `/dashboard/`. On the Nodes page choose Gateway or
+Agent and the target platform. For a Gateway, enter its public AFDP endpoint
+and TCP/UDP port pools. The Controller returns one one-time Linux or Windows
+installer command; run it once on B or A as Administrator/root. It downloads
+and verifies the matching release, enrolls the node and starts its system
+service. After both nodes are online, create services in the Dashboard; the
+Controller schedules them automatically.
+
+The manual enrollment path remains available for offline or custom images:
 
 ```powershell
 asterferry enroll-token create --config ./controller/controller.json --role gateway

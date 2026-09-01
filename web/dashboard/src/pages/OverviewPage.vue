@@ -89,7 +89,7 @@ usePolling(load);
               <StatusPill :tone="certificateTone(node.certificate_state)">{{ node.certificate_state }}</StatusPill>
             </div>
           </div>
-          <EmptyState v-else title="尚未注册节点" description="在节点页注册第一个 Gateway 或 Agent，然后签发 enrollment token 完成接入。" />
+          <EmptyState v-else title="尚未注册节点" description="在节点页注册第一个 Gateway 或 Agent，Dashboard 会生成一条安装注册命令。" />
         </PanelCard>
 
         <PanelCard title="最近活动">

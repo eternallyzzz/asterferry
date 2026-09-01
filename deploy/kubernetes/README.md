@@ -23,9 +23,12 @@ deployment policy. Controller HA is outside this release.
 
 ## Gateway and Agent nodes
 
-Register nodes and create role-bound enrollment tokens in the Controller. Put
-the resulting bootstrap JSON in a Secret whose key is `bootstrap.json`, then
-install one node release per node:
+For ordinary hosts, the Dashboard one-click Node flow is recommended: it
+returns a short-lived node-bound installer command for the selected platform.
+Kubernetes deployments can keep using the chart-native path below. Register
+nodes and create role-bound enrollment tokens in the Controller, then put the
+resulting bootstrap JSON in a Secret whose key is `bootstrap.json` and install
+one node release per node:
 
 ```sh
 helm upgrade --install gw-east ./deploy/helm/asterferry-node \

@@ -9,7 +9,11 @@ import (
 // state remains in SQLite; consumers only use these node IDs to limit the
 // next reconciliation pass.
 type ResourceChange struct {
-	NodeIDs []string
+	NodeIDs         []string
+	// PendingServices asks the reconciliation loop to retry services that do
+	// not currently have an assignment. It is intentionally separate from
+	// NodeIDs because that pass scans every Agent.
+	PendingServices bool
 }
 
 type resourceChangeSubscription struct {
@@ -41,6 +45,18 @@ func (s *Store) SubscribeResourceChanges() (<-chan ResourceChange, func()) {
 }
 
 func (s *Store) notifyResourceChanges(nodeIDs ...string) {
+	s.notifyResourceChangesWithOptions(false, nodeIDs...)
+}
+
+// notifyPendingServiceChanges marks a change that may make an otherwise
+// unassigned service placeable, such as a Gateway becoming available or its
+// port pool changing. The scheduler uses this bit to run the broad pending
+// service pass; ordinary heartbeats must not trigger that O(N) scan.
+func (s *Store) notifyPendingServiceChanges(nodeIDs ...string) {
+	s.notifyResourceChangesWithOptions(true, nodeIDs...)
+}
+
+func (s *Store) notifyResourceChangesWithOptions(pendingServices bool, nodeIDs ...string) {
 	if len(nodeIDs) == 0 {
 		return
 	}
@@ -62,7 +78,10 @@ func (s *Store) notifyResourceChanges(nodeIDs ...string) {
 	s.changeMu.Lock()
 	defer s.changeMu.Unlock()
 	for _, sub := range s.changeSubs {
-		change := ResourceChange{NodeIDs: append([]string(nil), ids...)}
+		change := ResourceChange{
+			NodeIDs:         append([]string(nil), ids...),
+			PendingServices: pendingServices,
+		}
 		select {
 		case sub.ch <- change:
 		default:
@@ -81,7 +100,10 @@ func (s *Store) notifyResourceChanges(nodeIDs ...string) {
 					coalesced = append(coalesced, nodeID)
 				}
 				select {
-				case sub.ch <- ResourceChange{NodeIDs: coalesced}:
+				case sub.ch <- ResourceChange{
+					NodeIDs:         coalesced,
+					PendingServices: pending.PendingServices || pendingServices,
+				}:
 				default:
 				}
 			default:

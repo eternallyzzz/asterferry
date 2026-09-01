@@ -142,7 +142,7 @@ async function confirmDelete() {
     <PageHeader
       eyebrow="Service Catalog"
       title="服务"
-      description="创建 TCP/UDP reverse 服务；public_port 为 0 时由 Gateway 端口池自动分配。"
+      description="创建 TCP/UDP reverse 服务；Controller 会自动选择 Gateway，public_port 为 0 时由端口池分配。"
     >
       <template #actions>
         <button v-if="session.canOperate.value" type="button" class="af-button primary" :disabled="!agentNodes.length" @click="openCreate">创建服务</button>

@@ -134,6 +134,25 @@ components:
         revision: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    NodeBootstrapRequest:
+      type: object
+      required: [platform, arch]
+      properties:
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        gateway_spec: { $ref: '#/components/schemas/GatewaySpec' }
+        agent_spec: { $ref: '#/components/schemas/AgentSpec' }
+    NodeBootstrapResponse:
+      type: object
+      required: [node_id, role, platform, arch, version, expires_at, command]
+      properties:
+        node_id: { type: string }
+        role: { type: string, enum: [gateway, agent] }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+        expires_at: { type: string, format: date-time }
+        command: { type: string }
     EgressPolicy:
       type: object
       description: Node-scoped outbound policy. Port ranges use 443 or 8000-8080 syntax.
@@ -207,6 +226,25 @@ components:
       required: [assignments]
       properties:
         assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+    NodeBootstrapRequest:
+      type: object
+      required: [platform, arch]
+      properties:
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        gateway_spec: { $ref: '#/components/schemas/GatewaySpec' }
+        agent_spec: { $ref: '#/components/schemas/AgentSpec' }
+    NodeBootstrapResponse:
+      type: object
+      required: [node_id, role, platform, arch, version, expires_at, command]
+      properties:
+        node_id: { type: string }
+        role: { type: string, enum: [gateway, agent] }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+        expires_at: { type: string, format: date-time }
+        command: { type: string }
     SecretAlreadyCreated:
       type: object
       required: [error, token_recoverable]
@@ -235,6 +273,7 @@ paths:
   /me: { get: { responses: { "200": { description: Current user } } } }
   /nodes: { get: { responses: { "200": { description: Nodes } } }, post: { responses: { "201": { description: Created }, "409": { description: Conflict } } } }
   /nodes/{nodeId}: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Node } } }, patch: { responses: { "200": { description: Updated }, "409": { description: Conflict } } }, delete: { responses: { "204": { description: Deleted } } } }
+  /nodes/{nodeId}/bootstrap: { parameters: [{ $ref: '#/components/parameters/NodeId' }], post: { requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapRequest' } } } }, responses: { "201": { description: One-time platform installer command, content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } } }, "409": { description: Token already created }, "503": { description: Bootstrap configuration unavailable } } } }
   /nodes/{nodeId}/snapshot: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Desired snapshot } } } }
   /nodes/{nodeId}/desired: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Desired snapshot } } } }
   /nodes/{nodeId}/observed: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Observed state } } } }

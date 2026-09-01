@@ -51,3 +51,24 @@ func TestResourceChangeNotificationCoalescesIDsWithoutDroppingWrites(t *testing.
 		t.Fatalf("coalesced resource change IDs = %#v", change.NodeIDs)
 	}
 }
+
+func TestResourceChangeNotificationPreservesPendingServiceHint(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	changes, unsubscribe := store.SubscribeResourceChanges()
+	defer unsubscribe()
+	store.notifyResourceChanges("agent")
+	store.notifyPendingServiceChanges("gateway")
+
+	change := <-changes
+	if !change.PendingServices {
+		t.Fatal("coalesced resource change lost pending-service hint")
+	}
+	if len(change.NodeIDs) != 2 || change.NodeIDs[0] != "agent" || change.NodeIDs[1] != "gateway" {
+		t.Fatalf("coalesced resource change IDs = %#v", change.NodeIDs)
+	}
+}

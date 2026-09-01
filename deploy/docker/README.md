@@ -10,7 +10,9 @@ YAML business configuration or expose a management API.
 Build the image and initialize the Controller once on the host:
 
 ```powershell
-asterferry controller init --dir ./controller
+asterferry controller init --dir ./controller `
+  --grpc-advertise controller.example.com:9443 `
+  --release-version 1.0.0
 docker compose -f deploy/docker/compose.yaml build
 ```
 

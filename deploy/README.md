@@ -12,7 +12,9 @@ For a copy-and-run three-server walkthrough in both languages, see the
 ## Controller
 
 ```sh
-asterferry controller init --dir /var/lib/asterferry
+asterferry controller init --dir /var/lib/asterferry \
+  --grpc-advertise controller.example.com:9443 \
+  --release-version 1.0.0
 asterferry controller run --config /var/lib/asterferry/controller.json
 ```
 
@@ -43,9 +45,15 @@ last-known-good snapshot while it is unavailable.
 
 ## Node enrollment
 
-Register a Node (role and labels) through the Controller API or Dashboard,
-create a role-bound enrollment token, and use it once to create bootstrap
-material:
+The recommended path is Dashboard → **Nodes** → **Register node**. Choose the
+role and target platform. For a Gateway, enter its public AFDP endpoint and
+TCP/UDP port pools. The Controller returns one short-lived, node-bound
+installer command; run it once on B or A as root/Administrator. The installer
+downloads and verifies the matching release, enrolls the node, creates the
+system service and starts it. Once both nodes are online, create services in
+the Dashboard; resource changes trigger scheduling automatically.
+
+For offline images or custom service accounts, the manual path remains:
 
 ```sh
 asterferry enroll-token create --config /var/lib/asterferry/controller.json --role gateway

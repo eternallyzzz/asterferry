@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,9 @@ import (
 type Config struct {
 	HTTPListen      string `json:"http_listen"`
 	GRPCListen      string `json:"grpc_listen"`
+	GRPCAdvertise   string `json:"grpc_advertise,omitempty"`
+	ReleaseBaseURL  string `json:"release_base_url,omitempty"`
+	ReleaseVersion  string `json:"release_version,omitempty"`
 	DatabasePath    string `json:"database_path"`
 	CAKeyPath       string `json:"ca_key_path"`
 	CACertPath      string `json:"ca_cert_path"`
@@ -43,6 +47,7 @@ func DefaultConfig(dir string) Config {
 	return Config{
 		HTTPListen:                ":8443",
 		GRPCListen:                ":9443",
+		ReleaseBaseURL:            "https://github.com/eternallyzzz/asterferry/releases/download",
 		DatabasePath:              filepath.Join(dir, "controller.db"),
 		CAKeyPath:                 filepath.Join(dir, "ca", "ca.key"),
 		CACertPath:                filepath.Join(dir, "ca", "ca.crt"),
@@ -62,6 +67,20 @@ func (c Config) Validate() error {
 	}
 	if err := validateListenAddress(c.GRPCListen, "grpc_listen"); err != nil {
 		return err
+	}
+	if strings.TrimSpace(c.GRPCAdvertise) != "" {
+		if err := validateAdvertisedAddress(c.GRPCAdvertise, "grpc_advertise"); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(c.ReleaseBaseURL) != "" {
+		parsed, err := url.Parse(strings.TrimSpace(c.ReleaseBaseURL))
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("controller release_base_url must be an absolute http(s) URL without query or fragment")
+		}
+	}
+	if strings.TrimSpace(c.ReleaseVersion) != "" && !validReleaseVersion(c.ReleaseVersion) {
+		return errors.New("controller release_version must be a semantic version such as 1.0.0")
 	}
 	for field, value := range map[string]string{"database_path": c.DatabasePath, "ca_key_path": c.CAKeyPath, "ca_cert_path": c.CACertPath, "tls_cert_path": c.TLSCertPath, "tls_key_path": c.TLSKeyPath, "master_key_path": c.MasterKeyPath} {
 		if strings.TrimSpace(value) == "" {
@@ -93,6 +112,9 @@ func LoadConfig(path string) (Config, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(b, &fields); err == nil {
 		defaults := DefaultConfig(filepath.Dir(path))
+		if _, ok := fields["release_base_url"]; !ok {
+			config.ReleaseBaseURL = defaults.ReleaseBaseURL
+		}
 		if _, ok := fields["idempotency_retention_hours"]; !ok {
 			config.IdempotencyRetentionHours = defaults.IdempotencyRetentionHours
 		}
@@ -138,6 +160,25 @@ func validateListenAddress(value, field string) error {
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 0 || port > 65535 {
 		return fmt.Errorf("controller %s port must be between 0 and 65535", field)
+	}
+	return nil
+}
+
+func validateAdvertisedAddress(value, field string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("controller %s is required", field)
+	}
+	host, portText, err := net.SplitHostPort(value)
+	if err != nil || strings.TrimSpace(host) == "" {
+		return fmt.Errorf("controller %s must be host:port", field)
+	}
+	if parsed := net.ParseIP(strings.Trim(host, "[]")); parsed != nil && parsed.IsUnspecified() {
+		return fmt.Errorf("controller %s must identify a reachable host, not an unspecified address", field)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("controller %s port must be between 1 and 65535", field)
 	}
 	return nil
 }
