@@ -8,7 +8,7 @@ require (
 	github.com/quic-go/quic-go v0.61.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.54.0
-	google.golang.org/grpc v1.75.0
+	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.39.1
 )
@@ -32,7 +32,7 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	modernc.org/libc v1.66.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

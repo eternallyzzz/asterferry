@@ -222,12 +222,18 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 		return User{}, &RevisionConflictError{Resource: "user", Expected: options.IfMatch, Actual: user.Revision}
 	}
 	now := time.Now().UTC()
+	passwordChangedAt := now
+	if update.Password != nil && !passwordChangedAt.After(user.PasswordChangedAt) {
+		// PasswordChangedAt is the session revocation marker. Keep it strictly
+		// monotonic even on platforms whose wall clock has coarse resolution.
+		passwordChangedAt = user.PasswordChangedAt.Add(time.Nanosecond)
+	}
 	if update.Password != nil {
 		hash, err = HashPassword(*update.Password)
 		if err != nil {
 			return User{}, err
 		}
-		user.PasswordChangedAt = now
+		user.PasswordChangedAt = passwordChangedAt
 	}
 	newRevision := user.Revision + 1
 	if _, err := tx.ExecContext(ctx, `UPDATE users SET username=?,password_hash=?,password_changed_at=?,role=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, user.Username, hash, user.PasswordChangedAt.Format(time.RFC3339Nano), user.Role, boolInt(user.Enabled), newRevision, now.Format(time.RFC3339Nano), id, user.Revision); err != nil {
