@@ -74,3 +74,8 @@ type ObservedRecord struct {
 	Document   []byte
 	UpdatedAt  time.Time
 }
+
+// ErrSecretAlreadyCreated means an idempotent retry found a one-time secret
+// that was already persisted. The metadata can be replayed safely, but the
+// plaintext was deliberately never stored and cannot be recovered.
+var ErrSecretAlreadyCreated = errors.New("one-time token was already created and its plaintext cannot be recovered")

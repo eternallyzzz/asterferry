@@ -175,6 +175,19 @@ func (s *Store) GetSnapshot(ctx context.Context, nodeID string) (domain.DesiredS
 }
 
 func (s *Store) SaveObserved(ctx context.Context, record ObservedRecord) error {
+	return s.saveObserved(ctx, record, false)
+}
+
+// SaveObservedHeartbeat accepts a lower applied generation because a
+// heartbeat is a liveness report, not an authoritative monotonic write. A
+// node can legitimately restart from an older last-known-good cache while it
+// is unable to apply the current desired generation; tearing down the
+// control stream in that state only hides the degraded condition.
+func (s *Store) SaveObservedHeartbeat(ctx context.Context, record ObservedRecord) error {
+	return s.saveObserved(ctx, record, true)
+}
+
+func (s *Store) saveObserved(ctx context.Context, record ObservedRecord, allowGenerationRollback bool) error {
 	if record.NodeID == "" || len(record.Document) == 0 {
 		return errors.New("observed state node and document are required")
 	}
@@ -224,7 +237,7 @@ func (s *Store) SaveObserved(ctx context.Context, record ObservedRecord) error {
 	}
 	var current uint64
 	if err := tx.QueryRowContext(ctx, `SELECT generation FROM observed_states WHERE node_id=?`, record.NodeID).Scan(&current); err == nil {
-		if record.Generation < current {
+		if record.Generation < current && !allowGenerationRollback {
 			return &RevisionConflictError{Resource: "observed_state", Expected: uint64ToRevision(current), Actual: uint64ToRevision(record.Generation)}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -369,10 +382,10 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	if err != nil {
 		return err
 	}
-	// A Gateway endpoint is part of the assignment's dial target. Keep every
-	// assignment on this Gateway aligned with the newly committed endpoint in
-	// the same transaction, and advance its shared generation so the Agent
-	// tears down the old QUIC session and reconnects to the new address.
+	// A Gateway endpoint and its obfuscation policy are part of the assignment's
+	// data-plane dial contract. Keep every assignment on this Gateway aligned
+	// with the newly committed values in the same transaction, and advance its
+	// shared generation so both peers reconnect with one coherent policy.
 	if table == "gateway_specs" {
 		gateway, ok := value.(domain.GatewaySpec)
 		if !ok {
@@ -391,10 +404,11 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
-// updateAssignmentEndpointsTx keeps the derived assignment dial target
-// consistent with a GatewaySpec edit. It intentionally runs after the spec
-// row is written but before the transaction commits, so an endpoint change
-// can never be observed without its corresponding assignment generation.
+// updateAssignmentEndpointsTx keeps the derived assignment dial target and
+// obfuscation policy consistent with a GatewaySpec edit. It intentionally runs
+// after the spec row is written but before the transaction commits, so a
+// Gateway change can never be observed without its corresponding assignment
+// generation.
 func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.GatewaySpec) error {
 	rows, err := tx.QueryContext(ctx, `SELECT id,agent_id,document_json,revision,generation FROM assignments WHERE gateway_id=? ORDER BY id`, spec.NodeID)
 	if err != nil {
@@ -423,13 +437,23 @@ func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.Ga
 		if _, exists := endpointSet[endpoint]; !exists {
 			endpoint = spec.PublicEndpoints[0]
 		}
-		if endpoint == assignment.PublicEndpoint {
+		endpointChanged := endpoint != assignment.PublicEndpoint
+		obfuscationChanged := !sameObfuscationPolicy(assignment.Obfuscation, spec.Obfuscation)
+		if !endpointChanged && !obfuscationChanged {
 			continue
 		}
 		if assignment.Generation == math.MaxUint64 {
 			return errors.New("assignment generation is exhausted")
 		}
 		assignment.PublicEndpoint = endpoint
+		if obfuscationChanged {
+			// GatewaySpec is already protected by PutGatewaySpec before this
+			// transaction reaches the derived update. Copy only the protected
+			// representation so assignment rows never acquire plaintext keys.
+			assignment.Obfuscation = spec.Obfuscation
+			assignment.Obfuscation.Key = nil
+			assignment.Obfuscation.PreviousKey = nil
+		}
 		assignment.Generation++
 		// Endpoint edits invalidate acknowledgements, but they must not
 		// resurrect a placement that was already fail-closed because one of its
@@ -451,7 +475,19 @@ func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.Ga
 		if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_acks WHERE assignment_id=?`, assignment.ID); err != nil {
 			return err
 		}
-		if err := insertAudit(ctx, tx, "system", "derived_endpoint", "assignment", assignment.ID, assignment.Revision, map[string]string{"gateway_id": spec.NodeID, "generation": fmt.Sprint(assignment.Generation)}); err != nil {
+		attributes := map[string]string{"gateway_id": spec.NodeID, "generation": fmt.Sprint(assignment.Generation)}
+		if endpointChanged {
+			attributes["public_endpoint"] = assignment.PublicEndpoint
+		}
+		if obfuscationChanged {
+			attributes["obfuscation_key_id"] = assignment.Obfuscation.KeyID
+			attributes["obfuscation_previous_key_id"] = assignment.Obfuscation.PreviousKeyID
+		}
+		action := "derived_endpoint"
+		if obfuscationChanged {
+			action = "derived_gateway"
+		}
+		if err := insertAudit(ctx, tx, "system", action, "assignment", assignment.ID, assignment.Revision, attributes); err != nil {
 			return err
 		}
 	}

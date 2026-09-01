@@ -204,7 +204,17 @@ paths:
       tags: [operations]
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      responses: { '202': { description: Assignment scheduled }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses:
+        '202':
+          description: Assignments scheduled for all enabled services; existing disjoint assignments are preserved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assignments]
+                properties:
+                  assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+        '409': { $ref: '#/components/responses/Conflict' }
   /agents/{nodeId}/proxies:
     get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ $ref: '#/components/parameters/NodeId' }], responses: { '200': { description: Proxy entrances } } }
     post:
@@ -298,7 +308,7 @@ paths:
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentTokenRequest' } } } }
-      responses: { '201': { description: Plaintext is returned once } }
+      responses: { '201': { description: Plaintext is returned once }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
   /enrollment-tokens/{tokenId}:
     delete:
       tags: [operations]
@@ -320,7 +330,7 @@ paths:
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/APITokenRequest' } } } }
-      responses: { '201': { description: Plaintext token returned once } }
+      responses: { '201': { description: Plaintext token returned once }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
   /users/{userId}:
     parameters: [{ name: userId, in: path, required: true, schema: { type: string } }]
     get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: User } } }
@@ -398,4 +408,12 @@ components:
     Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
     EnrollmentTokenRequest: { type: object, required: [role], properties: { role: { type: string, enum: [gateway, agent] }, ttl_seconds: { type: integer, minimum: 1, maximum: 900 } } }
     APITokenRequest: { type: object, required: [name], properties: { name: { type: string }, expires_at: { type: string, format: date-time } } }
+    SecretAlreadyCreated:
+      type: object
+      required: [error, token_recoverable]
+      properties:
+        error: { type: object, properties: { code: { type: string, enum: [already_created] }, message: { type: string } } }
+        token_recoverable: { type: boolean, enum: [false] }
+        metadata: { type: object }
+        token_metadata: { type: object }
     ErrorResponse: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, path: { type: string }, retryable: { type: boolean } } } } }

@@ -202,6 +202,19 @@ components:
         public_endpoint: { type: string }
         revision: { type: integer, format: int64 }
         updated_at: { type: string, format: date-time }
+    AssignmentList:
+      type: object
+      required: [assignments]
+      properties:
+        assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+    SecretAlreadyCreated:
+      type: object
+      required: [error, token_recoverable]
+      properties:
+        error: { type: object, properties: { code: { type: string, enum: [already_created] }, message: { type: string } } }
+        token_recoverable: { type: boolean, enum: [false] }
+        metadata: { type: object }
+        token_metadata: { type: object }
     ErrorResponse:
       type: object
       properties:
@@ -232,7 +245,7 @@ paths:
   /agents: { get: { responses: { "200": { description: Agents } } }, post: { responses: { "201": { description: Created } } } }
   /agents/{nodeId}: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Agent } } }, put: { responses: { "200": { description: Updated } } }, delete: { responses: { "204": { description: Deleted } } } }
   /agents/{nodeId}/egress: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Agent egress policy } } }, put: { responses: { "200": { description: Updated policy }, "409": { description: Conflict } } }, patch: { responses: { "200": { description: Updated policy }, "409": { description: Conflict } } } }
-  /agents/{nodeId}/actions/schedule: { parameters: [{ $ref: '#/components/parameters/NodeId' }], post: { responses: { "202": { description: Scheduled }, "409": { description: Conflict } } } }
+  /agents/{nodeId}/actions/schedule: { parameters: [{ $ref: '#/components/parameters/NodeId' }], post: { responses: { "202": { description: Scheduled assignments, content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentList' } } } }, "409": { description: Conflict } } } }
   /agents/{nodeId}/proxies: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Proxy entrances } } }, post: { responses: { "201": { description: Created } } } }
   /agents/{nodeId}/proxies/{proxyId}: { parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/ProxyId' }], get: { responses: { "200": { description: Proxy entrance } } }, put: { responses: { "200": { description: Updated } } }, delete: { responses: { "204": { description: Deleted } } } }
   /agents/{nodeId}/routes: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Route rules } } }, post: { responses: { "201": { description: Created } } } }
@@ -241,11 +254,11 @@ paths:
   /services/{serviceId}: { parameters: [{ $ref: '#/components/parameters/ServiceId' }], get: { responses: { "200": { description: Service } } }, patch: { responses: { "200": { description: Updated } } }, delete: { responses: { "204": { description: Deleted } } } }
   /assignments: { get: { responses: { "200": { description: Assignments } } }, post: { responses: { "201": { description: Created } } } }
   /assignments/{assignmentId}: { parameters: [{ $ref: '#/components/parameters/AssignmentId' }], get: { responses: { "200": { description: Assignment } } }, put: { responses: { "200": { description: Updated } } }, delete: { responses: { "204": { description: Deleted } } } }
-  /enrollment-tokens: { get: { responses: { "200": { description: Tokens } } }, post: { responses: { "201": { description: Created } } } }
+  /enrollment-tokens: { get: { responses: { "200": { description: Tokens } } }, post: { responses: { "201": { description: Created }, "409": { description: Already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } } } }
   /enrollment-tokens/{tokenId}: { parameters: [{ $ref: '#/components/parameters/TokenId' }], delete: { responses: { "204": { description: Revoked } } } }
   /users: { get: { responses: { "200": { description: Users } } }, post: { responses: { "201": { description: Created } } } }
   /users/{userId}: { parameters: [{ $ref: '#/components/parameters/UserId' }], get: { responses: { "200": { description: User } } }, patch: { responses: { "200": { description: Updated } } }, delete: { responses: { "204": { description: Deleted } } } }
-  /users/{userId}/tokens: { parameters: [{ $ref: '#/components/parameters/UserId' }], get: { responses: { "200": { description: Token metadata } } }, post: { responses: { "201": { description: Created } } } }
+  /users/{userId}/tokens: { parameters: [{ $ref: '#/components/parameters/UserId' }], get: { responses: { "200": { description: Token metadata } } }, post: { responses: { "201": { description: Created }, "409": { description: Already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } } } }
   /users/{userId}/tokens/{tokenId}: { parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/TokenId' }], delete: { responses: { "204": { description: Revoked } } } }
   /audit: { get: { responses: { "200": { description: Audit events } } } }
   /events: { get: { responses: { "200": { description: Events } } } }

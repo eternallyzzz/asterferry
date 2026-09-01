@@ -16,11 +16,11 @@ import (
 
 func idempotencyHit(ctx context.Context, tx *sql.Tx, key string, request any) (bool, error) {
 	key = strings.TrimSpace(key)
+	if err := validateIdempotencyKey(key); err != nil {
+		return false, err
+	}
 	if key == "" {
 		return false, nil
-	}
-	if len(key) > 128 || strings.ContainsAny(key, "\x00\r\n") {
-		return false, errors.New("idempotency key is invalid")
 	}
 	hash, err := requestHash(request)
 	if err != nil {
@@ -42,11 +42,11 @@ func idempotencyHit(ctx context.Context, tx *sql.Tx, key string, request any) (b
 
 func recordIdempotency(ctx context.Context, tx *sql.Tx, key string, request, response any) error {
 	key = strings.TrimSpace(key)
+	if err := validateIdempotencyKey(key); err != nil {
+		return err
+	}
 	if key == "" {
 		return nil
-	}
-	if len(key) > 128 || strings.ContainsAny(key, "\x00\r\n") {
-		return errors.New("idempotency key is invalid")
 	}
 	hash, err := requestHash(request)
 	if err != nil {
@@ -58,6 +58,13 @@ func recordIdempotency(ctx context.Context, tx *sql.Tx, key string, request, res
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_keys(key,request_hash,response_json,created_at) VALUES(?,?,?,?)`, key, hash, encoded, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+func validateIdempotencyKey(key string) error {
+	if len(key) > 128 || strings.ContainsAny(key, "\x00\r\n") {
+		return errors.New("idempotency key is invalid")
+	}
+	return nil
 }
 
 func requestHash(value any) (string, error) {
@@ -140,6 +147,26 @@ func obfuscationKeyID(key []byte) string {
 
 func obfuscationRequestPolicy(policy domain.ObfuscationPolicy) domain.ObfuscationPolicy {
 	return domain.ObfuscationPolicy{Mode: policy.Mode, KeyID: policy.KeyID, PreviousKeyID: policy.PreviousKeyID, MaxPaddingBytes: policy.MaxPaddingBytes, HandshakeShaping: policy.HandshakeShaping}
+}
+
+// sameObfuscationPolicy compares the non-secret policy identity used by both
+// the Gateway listener and the Agent dialer. Ciphertexts are intentionally
+// excluded: re-encrypting the same key does not change data-plane behavior,
+// while a key/policy identity change must produce a new assignment generation.
+func sameObfuscationPolicy(left, right domain.ObfuscationPolicy) bool {
+	leftMode := left.Mode
+	if leftMode == "" {
+		leftMode = "standard"
+	}
+	rightMode := right.Mode
+	if rightMode == "" {
+		rightMode = "standard"
+	}
+	return leftMode == rightMode &&
+		left.KeyID == right.KeyID &&
+		left.PreviousKeyID == right.PreviousKeyID &&
+		left.MaxPaddingBytes == right.MaxPaddingBytes &&
+		left.HandshakeShaping == right.HandshakeShaping
 }
 
 func snapshotForIdempotency(snapshot domain.DesiredSnapshot) domain.DesiredSnapshot {

@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -31,46 +33,190 @@ type ScheduleRequest struct {
 	Generation uint64
 }
 
+type scheduleTarget struct {
+	existing *domain.Assignment
+	services []domain.Service
+}
+
 // ScheduleAgent selects a Gateway from the current SQLite state and commits
 // the resulting assignment with the repository's transactional port checks.
 // It is intentionally a convenience around Schedule; callers that already
 // have a consistent candidate view can use the pure function directly.
-func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options WriteOptions) (assignment domain.Assignment, returnErr error) {
+func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options WriteOptions) (assignments []domain.Assignment, returnErr error) {
 	finishMetrics := s.metrics.startSchedule()
 	defer func() { finishMetrics(returnErr) }()
+	if err := validateIdempotencyKey(strings.TrimSpace(options.IdempotencyKey)); err != nil {
+		return nil, err
+	}
 	agent, err := s.GetNode(ctx, agentID)
 	if err != nil {
-		return domain.Assignment{}, err
+		return nil, err
 	}
 	if agent.Role != domain.RoleAgent || !agent.Enabled {
-		return domain.Assignment{}, errors.New("agent is disabled or has the wrong role")
+		return nil, errors.New("agent is disabled or has the wrong role")
 	}
 	agentSpec, err := s.GetAgentSpec(ctx, agentID)
 	if err != nil {
-		return domain.Assignment{}, err
+		return nil, err
 	}
 	services, err := s.ListServices(ctx, agentID)
 	if err != nil {
-		return domain.Assignment{}, err
+		return nil, err
 	}
 	// Disabled services remain in the authoritative collection for audit and
 	// future re-enable, but they must not be admitted into a live assignment.
 	services = filterEnabledServices(services)
 	if len(services) == 0 {
-		return domain.Assignment{}, errors.New("agent has no services to schedule")
+		return nil, errors.New("agent has no services to schedule")
 	}
-	assignments, err := s.ListAssignments(ctx, "", agentID)
+	currentAssignments, err := s.ListAssignments(ctx, "", agentID)
+	if err != nil {
+		return nil, err
+	}
+	serviceByID := make(map[string]domain.Service, len(services))
+	for _, service := range services {
+		serviceByID[service.ID] = service
+	}
+	assignedServices := make(map[string]struct{}, len(services))
+	targets := make([]scheduleTarget, 0, len(currentAssignments)+1)
+	for index := range currentAssignments {
+		current := currentAssignments[index]
+		candidateServices := servicesForAssignment(current, serviceByID)
+		if len(candidateServices) == 0 {
+			continue
+		}
+		for _, service := range candidateServices {
+			assignedServices[service.ID] = struct{}{}
+		}
+		existing := current
+		targets = append(targets, scheduleTarget{existing: &existing, services: candidateServices})
+	}
+	unassigned := make([]domain.Service, 0, len(services))
+	for _, service := range services {
+		if _, assigned := assignedServices[service.ID]; !assigned {
+			unassigned = append(unassigned, service)
+		}
+	}
+	if len(unassigned) > 0 {
+		targets = append(targets, scheduleTarget{services: unassigned})
+	}
+	for _, target := range targets {
+		if _, err := s.scheduleAgentAssignment(ctx, agent, agentSpec, target.services, target.existing, options); err != nil {
+			return nil, err
+		}
+	}
+	return s.ListAssignments(ctx, "", agentID)
+}
+
+func servicesForAssignment(assignment domain.Assignment, serviceByID map[string]domain.Service) []domain.Service {
+	services := make([]domain.Service, 0, len(assignment.ServiceIDs))
+	for _, serviceID := range assignment.ServiceIDs {
+		if service, ok := serviceByID[serviceID]; ok {
+			services = append(services, service)
+		}
+	}
+	sort.SliceStable(services, func(i, j int) bool { return services[i].ID < services[j].ID })
+	return services
+}
+
+func (s *Store) scheduleAgentAssignment(ctx context.Context, agent domain.Node, agentSpec domain.AgentSpec, services []domain.Service, existing *domain.Assignment, options WriteOptions) (domain.Assignment, error) {
+	candidates, err := s.gatewayCandidates(ctx)
 	if err != nil {
 		return domain.Assignment{}, err
 	}
-	var existing *domain.Assignment
-	if len(assignments) > 0 {
-		candidate := assignments[0]
-		existing = &candidate
+	generation := uint64(1)
+	if previous, previousErr := s.LoadSnapshot(ctx, agent.ID); previousErr == nil {
+		if previous.Generation == ^uint64(0) {
+			return domain.Assignment{}, errors.New("desired snapshot generation is exhausted")
+		}
+		generation = previous.Generation + 1
+	} else if !errors.Is(previousErr, sql.ErrNoRows) {
+		return domain.Assignment{}, previousErr
 	}
+	if existing != nil && existing.Generation >= generation {
+		if existing.Generation == ^uint64(0) {
+			return domain.Assignment{}, errors.New("assignment generation is exhausted")
+		}
+		generation = existing.Generation + 1
+	}
+	assignment, err := Schedule(ScheduleRequest{Agent: agent, AgentSpec: agentSpec, Services: services, Existing: existing, Generation: generation}, candidates)
+	if err != nil {
+		return domain.Assignment{}, err
+	}
+	// Scheduling an already healthy, unchanged placement is a read-like
+	// operation. Compare the key identity as well as the network placement so
+	// a manual schedule can repair a missed Gateway key-rotation propagation.
+	if existing != nil && existing.State != domain.AssignmentDegraded && existing.State != domain.AssignmentDraining && sameAssignmentPlacement(*existing, assignment) {
+		if _, err := s.EnsureDesiredSnapshot(ctx, existing.GatewayID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return domain.Assignment{}, err
+		}
+		if _, err := s.EnsureDesiredSnapshot(ctx, existing.AgentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return domain.Assignment{}, err
+		}
+		return *existing, nil
+	}
+	writeOptions := options
+	if existing != nil {
+		// Keep the assignment identity stable across a Gateway failover. The
+		// repository can then update the old row and release its bindings in one
+		// transaction instead of deleting the old placement first.
+		assignment.ID = existing.ID
+		writeOptions.IfMatch = existing.Revision
+	} else {
+		writeOptions.IfMatch = 0
+		assignment.ID, err = s.uniqueGeneratedAssignmentID(ctx, assignment)
+		if err != nil {
+			return domain.Assignment{}, err
+		}
+	}
+	writeOptions = scopedScheduleWriteOptions(writeOptions, assignment.ID)
+	if err := s.PutAssignment(ctx, assignment, writeOptions); err != nil {
+		return domain.Assignment{}, err
+	}
+	if existing != nil && existing.GatewayID != assignment.GatewayID {
+		// The assignment row is replaced atomically, but the old Gateway's
+		// node-scoped snapshot also needs to release its binding.
+		if _, err := s.EnsureDesiredSnapshot(ctx, existing.GatewayID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return domain.Assignment{}, err
+		}
+	}
+	if _, err := s.EnsureDesiredSnapshot(ctx, assignment.GatewayID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.Assignment{}, err
+	}
+	if _, err := s.EnsureDesiredSnapshot(ctx, assignment.AgentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.Assignment{}, err
+	}
+	return s.GetAssignment(ctx, assignment.ID)
+}
+
+func (s *Store) scheduleExistingAssignment(ctx context.Context, existing domain.Assignment, options WriteOptions) (domain.Assignment, error) {
+	agent, err := s.GetNode(ctx, existing.AgentID)
+	if err != nil {
+		return domain.Assignment{}, err
+	}
+	agentSpec, err := s.GetAgentSpec(ctx, existing.AgentID)
+	if err != nil {
+		return domain.Assignment{}, err
+	}
+	services, err := s.ListServices(ctx, existing.AgentID)
+	if err != nil {
+		return domain.Assignment{}, err
+	}
+	serviceByID := make(map[string]domain.Service, len(services))
+	for _, service := range filterEnabledServices(services) {
+		serviceByID[service.ID] = service
+	}
+	selected := servicesForAssignment(existing, serviceByID)
+	if len(selected) == 0 {
+		return domain.Assignment{}, errors.New("assignment has no enabled services to schedule")
+	}
+	return s.scheduleAgentAssignment(ctx, agent, agentSpec, selected, &existing, options)
+}
+
+func (s *Store) gatewayCandidates(ctx context.Context) ([]GatewayCandidate, error) {
 	nodes, err := s.ListNodes(ctx, domain.RoleGateway)
 	if err != nil {
-		return domain.Assignment{}, err
+		return nil, err
 	}
 	candidates := make([]GatewayCandidate, 0, len(nodes))
 	for _, gateway := range nodes {
@@ -82,11 +228,11 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 			if errors.Is(specErr, sql.ErrNoRows) {
 				continue
 			}
-			return domain.Assignment{}, specErr
+			return nil, specErr
 		}
 		gatewayAssignments, listErr := s.ListAssignments(ctx, gateway.ID, "")
 		if listErr != nil {
-			return domain.Assignment{}, listErr
+			return nil, listErr
 		}
 		used := make(map[string]struct{})
 		for _, listener := range spec.Listeners {
@@ -109,70 +255,54 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 		if state, observedErr := s.GetObserved(ctx, gateway.ID); observedErr == nil {
 			healthy = state.Healthy && !state.Degraded && (state.ObservedAt.IsZero() || time.Since(state.ObservedAt) < DefaultGatewayOfflineAfter)
 		} else if !errors.Is(observedErr, sql.ErrNoRows) {
-			return domain.Assignment{}, observedErr
+			return nil, observedErr
 		}
 		candidates = append(candidates, GatewayCandidate{Node: gateway, Spec: spec, Healthy: healthy, Assignments: gatewayAssignments, UsedBindings: used})
 	}
-	generation := uint64(1)
-	if previous, previousErr := s.LoadSnapshot(ctx, agentID); previousErr == nil {
-		if previous.Generation == ^uint64(0) {
-			return domain.Assignment{}, errors.New("desired snapshot generation is exhausted")
+	return candidates, nil
+}
+
+func (s *Store) uniqueGeneratedAssignmentID(ctx context.Context, assignment domain.Assignment) (string, error) {
+	base := assignment.ID
+	if err := domain.ValidateID(base, "assignment.id"); err != nil {
+		return "", err
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM assignments WHERE id=?`, base).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return base, nil
+	} else if err != nil {
+		return "", err
+	}
+	serviceIDs := append([]string(nil), assignment.ServiceIDs...)
+	sort.Strings(serviceIDs)
+	digest := sha256.Sum256([]byte(strings.Join(serviceIDs, "\x00")))
+	for suffix := 6; suffix <= len(digest); suffix += 2 {
+		hexSuffix := hex.EncodeToString(digest[:suffix])
+		candidateBase := base
+		if maxBaseLength := 128 - 1 - len(hexSuffix); len(candidateBase) > maxBaseLength {
+			candidateBase = candidateBase[:maxBaseLength]
 		}
-		generation = previous.Generation + 1
-	} else if !errors.Is(previousErr, sql.ErrNoRows) {
-		return domain.Assignment{}, previousErr
-	}
-	if existing != nil && existing.Generation >= generation {
-		if existing.Generation == ^uint64(0) {
-			return domain.Assignment{}, errors.New("assignment generation is exhausted")
+		candidate := candidateBase + "-" + hexSuffix
+		if err := domain.ValidateID(candidate, "assignment.id"); err != nil {
+			return "", err
 		}
-		generation = existing.Generation + 1
-	}
-	assignment, err = Schedule(ScheduleRequest{Agent: agent, AgentSpec: agentSpec, Services: services, Existing: existing, Generation: generation}, candidates)
-	if err != nil {
-		return domain.Assignment{}, err
-	}
-	// Scheduling an already healthy, unchanged assignment is a read-like
-	// operation. Preserve its generation and revision instead of creating a new
-	// control generation on every retry (which also makes API idempotency keys
-	// useful for clients that retry a timeout).
-	if existing != nil && existing.State != domain.AssignmentDegraded && existing.State != domain.AssignmentDraining && sameAssignmentPlacement(*existing, assignment) {
-		if _, err := s.EnsureDesiredSnapshot(ctx, existing.GatewayID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return domain.Assignment{}, err
-		}
-		if _, err := s.EnsureDesiredSnapshot(ctx, existing.AgentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return domain.Assignment{}, err
-		}
-		return *existing, nil
-	}
-	writeOptions := options
-	if existing != nil {
-		// Keep the assignment identity stable across a Gateway failover.  The
-		// repository can then update the old row and release its bindings in one
-		// transaction instead of deleting the old placement first (which would
-		// expose a window where another writer could steal the services/ports).
-		assignment.ID = existing.ID
-		writeOptions.IfMatch = existing.Revision
-	} else {
-		writeOptions.IfMatch = 0
-	}
-	if err := s.PutAssignment(ctx, assignment, writeOptions); err != nil {
-		return domain.Assignment{}, err
-	}
-	if existing != nil && existing.GatewayID != assignment.GatewayID {
-		// The assignment row is replaced atomically, but the old Gateway's
-		// node-scoped snapshot also needs to release its binding.
-		if _, err := s.EnsureDesiredSnapshot(ctx, existing.GatewayID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return domain.Assignment{}, err
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM assignments WHERE id=?`, candidate).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
 		}
 	}
-	if _, err := s.EnsureDesiredSnapshot(ctx, assignment.GatewayID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return domain.Assignment{}, err
+	return "", errors.New("could not allocate a unique assignment id")
+}
+
+func scopedScheduleWriteOptions(options WriteOptions, assignmentID string) WriteOptions {
+	key := strings.TrimSpace(options.IdempotencyKey)
+	if key == "" {
+		return options
 	}
-	if _, err := s.EnsureDesiredSnapshot(ctx, assignment.AgentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return domain.Assignment{}, err
-	}
-	return s.GetAssignment(ctx, assignment.ID)
+	digest := sha256.Sum256([]byte(key + "\x00" + assignmentID))
+	options.IdempotencyKey = "schedule-" + hex.EncodeToString(digest[:])
+	return options
 }
 
 // ReconcileAssignments marks assignments whose Gateway has stopped reporting
@@ -278,7 +408,7 @@ func (s *Store) reconcileAssignmentSet(ctx context.Context, assignments []domain
 				return nil, snapshotErr
 			}
 		}
-		failedOver, scheduleErr := s.ScheduleAgent(ctx, assignment.AgentID, WriteOptions{Actor: "system"})
+		failedOver, scheduleErr := s.scheduleExistingAssignment(ctx, assignment, WriteOptions{Actor: "system"})
 		if scheduleErr != nil {
 			// No healthy replacement is a normal degraded condition. Keep the
 			// assignment state and let the next pass retry after another Gateway
@@ -520,7 +650,7 @@ func filterEnabledServices(values []domain.Service) []domain.Service {
 }
 
 func sameAssignmentPlacement(left, right domain.Assignment) bool {
-	if left.ID != right.ID || left.GatewayID != right.GatewayID || left.AgentID != right.AgentID || left.PublicEndpoint != right.PublicEndpoint || len(left.ServiceIDs) != len(right.ServiceIDs) || len(left.Bindings) != len(right.Bindings) {
+	if left.ID != right.ID || left.GatewayID != right.GatewayID || left.AgentID != right.AgentID || left.PublicEndpoint != right.PublicEndpoint || !sameObfuscationPolicy(left.Obfuscation, right.Obfuscation) || len(left.ServiceIDs) != len(right.ServiceIDs) || len(left.Bindings) != len(right.Bindings) {
 		return false
 	}
 	leftServices := append([]string(nil), left.ServiceIDs...)

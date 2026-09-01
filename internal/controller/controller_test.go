@@ -186,10 +186,14 @@ func TestScheduleAgentUpdatesBothNodeSnapshots(t *testing.T) {
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	assignment, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
+	assignments, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected one assignment, got %d", len(assignments))
+	}
+	assignment := assignments[0]
 	if assignment.PublicEndpoint != "gw.example:4433" || assignment.Bindings[0].Port != 18080 {
 		t.Fatalf("unexpected assignment: %#v", assignment)
 	}
@@ -454,9 +458,9 @@ func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	assignment, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
-	if err != nil || assignment.GatewayID != "gw-a" {
-		t.Fatalf("initial assignment = %#v, err=%v", assignment, err)
+	assignments, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
+	if err != nil || len(assignments) != 1 || assignments[0].GatewayID != "gw-a" {
+		t.Fatalf("initial assignment = %#v, err=%v", assignments, err)
 	}
 	observed := domain.ObservedState{SchemaVersion: domain.SchemaVersion, NodeID: "gw-a", AppliedGeneration: 1, Healthy: true, ObservedAt: time.Now().Add(-time.Hour)}
 	document, _ := json.Marshal(observed)
@@ -467,7 +471,7 @@ func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
 	if err != nil || len(failedOver) != 1 || failedOver[0].GatewayID != "gw-b" {
 		t.Fatalf("failover result = %#v, err=%v", failedOver, err)
 	}
-	assignments, err := store.ListAssignments(ctx, "", "agent")
+	assignments, err = store.ListAssignments(ctx, "", "agent")
 	if err != nil || len(assignments) != 1 || assignments[0].GatewayID != "gw-b" || assignments[0].State != domain.AssignmentPending {
 		t.Fatalf("failover did not replace the degraded claim atomically: assignments=%#v err=%v", assignments, err)
 	}

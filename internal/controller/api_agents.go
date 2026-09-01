@@ -78,12 +78,12 @@ func (s *Server) agentAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "unknown_action", "unsupported agent action")
 			return
 		}
-		assignment, err := s.store.ScheduleAgent(r.Context(), id, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		assignments, err := s.store.ScheduleAgent(r.Context(), id, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusAccepted, assignment)
+		writeJSON(w, http.StatusAccepted, map[string]any{"assignments": assignments})
 		return
 	}
 	if len(parts) != 1 {

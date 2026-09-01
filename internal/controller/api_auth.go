@@ -53,8 +53,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sessions.Store(sessionID, session{User: user, CSRF: csrf, ExpiresAt: time.Now().Add(12 * time.Hour)})
-	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: sessionID, Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode, MaxAge: 12 * 60 * 60})
-	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode, MaxAge: 12 * 60 * 60})
+	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: sessionID, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 12 * 60 * 60})
+	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 12 * 60 * 60})
 	writeJSON(w, http.StatusOK, map[string]any{"user": user, "csrf_token": csrf})
 }
 
@@ -69,8 +69,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if sessionID, err := r.Cookie("af_session"); err == nil {
 		s.sessions.Delete(sessionID.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode})
-	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: "", Path: "/", MaxAge: -1, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: "", Path: "/", MaxAge: -1, Secure: true, SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -60,8 +60,10 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 		connection, packetConn, err := afdp.DialWithObfuscation(state.ctx, assignment.PublicEndpoint, clientTLS, d.quicOptions, afdpObfuscationOptions(assignment.Obfuscation))
 		if err == nil {
 			session, sessionErr := afdp.ClientSession(state.ctx, connection, afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID, Capabilities: []string{"tcp", "udp", "http", "socks5"}}, options)
+			var admitErr error
 			if sessionErr == nil {
-				if admitErr := d.engine.AuthorizeSession(afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID}); admitErr != nil {
+				admitErr = d.engine.AuthorizeSession(afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID})
+				if admitErr != nil {
 					_ = session.Close()
 					_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP session limit reached")
 				} else {
@@ -71,10 +73,7 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 					d.engine.ReleaseSession()
 					_ = session.Close()
 				}
-				// A completed session is a successful connection attempt. Do not
-				// carry an outage-era backoff into the next reconnect after a
-				// healthy session ends.
-				backoff = time.Second
+				backoff = agentReconnectBackoffAfterAttempt(backoff, sessionErr, admitErr)
 			} else {
 				d.logger.Warn("data-plane Agent session rejected", "assignment_id", assignment.ID, "gateway", assignment.GatewayID, "error", sessionErr)
 				_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP handshake rejected")
@@ -104,6 +103,13 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 			return
 		}
 	}
+}
+
+func agentReconnectBackoffAfterAttempt(current time.Duration, sessionErr, admissionErr error) time.Duration {
+	if sessionErr == nil && admissionErr == nil {
+		return time.Second
+	}
+	return current
 }
 
 func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afdp.Session) {

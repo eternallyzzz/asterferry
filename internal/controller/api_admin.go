@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,6 +28,10 @@ func (s *Server) enrollmentTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		plain, token, err := s.store.CreateEnrollmentTokenWithOptions(r.Context(), input.Role, ttl, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
+			if errors.Is(err, ErrSecretAlreadyCreated) {
+				writeAlreadyCreatedSecret(w, "token_metadata", token)
+				return
+			}
 			writeStoreError(w, err)
 			return
 		}
@@ -223,6 +228,10 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 	}
 	plain, token, err := s.store.CreateAPITokenWithOptions(r.Context(), parts[0], input.Name, input.ExpiresAt, WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
+		if errors.Is(err, ErrSecretAlreadyCreated) {
+			writeAlreadyCreatedSecret(w, "metadata", token)
+			return
+		}
 		writeStoreError(w, err)
 		return
 	}

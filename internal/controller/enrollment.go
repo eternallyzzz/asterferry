@@ -100,7 +100,10 @@ func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role strin
 			}
 			token.UsedAt = &value
 		}
-		return "", token, tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return "", EnrollmentToken{}, err
+		}
+		return "", token, ErrSecretAlreadyCreated
 	}
 	plain, digest, err := NewAPIToken()
 	if err != nil {

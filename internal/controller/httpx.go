@@ -60,6 +60,14 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }
 
+func writeAlreadyCreatedSecret(w http.ResponseWriter, metadataField string, metadata any) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":             map[string]string{"code": "already_created", "message": "token was already created; its plaintext cannot be recovered"},
+		"token_recoverable": false,
+		metadataField:       metadata,
+	})
+}
+
 func methodNotAllowed(w http.ResponseWriter, methods ...string) {
 	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed")

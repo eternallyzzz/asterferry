@@ -381,7 +381,10 @@ func (s *Store) CreateAPITokenWithOptions(ctx context.Context, userID, name stri
 		if parseErr != nil {
 			return "", APIToken{}, parseErr
 		}
-		return "", token, tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return "", APIToken{}, err
+		}
+		return "", token, ErrSecretAlreadyCreated
 	}
 	plain, digest, err := NewAPIToken()
 	if err != nil {

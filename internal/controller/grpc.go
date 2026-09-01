@@ -300,7 +300,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			lastSent.Store(snapshotRecord.Generation)
 		}
 	}
-	go s.pushSnapshots(connectionCtx, hello.GetNodeId(), send, &lastSent, snapshotChanges)
+	go s.pushSnapshots(connectionCtx, cancel, hello.GetNodeId(), send, &lastSent, snapshotChanges)
 	type recvResult struct {
 		message *v1.NodeMessage
 		err     error
@@ -378,7 +378,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			if observed.ObservedAt.After(time.Now().UTC().Add(5 * time.Minute)) {
 				return status.Error(codes.InvalidArgument, "heartbeat timestamp is too far in the future")
 			}
+			var previousObserved domain.ObservedState
+			hasPreviousObserved := false
 			if previous, previousErr := s.store.GetObserved(stream.Context(), hello.GetNodeId()); previousErr == nil {
+				previousObserved = previous
+				hasPreviousObserved = true
 				observed.Sessions = previous.Sessions
 				observed.Listeners = previous.Listeners
 				observed.Metrics = previous.Metrics
@@ -392,8 +396,14 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			if marshalErr != nil {
 				return status.Error(codes.Internal, "encode heartbeat state failed")
 			}
-			if err := s.store.SaveObserved(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: observed.ObservedAt}); err != nil {
+			staleGeneration := hasPreviousObserved && observed.AppliedGeneration < previousObserved.AppliedGeneration
+			if err := s.store.SaveObservedHeartbeat(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: observed.ObservedAt}); err != nil {
 				return status.Error(codes.Internal, "save heartbeat state failed")
+			}
+			if staleGeneration {
+				if err := s.store.RecordEvent(stream.Context(), "system", "", "stale_generation", "heartbeat reported an older applied generation", hello.GetNodeId(), map[string]string{"reported_generation": fmt.Sprint(observed.AppliedGeneration), "current_generation": fmt.Sprint(previousObserved.AppliedGeneration)}); err != nil {
+					return status.Error(codes.Internal, "record stale heartbeat event failed")
+				}
 			}
 			if s.metrics != nil {
 				s.metrics.observeNode(hello.GetNodeId(), role, observed)
@@ -595,7 +605,13 @@ func validateApplyResult(result *v1.ApplyResult, snapshot SnapshotRecord) error 
 	return nil
 }
 
-func (s *ControlServer) pushSnapshots(ctx context.Context, nodeID string, send func(*v1.ControllerMessage) error, lastSent *atomic.Uint64, changes <-chan struct{}) {
+const (
+	snapshotWireRetryLimit = 5
+	snapshotWireRetryStart = 250 * time.Millisecond
+	snapshotWireRetryMax   = 5 * time.Second
+)
+
+func (s *ControlServer) pushSnapshots(ctx context.Context, cancel context.CancelFunc, nodeID string, send func(*v1.ControllerMessage) error, lastSent *atomic.Uint64, changes <-chan struct{}) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -604,36 +620,60 @@ func (s *ControlServer) pushSnapshots(ctx context.Context, nodeID string, send f
 			if !ok {
 				return
 			}
-			snapshot, err := s.store.EnsureDesiredSnapshot(ctx, nodeID)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					continue
-				}
-				slog.Default().Warn("failed to refresh node desired snapshot", "node_id", nodeID, "error", err)
-				continue
-			}
+			retryDelay := snapshotWireRetryStart
+			wireFailures := 0
 			for {
+				snapshot, err := s.store.EnsureDesiredSnapshot(ctx, nodeID)
+				if err != nil {
+					if errors.Is(err, sql.ErrNoRows) {
+						break
+					}
+					slog.Default().Warn("failed to refresh node desired snapshot", "node_id", nodeID, "error", err)
+					break
+				}
 				previous := lastSent.Load()
 				if snapshot.Generation <= previous {
 					break
 				}
-				if !lastSent.CompareAndSwap(previous, snapshot.Generation) {
-					continue
-				}
 				wireDocument, wireErr := s.store.SnapshotDocumentForWire(snapshot.Document)
 				if wireErr != nil {
-					lastSent.CompareAndSwap(snapshot.Generation, previous)
-					slog.Default().Error("failed to prepare desired snapshot for wire", "node_id", nodeID, "error", wireErr)
-					return
+					wireFailures++
+					if wireFailures >= snapshotWireRetryLimit {
+						slog.Default().Error("desired snapshot remained unavailable for wire", "node_id", nodeID, "attempts", wireFailures, "error", wireErr)
+						if cancel != nil {
+							cancel()
+						}
+						return
+					}
+					slog.Default().Warn("failed to prepare desired snapshot for wire; retrying", "node_id", nodeID, "attempt", wireFailures, "retry_after", retryDelay, "error", wireErr)
+					if !waitForSnapshotRetry(ctx, retryDelay) {
+						return
+					}
+					retryDelay *= 2
+					if retryDelay > snapshotWireRetryMax {
+						retryDelay = snapshotWireRetryMax
+					}
+					continue
 				}
 				message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
 				if err := send(message); err != nil {
-					lastSent.CompareAndSwap(snapshot.Generation, previous)
 					return
 				}
+				lastSent.Store(snapshot.Generation)
 				break
 			}
 		}
+	}
+}
+
+func waitForSnapshotRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

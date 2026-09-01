@@ -101,10 +101,14 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assignment, err := store.ScheduleAgent(ctx, "agent-e2e", controller.WriteOptions{Actor: "integration"})
+	assignments, err := store.ScheduleAgent(ctx, "agent-e2e", controller.WriteOptions{Actor: "integration"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected one assignment, got %d", len(assignments))
+	}
+	assignment := assignments[0]
 	gatewayRuntime, err := node.NewRuntime(gatewayBootstrap, node.RuntimeOptions{CachePath: filepath.Join(root, "gateway", "snapshot.cache"), CacheKeyPath: filepath.Join(root, "gateway", "snapshot.key")})
 	if err != nil {
 		t.Fatal(err)
