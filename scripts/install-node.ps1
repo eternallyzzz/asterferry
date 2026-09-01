@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][ValidateSet("agent", "gateway")][string]$Role,
+  [ValidateSet("", "agent", "gateway")][string]$Role = "",
   [Parameter(Mandatory = $true)][string]$NodeId,
   [Parameter(Mandatory = $true)][string]$Controller,
   [Parameter(Mandatory = $true)][string]$Token,
@@ -43,7 +43,8 @@ $archivePath = Join-Path $tempRoot $archive
 $sumsPath = Join-Path $tempRoot "SHA256SUMS"
 $extractRoot = Join-Path $tempRoot "extract"
 $caPath = Join-Path $stateRoot "controller-ca.crt"
-$bootstrapPath = Join-Path $stateRoot ("{0}-bootstrap.json" -f $Role)
+$bootstrapName = if ($Role) { "{0}-bootstrap.json" -f $Role } else { "node-bootstrap.json" }
+$bootstrapPath = Join-Path $stateRoot $bootstrapName
 $cachePath = Join-Path $stateRoot "snapshot.cache"
 $binaryPath = Join-Path $installRoot "asterferry.exe"
 
@@ -64,7 +65,8 @@ try {
 
   [IO.File]::WriteAllBytes($caPath, [Convert]::FromBase64String($CAPemB64))
   if (-not (Test-Path -LiteralPath $bootstrapPath) -or $Force) {
-    & $binaryPath $Role enroll --controller $Controller --token $Token --node-id $NodeId --ca $caPath --output $bootstrapPath --cache $cachePath
+    $nodeCommand = if ($Role) { $Role } else { "node" }
+    & $binaryPath $nodeCommand enroll --controller $Controller --token $Token --node-id $NodeId --ca $caPath --output $bootstrapPath --cache $cachePath
     if ($LASTEXITCODE -ne 0) { throw "AsterFerry enrollment failed with exit code $LASTEXITCODE" }
   } else {
     Write-Host "existing $bootstrapPath found; enrollment skipped"
@@ -77,9 +79,11 @@ try {
   $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\LOCAL SERVICE", "ReadAndExecute,Write", "ContainerInherit,ObjectInherit", "None", "Allow")))
   Set-Acl -LiteralPath $stateRoot -AclObject $acl
 
-  $serviceName = "AsterFerry-$Role"
-  $displayName = "AsterFerry $Role"
-  $binPath = '"{0}" {1} run --bootstrap "{2}"' -f $binaryPath, $Role, $bootstrapPath
+  $nodeCommand = if ($Role) { $Role } else { "node" }
+  $serviceSuffix = if ($Role) { $Role } else { "Node" }
+  $serviceName = "AsterFerry-$serviceSuffix"
+  $displayName = "AsterFerry $(if ($Role) { $Role } else { 'Node' })"
+  $binPath = '"{0}" {1} run --bootstrap "{2}"' -f $binaryPath, $nodeCommand, $bootstrapPath
   $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
   if ($existing) {
     if ($existing.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force }
@@ -89,7 +93,7 @@ try {
   }
   Invoke-Sc -Arguments @("failure", $serviceName, "actions=", "restart/5000/restart/30000/restart/60000", "reset=", "86400")
   Start-Service -Name $serviceName
-  Write-Host "AsterFerry $Role $NodeId installed and started"
+  Write-Host "AsterFerry $displayName $NodeId installed and started"
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

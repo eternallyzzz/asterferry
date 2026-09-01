@@ -37,8 +37,12 @@ type RuntimeOptions struct {
 type Runtime struct {
 	bootstrap     Bootstrap
 	bootstrapMu   sync.RWMutex
+	runtimeMu     sync.RWMutex
 	engine        *dataplane.Engine
 	dataPlane     *DataPlaneRuntime
+	runtimeKind   string
+	runtimeOpts   RuntimeOptions
+	runCtx        context.Context
 	reconciler    *Reconciler
 	logger        *slog.Logger
 	bootstrapPath string
@@ -70,109 +74,261 @@ func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, err := dataplane.New(dataplane.Options{Role: bootstrap.Role, NodeID: bootstrap.NodeID, MaxStreams: options.MaxStreams, MaxSessions: options.MaxSessions})
-	if err != nil {
-		return nil, err
-	}
-	dataPlane, err := NewDataPlaneRuntime(DataPlaneOptions{Engine: engine, Bootstrap: bootstrap, Logger: options.Logger})
-	if err != nil {
-		return nil, err
-	}
+	runtime := &Runtime{bootstrap: bootstrap, runtimeOpts: options, logger: options.Logger, bootstrapPath: options.BootstrapPath}
 	apply := func(ctx context.Context, snapshot domain.DesiredSnapshot, previous *domain.DesiredSnapshot) error {
-		// Hold admission closed across the complete component swap. The engine
-		// index and the listener/session set are published by separate
-		// components; without this gate a new open could observe one half of a
-		// generation while the other half is still being rebuilt.
-		wasDraining := engine.IsDraining()
-		engine.BeginDrain()
-		admissionRestored := false
-		defer func() {
-			if !wasDraining && admissionRestored {
-				engine.EndDrain()
-			}
-		}()
-		if err := engine.ApplySnapshot(ctx, snapshot, previous); err != nil {
-			// Engine.ApplySnapshot builds its replacement indexes before taking
-			// the lock, so a failure leaves the previous generation intact. A
-			// durable previous document means the sibling data plane is intact as
-			// well; an initial failure must remain drained until a full apply.
-			admissionRestored = previous != nil
-			return err
-		}
-		if err := dataPlane.ApplySnapshot(ctx, snapshot, previous); err != nil {
-			options.Logger.Warn("data-plane snapshot apply failed", "generation", snapshot.Generation, "error", err)
-			// Keep the control engine and network adapters on the same
-			// generation if opening a listener/session fails.
-			if previous != nil {
-				// Keep rollback tied to the runtime lifetime rather than the
-				// cancelled control-stream operation. WithoutCancel preserves
-				// request values while allowing both components to restore the
-				// last known-good generation.
-				rollbackCtx := context.WithoutCancel(ctx)
-				var rollbackErrs []error
-				rollbackOK := true
-				if rollbackErr := engine.ApplySnapshot(rollbackCtx, *previous, &snapshot); rollbackErr != nil {
-					options.Logger.Error("control engine rollback after snapshot failure failed", "generation", previous.Generation, "error", rollbackErr)
-					rollbackErrs = append(rollbackErrs, rollbackErr)
-					rollbackOK = false
-				}
-				if rollbackErr := dataPlane.ApplySnapshot(rollbackCtx, *previous, nil); rollbackErr != nil {
-					options.Logger.Error("data-plane rollback after snapshot failure failed", "generation", previous.Generation, "error", rollbackErr)
-					rollbackErrs = append(rollbackErrs, rollbackErr)
-					rollbackOK = false
-				}
-				admissionRestored = rollbackOK
-				return errors.Join(err, errors.Join(rollbackErrs...))
-			} else {
-				// The first engine apply has no previous document to restore. Clear
-				// the speculative index so a rejected listener build cannot leave
-				// authorization state active without a matching data-plane socket.
-				if resetErr := engine.ResetSnapshot(snapshot.Generation); resetErr != nil {
-					options.Logger.Error("control engine reset after initial snapshot failure failed", "generation", snapshot.Generation, "error", resetErr)
-					return errors.Join(err, resetErr)
-				}
-			}
-			return err
-		}
-		admissionRestored = true
-		return nil
+		return runtime.applySnapshot(ctx, snapshot, previous)
 	}
 	reset := func(ctx context.Context, generation uint64) error {
-		// Clear network ownership and authorization together.  The reconciler
-		// invokes this only when there is no durable previous snapshot to
-		// restore (for example, the first cache publication failed).
-		dataErr := dataPlane.ResetSnapshot(generation)
-		engineErr := engine.ResetSnapshot(generation)
-		return errors.Join(dataErr, engineErr)
+		return runtime.resetSnapshot(ctx, generation)
 	}
 	reconciler, err := NewReconcilerWithReset(cache, apply, reset)
 	if err != nil {
 		return nil, err
 	}
-	if snapshot, readErr := cache.Read(); readErr == nil {
-		if applyErr := engine.ApplySnapshot(context.Background(), snapshot, nil); applyErr != nil {
-			return nil, fmt.Errorf("apply cached snapshot: %w", applyErr)
+	runtime.reconciler = reconciler
+	if bootstrap.Role != "" {
+		if _, _, err := runtime.ensureRuntimeKind(bootstrap.Role); err != nil {
+			return nil, err
 		}
-		if applyErr := dataPlane.ApplySnapshot(context.Background(), snapshot, nil); applyErr != nil {
-			return nil, fmt.Errorf("prepare cached data-plane snapshot: %w", applyErr)
+	}
+	if snapshot, readErr := cache.Read(); readErr == nil {
+		if kind, kindErr := snapshotRuntimeKind(snapshot); kindErr != nil {
+			return nil, kindErr
+		} else if kind != "" {
+			engine, dataPlane, ensureErr := runtime.ensureRuntime(snapshot)
+			if ensureErr != nil {
+				return nil, ensureErr
+			}
+			if applyErr := engine.ApplySnapshot(context.Background(), snapshot, nil); applyErr != nil {
+				return nil, fmt.Errorf("apply cached snapshot: %w", applyErr)
+			}
+			if applyErr := dataPlane.ApplySnapshot(context.Background(), snapshot, nil); applyErr != nil {
+				return nil, fmt.Errorf("prepare cached data-plane snapshot: %w", applyErr)
+			}
 		}
 	}
 	if err := reconciler.SetNodeID(bootstrap.NodeID); err != nil {
 		return nil, err
 	}
-	return &Runtime{bootstrap: bootstrap, engine: engine, dataPlane: dataPlane, reconciler: reconciler, logger: options.Logger, bootstrapPath: options.BootstrapPath}, nil
+	return runtime, nil
 }
 
-func (r *Runtime) Engine() *dataplane.Engine    { return r.engine }
-func (r *Runtime) DataPlane() *DataPlaneRuntime { return r.dataPlane }
-func (r *Runtime) Reconciler() *Reconciler      { return r.reconciler }
+func (r *Runtime) Engine() *dataplane.Engine {
+	r.runtimeMu.RLock()
+	defer r.runtimeMu.RUnlock()
+	return r.engine
+}
+
+func (r *Runtime) DataPlane() *DataPlaneRuntime {
+	r.runtimeMu.RLock()
+	defer r.runtimeMu.RUnlock()
+	return r.dataPlane
+}
+
+func (r *Runtime) Reconciler() *Reconciler { return r.reconciler }
+
+func snapshotRuntimeKind(snapshot domain.DesiredSnapshot) (string, error) {
+	if snapshot.Gateway != nil && snapshot.Agent == nil {
+		return domain.RoleGateway, nil
+	}
+	if snapshot.Agent != nil && snapshot.Gateway == nil {
+		return domain.RoleAgent, nil
+	}
+	if snapshot.Gateway == nil && snapshot.Agent == nil {
+		return "", nil
+	}
+	return "", errors.New("desired snapshot selects multiple node behaviors")
+}
+
+// ensureRuntimeKind lazily creates the role-specific data-plane components.
+// The process, certificate, control stream, cache, and reconnect loop are
+// shared; only the adapters behind the current spec are replaced.
+func (r *Runtime) ensureRuntimeKind(kind string) (*dataplane.Engine, *DataPlaneRuntime, error) {
+	if kind != domain.RoleGateway && kind != domain.RoleAgent {
+		return nil, nil, errors.New("node behavior must be gateway or agent")
+	}
+	r.runtimeMu.Lock()
+	defer r.runtimeMu.Unlock()
+	if r.engine != nil && r.runtimeKind == kind {
+		return r.engine, r.dataPlane, nil
+	}
+	oldEngine, oldDataPlane := r.engine, r.dataPlane
+	if oldDataPlane != nil {
+		_ = oldDataPlane.Close()
+	}
+	if oldEngine != nil {
+		_ = oldEngine.Close()
+	}
+	// Do not leave closed components installed while constructing the
+	// replacement. A transient constructor or Start failure must be safe to
+	// retry instead of reusing a data plane that has already been closed.
+	r.engine, r.dataPlane, r.runtimeKind = nil, nil, ""
+	engine, err := dataplane.New(dataplane.Options{Role: kind, NodeID: r.bootstrap.NodeID, MaxStreams: r.runtimeOpts.MaxStreams, MaxSessions: r.runtimeOpts.MaxSessions})
+	if err != nil {
+		return nil, nil, err
+	}
+	dataPlane, err := NewDataPlaneRuntime(DataPlaneOptions{Engine: engine, Bootstrap: r.bootstrapSnapshot(), Logger: r.runtimeOpts.Logger})
+	if err != nil {
+		_ = engine.Close()
+		return nil, nil, err
+	}
+	r.engine, r.dataPlane, r.runtimeKind = engine, dataPlane, kind
+	if r.runCtx != nil {
+		if err := dataPlane.Start(r.runCtx); err != nil {
+			r.engine, r.dataPlane, r.runtimeKind = nil, nil, ""
+			_ = dataPlane.Close()
+			_ = engine.Close()
+			return nil, nil, err
+		}
+	}
+	return engine, dataPlane, nil
+}
+
+func (r *Runtime) ensureRuntime(snapshot domain.DesiredSnapshot) (*dataplane.Engine, *DataPlaneRuntime, error) {
+	kind, err := snapshotRuntimeKind(snapshot)
+	if err != nil {
+		return nil, nil, err
+	}
+	if kind == "" {
+		return nil, nil, r.disableRuntime()
+	}
+	return r.ensureRuntimeKind(kind)
+}
+
+// disableRuntime is the explicit empty-spec transition. Clear the published
+// pointers before closing sockets so observers never receive a closed runtime
+// as if it were still active.
+func (r *Runtime) disableRuntime() error {
+	r.runtimeMu.Lock()
+	oldEngine, oldDataPlane := r.engine, r.dataPlane
+	r.engine, r.dataPlane, r.runtimeKind = nil, nil, ""
+	r.runtimeMu.Unlock()
+	var closeErrs []error
+	if oldDataPlane != nil {
+		if err := oldDataPlane.Close(); err != nil {
+			closeErrs = append(closeErrs, err)
+		}
+	}
+	if oldEngine != nil {
+		if err := oldEngine.Close(); err != nil {
+			closeErrs = append(closeErrs, err)
+		}
+	}
+	return errors.Join(closeErrs...)
+}
+
+func (r *Runtime) applySnapshot(ctx context.Context, snapshot domain.DesiredSnapshot, previous *domain.DesiredSnapshot) error {
+	kind, err := snapshotRuntimeKind(snapshot)
+	if err != nil {
+		return err
+	}
+	previousKind := ""
+	if previous != nil {
+		previousKind, _ = snapshotRuntimeKind(*previous)
+	}
+	if kind == "" {
+		return r.disableRuntime()
+	}
+	engine, dataPlane, err := r.ensureRuntime(snapshot)
+	if err != nil {
+		if previous != nil && previousKind != "" && previousKind != kind {
+			restoreErr := r.restoreRuntime(ctx, *previous)
+			return errors.Join(err, restoreErr)
+		}
+		return err
+	}
+	sameKind := previous == nil || previousKind == kind
+	enginePrevious := previous
+	if !sameKind {
+		// An engine rejects a snapshot for the other behavior. A kind switch is
+		// a complete component replacement, so the new engine starts without a
+		// role-mismatched rollback baseline.
+		enginePrevious = nil
+	}
+	wasDraining := engine.IsDraining()
+	engine.BeginDrain()
+	if err := engine.ApplySnapshot(ctx, snapshot, enginePrevious); err != nil {
+		if previous != nil && !sameKind {
+			restoreErr := r.restoreRuntime(ctx, *previous)
+			return errors.Join(err, restoreErr)
+		}
+		return err
+	}
+	if err := dataPlane.ApplySnapshot(ctx, snapshot, enginePrevious); err != nil {
+		r.logger.Warn("data-plane snapshot apply failed", "generation", snapshot.Generation, "error", err)
+		rollbackCtx := context.WithoutCancel(ctx)
+		if previous == nil {
+			return errors.Join(err, engine.ResetSnapshot(snapshot.Generation))
+		}
+		if sameKind {
+			var rollbackErrs []error
+			if rollbackErr := engine.ApplySnapshot(rollbackCtx, *previous, &snapshot); rollbackErr != nil {
+				rollbackErrs = append(rollbackErrs, rollbackErr)
+			}
+			if rollbackErr := dataPlane.ApplySnapshot(rollbackCtx, *previous, nil); rollbackErr != nil {
+				rollbackErrs = append(rollbackErrs, rollbackErr)
+			}
+			if len(rollbackErrs) > 0 {
+				return errors.Join(err, errors.Join(rollbackErrs...))
+			}
+			if !wasDraining {
+				engine.EndDrain()
+			}
+			return err
+		}
+		// A failed kind switch is restored by constructing the old role again.
+		oldEngine, oldDataPlane, restoreErr := r.ensureRuntimeKind(previousKind)
+		if restoreErr == nil {
+			restoreErr = oldEngine.ApplySnapshot(rollbackCtx, *previous, nil)
+		}
+		if restoreErr == nil {
+			restoreErr = oldDataPlane.ApplySnapshot(rollbackCtx, *previous, nil)
+		}
+		return errors.Join(err, restoreErr)
+	}
+	if !wasDraining {
+		engine.EndDrain()
+	}
+	return nil
+}
+
+func (r *Runtime) restoreRuntime(ctx context.Context, snapshot domain.DesiredSnapshot) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rollbackCtx := context.WithoutCancel(ctx)
+	kind, err := snapshotRuntimeKind(snapshot)
+	if err != nil {
+		return err
+	}
+	if kind == "" {
+		return r.disableRuntime()
+	}
+	engine, dataPlane, err := r.ensureRuntimeKind(kind)
+	if err != nil {
+		return err
+	}
+	if err := engine.ApplySnapshot(rollbackCtx, snapshot, nil); err != nil {
+		return err
+	}
+	return dataPlane.ApplySnapshot(rollbackCtx, snapshot, nil)
+}
+
+func (r *Runtime) resetSnapshot(ctx context.Context, generation uint64) error {
+	engine, dataPlane := r.Engine(), r.DataPlane()
+	if engine == nil || dataPlane == nil {
+		return nil
+	}
+	return errors.Join(dataPlane.ResetSnapshot(generation), engine.ResetSnapshot(generation))
+}
 
 func (r *Runtime) observedState() domain.ObservedState {
 	observed := r.reconciler.State()
-	if r.dataPlane == nil {
+	dataPlane := r.DataPlane()
+	if dataPlane == nil {
 		return observed
 	}
-	dataObserved, ok := r.dataPlane.ObservedState()
+	dataObserved, ok := dataPlane.ObservedState()
 	if !ok {
 		return observed
 	}
@@ -194,11 +350,17 @@ func (r *Runtime) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if r.dataPlane != nil {
-		if err := r.dataPlane.Start(ctx); err != nil {
+	r.runtimeMu.Lock()
+	r.runCtx = ctx
+	dataPlane := r.dataPlane
+	r.runtimeMu.Unlock()
+	defer func() {
+		_ = r.disableRuntime()
+	}()
+	if dataPlane != nil {
+		if err := dataPlane.Start(ctx); err != nil {
 			return err
 		}
-		defer r.dataPlane.Close()
 	}
 	backoff := time.Second
 	const offlineGrace = 30 * time.Second
@@ -216,9 +378,11 @@ func (r *Runtime) Run(ctx context.Context) error {
 			// invalidate sessions and keep the engine drained until a future
 			// authenticated stream succeeds.
 			if status.Code(err) == codes.PermissionDenied {
-				r.engine.BeginDrain()
-				if r.dataPlane != nil {
-					r.dataPlane.CloseSessions()
+				if engine := r.Engine(); engine != nil {
+					engine.BeginDrain()
+				}
+				if dataPlane := r.DataPlane(); dataPlane != nil {
+					dataPlane.CloseSessions()
 				}
 			}
 			r.logger.Warn("control connection lost", "error", err)
@@ -311,8 +475,16 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	}
 	state := r.observedState()
 	appliedChecksum := r.reconciler.AppliedChecksum()
-	role := v1.NodeRole_NODE_ROLE_GATEWAY
-	if bootstrap.Role == domain.RoleAgent {
+	role := v1.NodeRole_NODE_ROLE_UNSPECIFIED
+	if engine := r.Engine(); engine != nil {
+		if engine.Role() == domain.RoleGateway {
+			role = v1.NodeRole_NODE_ROLE_GATEWAY
+		} else if engine.Role() == domain.RoleAgent {
+			role = v1.NodeRole_NODE_ROLE_AGENT
+		}
+	} else if bootstrap.Role == domain.RoleGateway {
+		role = v1.NodeRole_NODE_ROLE_GATEWAY
+	} else if bootstrap.Role == domain.RoleAgent {
 		role = v1.NodeRole_NODE_ROLE_AGENT
 	}
 	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, Role: role, SchemaVersion: domain.SchemaVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5"}}}}); err != nil {
@@ -368,9 +540,13 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				// The Controller sent this only after authenticating Hello and
 				// checking the current certificate serial.  Do not clear a
 				// reconnect/revocation drain before that acknowledgement.
-				r.engine.EndDrain()
+				if engine := r.Engine(); engine != nil {
+					engine.EndDrain()
+				}
 			case "drain":
-				r.engine.BeginDrain()
+				if engine := r.Engine(); engine != nil {
+					engine.BeginDrain()
+				}
 			case "resync":
 				// Resync is a deliberate same-generation repair. Ordinary desired
 				// snapshot delivery remains strictly monotonic, while Resync lets
@@ -379,7 +555,9 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				// the component swap would expose a half-rebuilt generation.
 				result := r.reconciler.Resync(ctx)
 				if result.GetStatus() == v1.ApplyStatus_APPLY_STATUS_APPLIED {
-					r.engine.EndDrain()
+					if engine := r.Engine(); engine != nil {
+						engine.EndDrain()
+					}
 				}
 				if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_ApplyResult{ApplyResult: result}}); err != nil {
 					return err
@@ -390,13 +568,15 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				// revocation: a node must not reconnect to a peer using its old
 				// still-CA-valid certificate while it is offline from the
 				// authority that revoked it.
-				r.engine.BeginDrain()
+				if engine := r.Engine(); engine != nil {
+					engine.BeginDrain()
+				}
 				// An explicit reconnect is also the Controller's revocation
 				// signal.  Invalidate authenticated AFDP sessions immediately,
 				// while retaining listeners and the cached generation so a
 				// temporary control outage still preserves data-plane traffic.
-				if r.dataPlane != nil {
-					r.dataPlane.CloseSessions()
+				if dataPlane := r.DataPlane(); dataPlane != nil {
+					dataPlane.CloseSessions()
 				}
 				return errors.New("controller requested reconnect")
 			default:
@@ -506,8 +686,9 @@ func (r *Runtime) acceptCertificate(bundle *v1.CertificateBundle) error {
 			return err
 		}
 	}
-	if r.dataPlane != nil {
-		if err := r.dataPlane.UpdateBootstrap(updated); err != nil {
+	dataPlane := r.DataPlane()
+	if dataPlane != nil {
+		if err := dataPlane.UpdateBootstrap(updated); err != nil {
 			var rollbackErrs []error
 			if r.bootstrapPath != "" {
 				if rollbackErr := WriteBootstrap(r.bootstrapPath, bootstrap); rollbackErr != nil {
@@ -515,7 +696,7 @@ func (r *Runtime) acceptCertificate(bundle *v1.CertificateBundle) error {
 					rollbackErrs = append(rollbackErrs, rollbackErr)
 				}
 			}
-			if rollbackErr := r.dataPlane.UpdateBootstrap(bootstrap); rollbackErr != nil {
+			if rollbackErr := dataPlane.UpdateBootstrap(bootstrap); rollbackErr != nil {
 				r.logger.Error("data-plane bootstrap rollback failed", "error", rollbackErr)
 				rollbackErrs = append(rollbackErrs, rollbackErr)
 			}

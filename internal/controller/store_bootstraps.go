@@ -17,8 +17,11 @@ import (
 // from domain.Node: an installation that has never reached the Controller is
 // not an enrolled identity and must not be schedulable.
 type PendingNodeBootstrap struct {
-	NodeID    string            `json:"node_id"`
-	Role      string            `json:"role"`
+	NodeID string `json:"node_id"`
+	// Role is a legacy internal hint. The pending resource exposes only the
+	// optional configured spec kind; a generic installation may have neither.
+	Role      string            `json:"-"`
+	SpecKind  string            `json:"spec_kind,omitempty"`
 	Name      string            `json:"name"`
 	Labels    map[string]string `json:"labels,omitempty"`
 	Enabled   bool              `json:"enabled"`
@@ -52,10 +55,17 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 	}
 
 	var gatewayJSON, agentJSON []byte
-	if node.Role == domain.RoleGateway {
-		if gatewaySpec == nil {
-			return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "gateway_spec_required", Path: "gateway_spec", Message: "a Gateway public endpoint and port pool are required before installation"}
+	if gatewaySpec != nil && agentSpec != nil {
+		return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec", Path: "spec", Message: "a pending node can contain only one behavior spec"}
+	}
+	if node.Role != "" && node.Role != domain.RoleGateway && node.Role != domain.RoleAgent {
+		return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "spec.kind", Message: "node behavior must be gateway or agent"}
+	}
+	if gatewaySpec != nil {
+		if node.Role != "" && node.Role != domain.RoleGateway {
+			return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "spec.kind", Message: "gateway spec does not match node behavior"}
 		}
+		node.Role = domain.RoleGateway
 		spec := *gatewaySpec
 		spec.NodeID = node.ID
 		spec.Revision = 0
@@ -72,7 +82,11 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 		if err != nil {
 			return "", PendingNodeBootstrap{}, err
 		}
-	} else if node.Role == domain.RoleAgent {
+	} else if agentSpec != nil || node.Role == domain.RoleAgent {
+		if node.Role != "" && node.Role != domain.RoleAgent {
+			return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "spec.kind", Message: "agent spec does not match node behavior"}
+		}
+		node.Role = domain.RoleAgent
 		if agentSpec == nil {
 			spec := domain.AgentSpec{
 				NodeID:  node.ID,
@@ -91,8 +105,6 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 		if err != nil {
 			return "", PendingNodeBootstrap{}, err
 		}
-	} else {
-		return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_role", Path: "node.role", Message: "node role must be gateway or agent"}
 	}
 
 	plain, _, err := NewAPIToken()
@@ -106,6 +118,11 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 		NodeID: node.ID, Role: node.Role, Name: node.Name, Labels: cloneStringMap(node.Labels),
 		Enabled: node.Enabled, Platform: platform, Arch: arch,
 		ExpiresAt: now.Add(EnrollmentTTL), CreatedAt: now,
+	}
+	if len(gatewayJSON) > 0 {
+		pending.SpecKind = string(domain.NodeSpecGateway)
+	} else if len(agentJSON) > 0 {
+		pending.SpecKind = string(domain.NodeSpecAgent)
 	}
 	request := pendingBootstrapRequestForHash(pending, gatewaySpec, agentSpec)
 
@@ -341,7 +358,7 @@ func (s *Store) DeletePendingNodeBootstrap(ctx context.Context, nodeID string, o
 	return tx.Commit()
 }
 
-const pendingBootstrapSelect = `SELECT node_id,role,name,labels_json,enabled,platform,arch,expires_at,created_at FROM node_bootstraps`
+const pendingBootstrapSelect = `SELECT node_id,role,name,labels_json,enabled,platform,arch,expires_at,created_at,CASE WHEN gateway_spec_json IS NOT NULL THEN 'gateway' WHEN agent_spec_json IS NOT NULL THEN 'agent' ELSE '' END FROM node_bootstraps`
 
 func loadPendingBootstrapTx(ctx context.Context, tx *sql.Tx, nodeID string) (pendingNodeBootstrap, error) {
 	return scanPendingBootstrapWithSpec(tx.QueryRowContext(ctx, `SELECT node_id,role,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,gateway_spec_json,agent_spec_json FROM node_bootstraps WHERE node_id=?`, nodeID))
@@ -356,7 +373,7 @@ func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 	var labels []byte
 	var enabled int
 	var expires, created string
-	if err := row.Scan(&pending.NodeID, &pending.Role, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created); err != nil {
+	if err := row.Scan(&pending.NodeID, &pending.Role, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.SpecKind); err != nil {
 		return PendingNodeBootstrap{}, err
 	}
 	if len(labels) > 0 {
@@ -393,6 +410,11 @@ func scanPendingBootstrapWithSpec(row scanner) (pendingNodeBootstrap, error) {
 	pending.Enabled = enabled != 0
 	pending.GatewaySpecJSON = append([]byte(nil), gatewayJSON...)
 	pending.AgentSpecJSON = append([]byte(nil), agentJSON...)
+	if len(gatewayJSON) > 0 {
+		pending.SpecKind = string(domain.NodeSpecGateway)
+	} else if len(agentJSON) > 0 {
+		pending.SpecKind = string(domain.NodeSpecAgent)
+	}
 	var err error
 	pending.ExpiresAt, err = parseStoredTime("node_bootstrap.expires_at", expires)
 	if err != nil {

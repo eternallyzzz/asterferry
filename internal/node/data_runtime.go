@@ -80,7 +80,7 @@ func NewDataPlaneRuntime(options DataPlaneOptions) (*DataPlaneRuntime, error) {
 	if options.Engine == nil {
 		return nil, errors.New("data-plane engine is required")
 	}
-	if options.Bootstrap.NodeID == "" || options.Bootstrap.Role != options.Engine.Role() || options.Bootstrap.NodeID != options.Engine.NodeID() {
+	if options.Bootstrap.NodeID == "" || options.Bootstrap.NodeID != options.Engine.NodeID() {
 		return nil, errors.New("data-plane bootstrap identity does not match the engine")
 	}
 	certificate, pool, err := loadDataPlaneTLS(options.Bootstrap)
@@ -180,7 +180,7 @@ func (d *DataPlaneRuntime) UpdateBootstrap(bootstrap Bootstrap) error {
 	if d == nil || d.engine == nil {
 		return errors.New("data-plane runtime is not initialized")
 	}
-	if bootstrap.NodeID != d.engine.NodeID() || bootstrap.Role != d.engine.Role() {
+	if bootstrap.NodeID != d.engine.NodeID() {
 		return errors.New("data-plane bootstrap identity does not match the engine")
 	}
 	certificate, pool, err := loadDataPlaneTLS(bootstrap)

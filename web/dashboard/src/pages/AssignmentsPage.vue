@@ -26,7 +26,7 @@ const nodes = ref<ControllerNode[]>([]);
 const expanded = ref<Set<string>>(new Set());
 const scheduling = ref("");
 
-const agentNodes = computed(() => nodes.value.filter((node) => node.role === "agent"));
+const agentNodes = computed(() => nodes.value.filter((node) => node.spec_kind === "agent"));
 
 function toggleExpand(id: string) {
   const next = new Set(expanded.value);
@@ -68,7 +68,7 @@ async function schedule(agent: ControllerNode) {
     <PageHeader
       eyebrow="Scheduler"
       title="调度与 Assignment"
-      description="Controller 根据 selector、容量和端口占用保持健康 assignment；Agent 重连后自动对账。"
+      description="Controller 根据 selector、容量和端口占用保持健康 assignment；Agent 行为 Node 重连后自动对账。"
     />
 
     <PanelCard :title="`Assignment · ${assignments.length}`">
@@ -128,7 +128,7 @@ async function schedule(agent: ControllerNode) {
           >{{ scheduling === agent.id ? "调度中…" : "重新调度" }}</button>
         </div>
       </div>
-      <EmptyState v-else title="暂无 Agent" description="注册 Agent 节点后，创建服务即可自动调度；此处按钮用于故障修复。" />
+      <EmptyState v-else title="暂无 Agent 行为 Node" description="注册 Node 后，在节点详情配置 Agent 行为；创建服务即可自动调度。" />
     </PanelCard>
   </div>
 </template>

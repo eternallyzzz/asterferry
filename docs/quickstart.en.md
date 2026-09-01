@@ -170,49 +170,53 @@ Open `https://controller.example.com:8443/dashboard/` and go to **Nodes**.
 The Controller remains the only owner of business configuration; A and B do
 not read business YAML.
 
-### 4.1 Create the Gateway
+### 4.1 Create Node installation tasks
 
-Click **Generate install command**, enter the Node ID, name and labels, choose
-`Gateway`, then select B's actual platform and architecture. This creates a
-pending installation intent; it does not create an enrolled node yet. A
-Gateway also requires:
+Click **Generate install command**, enter the Node ID, name and labels, then
+select the target platform and architecture. Do not choose Gateway or Agent and
+do not enter an AFDP endpoint here. This creates a pending installation intent;
+it does not create an enrolled node yet.
 
-- **Public AFDP endpoint**, for example `gateway.example.com:4433`. This is
-  the UDP address that A uses to reach B, not a business service port.
-- **TCP port pool** and **UDP port pool**, for example `28080-28999`. These
-  pools are used when services are created with automatic public ports.
+Generate one command for B and one for A. Copy each command to its target host
+and run it in a root shell on Linux or an elevated PowerShell on Windows. The
+target host executes the command, reaches the Controller and completes Enroll;
+only then does the Node appear in the enrolled-node list.
 
-After submission, the Dashboard returns a one-time installer command. Copy it
-to B and run it in a root shell on Linux or an elevated PowerShell on Windows.
-The node appears in the enrolled-node list only after that command reaches the
-Controller and completes Enroll.
+### 4.2 Choose behavior in Node details
 
-### 4.2 Create the Agent
+After a Node is online, open **Node details** → **Spec**, choose a behavior and
+save it:
 
-Click **Generate install command** again, choose `Agent`, and enter A's platform and
-architecture. The Controller creates a usable default Agent spec. Copy the
-resulting command to A and run it once.
+- On B choose `Gateway` and configure `public_endpoints`, listeners and TCP/UDP
+  port pools. `public_endpoints` is the data-plane address A uses to reach B,
+  not the Controller address.
+- On A choose `Agent` and configure `gateway_selector`, proxy entrances and
+  routes.
+
+The Controller sends a data-plane snapshot only after a behavior spec is saved.
+Deleting the spec returns the Node to an unconfigured state; delete the current
+spec before switching behavior.
 
 The installer downloads the exact release configured by the Controller,
 verifies its SHA-256 checksum, writes the CA and bootstrap/cache files into a
 private state directory, uses the node-bound enrollment token to obtain the
 certificate, and creates, enables and starts the system service:
 
-- Linux: `asterferry-gateway.service` or `asterferry-agent.service`.
-- Windows: `AsterFerry-gateway` or `AsterFerry-agent` Windows service.
+- Linux: `asterferry-Node.service`.
+- Windows: `AsterFerry-Node` Windows service.
 
 The token is single-use and valid for 15 minutes. It can only enroll its own
-Node ID and role. Do not paste the command into public chats, tickets or logs.
+Node ID. Do not paste the command into public chats, tickets or logs.
 If it expires or is lost, reissue it from the Dashboard's pending installation
 list. B and A do not need a manually copied CA, edited bootstrap JSON or second
 start command.
 
 ### 4.3 Legacy/manual enrollment
 
-The `enroll-token create`, `gateway enroll`, `agent enroll` and system-service
+The `enroll-token create`, `node enroll`, `node run` and system-service
 templates remain available for offline images, private release mirrors and
-custom service accounts. They use the same 15-minute role-bound tokens; never
-mix a Gateway token with an Agent.
+custom service accounts. The legacy `gateway`/`agent` commands remain compatible
+with existing role-bound bootstrap files.
 
 ## 5. Create the first TCP service
 
@@ -245,7 +249,7 @@ Configure a UDP service the same way, changing the protocol to UDP and the port 
 
 In the Dashboard, check:
 
-1. **Nodes** → Gateway/Agent → **Observed**: the node should be healthy and its applied Generation should be greater than zero.
+1. **Nodes** → the corresponding Node → **Observed**: the node should be healthy and its applied Generation should be greater than zero; the behavior spec should show Gateway or Agent.
 2. **Assignments**: the Assignment should be `applied`, its endpoint should be `gateway.example.com:4433`, and its bindings should include `28080/tcp`.
 3. **Activity**: node, service, scheduling and runtime events should be visible.
 
@@ -387,7 +391,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-For a v3/v4/v5 database upgrade, stop the Controller, run a dry-run, then publish the migration to the current schema v6:
+For a v3/v4/v5/v6 database upgrade, stop the Controller, run a dry-run, then publish the migration to the current schema v7:
 
 ```sh
 asterferry controller migrate --config ./controller/controller.json --dry-run
@@ -404,7 +408,7 @@ See [`deploy/README.md`](../deploy/README.md) for systemd, Docker Compose and Ku
 - [ ] The Dashboard accepts login and both nodes have completed installation and enrollment.
 - [ ] The Gateway `public_endpoints` value is a reachable B address on UDP `4433`.
 - [ ] The Agent selector matches the Gateway labels.
-- [ ] A and B completed enrollment with role-matching one-time tokens.
+- [ ] A and B completed Node enrollment with one-time tokens and each has the intended behavior spec.
 - [ ] Node certificates are active, Observed is healthy, and the Assignment is applied.
 - [ ] The Service `local_target` is reachable from the Agent process on A.
 - [ ] A client can reach the public service port on B.

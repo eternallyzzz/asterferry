@@ -1,9 +1,10 @@
 # AsterFerry deployment
 
-AsterFerry is deployed as one Controller and independently managed Gateway and
-Agent data-plane nodes. The Controller owns SQLite state, PKI, scheduling, RBAC
-and audit. Nodes receive typed snapshots and never expose a management HTTP API
-or read business YAML.
+AsterFerry is deployed as one Controller and independently managed data-plane
+Nodes. The Controller owns SQLite state, PKI, scheduling, RBAC and audit. A
+Node is a registered identity; its Gateway or Agent behavior is a separate
+specification selected in the Dashboard. Nodes receive typed snapshots and
+never expose a management HTTP API or read business YAML.
 
 For a copy-and-run three-server walkthrough in both languages, see the
 [English end-to-end quick start](../docs/quickstart.en.md) and the
@@ -27,8 +28,8 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-For an existing schema v3, v4 or v5 database, stop the Controller and run the
-explicit migration to schema v6 during a maintenance window. Validate first;
+For an existing schema v3, v4, v5 or v6 database, stop the Controller and run the
+explicit migration to schema v7 during a maintenance window. Validate first;
 the publish step retains the original file as a rollback backup:
 
 ```sh
@@ -46,57 +47,64 @@ last-known-good snapshot while it is unavailable.
 ## Node enrollment
 
 The recommended path is Dashboard → **Nodes** → **Generate install command**.
-Choose the role and target platform; this creates a pending installation intent,
-not an enrolled node. For a Gateway, enter its public AFDP endpoint and TCP/UDP
-port pools as data-plane preconfiguration. The Controller returns one
-short-lived, node-bound installer command; run it once on B or A as
-root/Administrator. The installer downloads and verifies the matching release,
-reaches the Controller to enroll the node, creates the system service and
-starts it. The identity and initial spec do not exist in the enrolled-node
-list until that enrollment succeeds. Once both nodes are online, create
-services in the Dashboard; resource changes trigger scheduling automatically.
+Choose only the target platform; this creates a pending generic installation
+intent, not an enrolled node. The Controller returns one short-lived,
+node-bound installer command; run it once on B or C as root/Administrator. The
+installer downloads and verifies the matching release, reaches the Controller
+to enroll the Node, creates the system service and starts it. The identity is
+not shown in the enrolled-node list until that enrollment succeeds. After the
+Node is online, open its details, select Gateway or Agent behavior, and save
+the spec. Configure the Gateway endpoint and port pools there. Once the
+Gateway and Agent are configured, create services in the Dashboard; resource
+changes trigger scheduling automatically.
 
-For offline images or custom service accounts, the manual path remains:
+For offline images or custom service accounts, create the generic Node identity
+first, then use a node-bound token in the manual path below:
 
 ```sh
-asterferry enroll-token create --config /var/lib/asterferry/controller.json --role gateway
-asterferry gateway enroll --controller controller.example:9443 \
+asterferry enroll-token create --config /var/lib/asterferry/controller.json --node-id gw-east
+asterferry node enroll --controller controller.example:9443 \
   --token <one-time-token> --node-id gw-east \
   --ca /var/lib/asterferry/ca/ca.crt \
-  --output /var/lib/asterferry/gateway-bootstrap.json
-asterferry gateway run --bootstrap /var/lib/asterferry/gateway-bootstrap.json
+  --output /var/lib/asterferry/node-bootstrap.json
+asterferry node run --bootstrap /var/lib/asterferry/node-bootstrap.json
 ```
 
-Repeat with `agent enroll` and `agent run` for Agents. A bootstrap file holds
-only Controller address, node identity, certificate/key, CA and cache/logging
-settings. Protect it as a secret. Certificate renewal is automatic seven days
-before expiry and is persisted atomically by the node runtime.
+The legacy `gateway`/`agent` enroll and run commands remain compatible with
+older bootstrap files. A bootstrap file holds only Controller address, node
+identity, certificate/key, CA and cache/logging settings. Protect it as a
+secret. Certificate renewal is automatic seven days before expiry and is
+persisted atomically by the node runtime.
 
 ## Linux service units
 
-Install the binary and create a dedicated `asterferry` account, then place each
-node's bootstrap file and writable state directory under its service account:
+Install the binary and create a dedicated `asterferry` account, then place the
+Node bootstrap file and writable state directory under its service account:
 
 ```sh
-install -m 0644 deploy/asterferry-gateway.service /etc/systemd/system/
+install -m 0644 deploy/asterferry-node.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now asterferry-gateway
+systemctl enable --now asterferry-node
 ```
 
-Use `asterferry-agent.service` on an Agent host and
-`asterferry-controller.service` for the Controller. Nodes need only their
-AFDP/2 QUIC endpoint (Gateway) and outbound Controller/data connectivity; all
-business changes go through the Controller API.
+Use the legacy `asterferry-agent.service` or `asterferry-gateway.service` only
+for older role-bound bootstrap files. Nodes need outbound Controller
+connectivity; a Node configured as Gateway additionally needs its AFDP/2 QUIC
+endpoint reachable by Agents. All business changes go through the Controller
+API.
 
 ## Docker Compose and Helm
 
-`deploy/docker/compose.yaml` runs the Controller, Gateway and Agent as separate
-services. The Controller directory is writable; node bootstrap/state mounts are
-isolated from it. Bootstrap mounts are writable because certificate rotation
-atomically replaces the file. `deploy/helm/asterferry-controller` creates a
-single-replica StatefulSet with a PVC. `deploy/helm/asterferry-node` copies the
-Secret-provided enrollment seed into its state PVC with an init container so
-rotation never mutates the Kubernetes Secret.
+`deploy/docker/compose.yaml` runs the Controller and two optional Node daemon
+slots. Both slots use the same generic Node binary; Gateway or Agent behavior is
+selected later by the Controller Node Spec. The old gateway/agent service names
+remain only as topology-compatible aliases for existing deployments. The
+Controller directory is writable; node bootstrap/state mounts are isolated from
+it. Bootstrap mounts are writable because certificate rotation atomically
+replaces the file. `deploy/helm/asterferry-controller` creates a single-replica
+StatefulSet with a PVC. `deploy/helm/asterferry-node` copies the Secret-provided
+enrollment seed into its state PVC with an init container so rotation never
+mutates the Kubernetes Secret.
 
 Each Gateway must have its own reachable public endpoint. Shared VIP takeover,
 transparent connection migration and Controller HA are outside the first

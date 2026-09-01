@@ -22,9 +22,11 @@ const (
 	v4DBFingerprint     = "asterferry-controller-sqlite-v4"
 	v5DBSchema          = 5
 	v5DBFingerprint     = "asterferry-controller-sqlite-v5"
+	v6DBSchema          = 6
+	v6DBFingerprint     = "asterferry-controller-sqlite-v6"
 )
 
-// MigrationReport describes the v3/v4/v5 -> v6 database migration without
+// MigrationReport describes the v3/v4/v5/v6 -> v7 database migration without
 // exposing any resource document or secret material.
 type MigrationReport struct {
 	Path                  string
@@ -38,7 +40,7 @@ type MigrationReport struct {
 	BackupPath            string
 }
 
-// MigrateDatabase upgrades an on-disk v3, v4, or v5 Controller database to v6. The
+// MigrateDatabase upgrades an on-disk v3, v4, v5, or v6 Controller database to v7. The
 // operation is deliberately separate from OpenStore: a running Controller
 // never performs an implicit schema rewrite. A consistent SQLite copy is
 // upgraded first, then the original file is moved aside and the copy is
@@ -76,8 +78,8 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 		report.AlreadyCurrent = true
 		return report, nil
 	}
-	if version != legacyDBSchema && version != v4DBSchema && version != v5DBSchema {
-		return report, fmt.Errorf("%w: migration supports schema %d (%s), schema %d (%s), or schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, v4DBSchema, v4DBFingerprint, v5DBSchema, v5DBFingerprint, version, fingerprint)
+	if version != legacyDBSchema && version != v4DBSchema && version != v5DBSchema && version != v6DBSchema {
+		return report, fmt.Errorf("%w: migration supports schema %d (%s), schema %d (%s), schema %d (%s), or schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, v4DBSchema, v4DBFingerprint, v5DBSchema, v5DBFingerprint, v6DBSchema, v6DBFingerprint, version, fingerprint)
 	}
 	if version == legacyDBSchema {
 		if fingerprint != legacyDBFingerprint {
@@ -87,10 +89,14 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, v4DBSchema, v4DBFingerprint, version, fingerprint)
 	} else if version == v5DBSchema && fingerprint != v5DBFingerprint {
 		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, v5DBSchema, v5DBFingerprint, version, fingerprint)
+	} else if version == v6DBSchema && fingerprint != v6DBFingerprint {
+		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, v6DBSchema, v6DBFingerprint, version, fingerprint)
 	}
 	tables := legacySchemaTables()
 	if version == v4DBSchema || version == v5DBSchema {
 		tables = schemaV5Tables()
+	} else if version == v6DBSchema {
+		tables = append(schemaV5Tables(), "node_bootstraps")
 	}
 	if err := validateTables(ctx, db, tables); err != nil {
 		return report, fmt.Errorf("validate legacy database: %w", err)
@@ -152,7 +158,7 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 }
 
 func currentSchemaTables() []string {
-	return append(schemaV5Tables(), "node_bootstraps")
+	return append(schemaV5Tables(), "node_bootstraps", "node_specs")
 }
 
 func legacySchemaTables() []string {
@@ -333,13 +339,22 @@ func upgradeMigrationCopy(ctx context.Context, path string, fromVersion int, rel
 	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)`); err != nil {
 		return fmt.Errorf("create idempotency retention index: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS node_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, kind TEXT NOT NULL, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, UNIQUE(node_id))`); err != nil {
+		return fmt.Errorf("create node spec table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_node_specs_kind ON node_specs(kind, node_id)`); err != nil {
+		return fmt.Errorf("create node spec index: %w", err)
+	}
+	if err := backfillNodeSpecsTx(ctx, tx); err != nil {
+		return fmt.Errorf("backfill node specs: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='schema_version'`, strconv.Itoa(currentDBSchema)); err != nil {
 		return fmt.Errorf("write migrated schema version: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='fingerprint'`, dbSchemaFingerprint); err != nil {
 		return fmt.Errorf("write migrated schema fingerprint: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=6`); err != nil {
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=7`); err != nil {
 		return fmt.Errorf("write sqlite user version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -385,7 +400,7 @@ func migrationDatabasePath(path string) (string, error) {
 }
 
 func publishMigrationCopy(originalPath, copyPath string) (string, error) {
-	backupPath, err := reserveMigrationPath(originalPath, ".asterferry-pre-v6-*")
+	backupPath, err := reserveMigrationPath(originalPath, ".asterferry-pre-v7-*")
 	if err != nil {
 		return "", fmt.Errorf("reserve migration backup: %w", err)
 	}

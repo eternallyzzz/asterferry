@@ -24,8 +24,11 @@ const (
 // provision an already-enrolled node. Existing specs are never replaced by a
 // bootstrap request.
 type NodeBootstrapRequest struct {
-	Platform    string              `json:"platform"`
-	Arch        string              `json:"arch"`
+	Platform string           `json:"platform"`
+	Arch     string           `json:"arch"`
+	Spec     *domain.NodeSpec `json:"spec,omitempty"`
+	// Deprecated typed fields are accepted for one release so existing
+	// automation can migrate without losing an enrolled node.
 	GatewaySpec *domain.GatewaySpec `json:"gateway_spec,omitempty"`
 	AgentSpec   *domain.AgentSpec   `json:"agent_spec,omitempty"`
 }
@@ -34,8 +37,10 @@ type NodeBootstrapRequest struct {
 // separate from NodeBootstrapRequest so the API cannot accidentally confuse a
 // command for an existing identity with the install-first lifecycle.
 type NodeInstallationRequest struct {
-	NodeID      string              `json:"node_id"`
-	Role        string              `json:"role"`
+	NodeID string           `json:"node_id"`
+	Spec   *domain.NodeSpec `json:"spec,omitempty"`
+	// Deprecated: behavior is no longer carried by the installer command.
+	Role        string              `json:"role,omitempty"`
 	Name        string              `json:"name"`
 	Labels      map[string]string   `json:"labels,omitempty"`
 	Enabled     *bool               `json:"enabled,omitempty"`
@@ -49,12 +54,14 @@ type NodeBootstrapResponse struct {
 	InstallationID string `json:"installation_id,omitempty"`
 	State          string `json:"state,omitempty"`
 	NodeID         string `json:"node_id"`
-	Role           string `json:"role"`
-	Platform       string `json:"platform"`
-	Arch           string `json:"arch"`
-	Version        string `json:"version"`
-	ExpiresAt      string `json:"expires_at"`
-	Command        string `json:"command"`
+	// Role is omitted for generic installations. It is retained in responses
+	// produced for legacy callers that already selected a behavior.
+	Role      string `json:"role,omitempty"`
+	Platform  string `json:"platform"`
+	Arch      string `json:"arch"`
+	Version   string `json:"version"`
+	ExpiresAt string `json:"expires_at"`
+	Command   string `json:"command"`
 }
 
 func normalizeBootstrapPlatform(platform, arch string) (string, string, error) {
@@ -164,13 +171,27 @@ func buildNodeInstallCommand(config Config, node domain.Node, platform, arch, to
 	installerURL := base + "/v" + version + "/" + installer
 	var command string
 	if platform == "windows" {
-		command = fmt.Sprintf("$script=(Invoke-WebRequest -UseBasicParsing -Uri %s).Content; & ([scriptblock]::Create($script)) -Role %s -NodeId %s -Controller %s -Token %s -CAPemB64 %s -ReleaseBaseURL %s -Version %s -Arch %s",
-			powerShellQuote(installerURL), powerShellQuote(node.Role), powerShellQuote(node.ID), powerShellQuote(config.GRPCAdvertise), powerShellQuote(token), powerShellQuote(caB64), powerShellQuote(base), powerShellQuote(version), powerShellQuote(arch))
+		command = fmt.Sprintf("$script=(Invoke-WebRequest -UseBasicParsing -Uri %s).Content; & ([scriptblock]::Create($script)) %s-NodeId %s -Controller %s -Token %s -CAPemB64 %s -ReleaseBaseURL %s -Version %s -Arch %s",
+			powerShellQuote(installerURL), bootstrapRolePowerShell(node.Role), powerShellQuote(node.ID), powerShellQuote(config.GRPCAdvertise), powerShellQuote(token), powerShellQuote(caB64), powerShellQuote(base), powerShellQuote(version), powerShellQuote(arch))
 	} else {
-		command = fmt.Sprintf("curl --fail --silent --show-error --location --proto '=https' --tlsv1.3 %s | sudo bash -s -- --role %s --node-id %s --controller %s --token %s --ca-pem-b64 %s --release-base-url %s --version %s --arch %s",
-			shellQuote(installerURL), shellQuote(node.Role), shellQuote(node.ID), shellQuote(config.GRPCAdvertise), shellQuote(token), shellQuote(caB64), shellQuote(base), shellQuote(version), shellQuote(arch))
+		command = fmt.Sprintf("curl --fail --silent --show-error --location --proto '=https' --tlsv1.3 %s | sudo bash -s -- %s--node-id %s --controller %s --token %s --ca-pem-b64 %s --release-base-url %s --version %s --arch %s",
+			shellQuote(installerURL), bootstrapRoleShell(node.Role), shellQuote(node.ID), shellQuote(config.GRPCAdvertise), shellQuote(token), shellQuote(caB64), shellQuote(base), shellQuote(version), shellQuote(arch))
 	}
 	return NodeBootstrapResponse{NodeID: node.ID, Role: node.Role, Platform: platform, Arch: arch, Version: version, Command: command}, nil
+}
+
+func bootstrapRoleShell(role string) string {
+	if role == "" {
+		return ""
+	}
+	return "--role " + shellQuote(role) + " "
+}
+
+func bootstrapRolePowerShell(role string) string {
+	if role == "" {
+		return ""
+	}
+	return "-Role " + powerShellQuote(role) + " "
 }
 
 func shellQuote(value string) string {

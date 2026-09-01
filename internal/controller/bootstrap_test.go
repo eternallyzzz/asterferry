@@ -347,6 +347,35 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	if spec, err := store.GetGatewaySpec(context.Background(), "gw-install"); err != nil || len(spec.PublicEndpoints) != 1 {
 		t.Fatalf("enrolled gateway spec = %#v, err=%v", spec, err)
 	}
+
+	// The supported install-first path is behavior-neutral. A Node identity is
+	// created only after enrollment, and the command must not smuggle a role
+	// hint into the daemon; behavior is selected later through NodeSpec.
+	genericBody, err := json.Marshal(NodeInstallationRequest{
+		NodeID: "generic-install", Name: "Generic install", Platform: "linux", Arch: "amd64",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	genericRequest := httptest.NewRequest(http.MethodPost, "/api/v1/node-installations", bytes.NewReader(genericBody))
+	genericRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	genericRequest.Header.Set("Content-Type", "application/json")
+	genericRequest.Header.Set("Idempotency-Key", "generic-install-once")
+	genericResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(genericResponse, genericRequest)
+	if genericResponse.Code != http.StatusCreated {
+		t.Fatalf("generic installation response = %d, body=%s", genericResponse.Code, genericResponse.Body.String())
+	}
+	var genericResult NodeBootstrapResponse
+	if err := json.Unmarshal(genericResponse.Body.Bytes(), &genericResult); err != nil {
+		t.Fatal(err)
+	}
+	if genericResult.Role != "" || strings.Contains(genericResult.Command, "--role") || strings.Contains(genericResult.Command, "-Role") {
+		t.Fatalf("generic installation command selected a behavior: %#v", genericResult)
+	}
+	if _, err := store.GetNode(context.Background(), "generic-install"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("generic node exists before enrollment: %v", err)
+	}
 }
 
 func TestDeleteNodeAllowsUnusedOwnedSpec(t *testing.T) {

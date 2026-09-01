@@ -37,7 +37,6 @@ const pendingDeleteUser = ref<ControllerUser | null>(null);
 const deletingUser = ref(false);
 const tokenDialogUser = ref<ControllerUser | null>(null);
 
-const enrollRole = ref<"gateway" | "agent">("gateway");
 const enrollTTL = ref("900");
 const issuing = ref(false);
 const issuedToken = ref("");
@@ -107,7 +106,7 @@ async function issueToken() {
   issuing.value = true;
   try {
     const ttl = Math.max(60, Math.min(900, Number(enrollTTL.value) || 900));
-    const result = await createEnrollmentToken(enrollRole.value, ttl, undefined, newIdempotencyKey());
+    const result = await createEnrollmentToken(undefined, ttl, undefined, newIdempotencyKey());
     issuedToken.value = result.token;
     notify.success("令牌已创建；明文只显示在当前页面，请立即复制。");
     await refresh();
@@ -181,12 +180,7 @@ async function confirmRevoke() {
     <div class="enroll-grid">
       <PanelCard title="签发 enrollment token">
         <form class="enroll-form" @submit.prevent="issueToken">
-          <FormField label="节点角色">
-            <select v-model="enrollRole">
-              <option value="gateway">Gateway</option>
-              <option value="agent">Agent</option>
-            </select>
-          </FormField>
+          <p class="form-note">这里签发的是通用 Node token。节点注册成功后，再在节点详情中保存 Gateway 或 Agent 行为规格。</p>
           <FormField label="有效期（秒）" hint="60 - 900">
             <input v-model="enrollTTL" type="number" min="60" max="900" />
           </FormField>
@@ -206,12 +200,12 @@ async function confirmRevoke() {
         <div v-if="loading" class="loading-row"><Spinner :size="18" /></div>
         <DataTable v-else :empty="!tokens.length">
           <thead>
-            <tr><th>ID</th><th>角色</th><th>过期时间</th><th>状态</th><th>操作</th></tr>
+            <tr><th>ID</th><th>类型</th><th>过期时间</th><th>状态</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="item in tokens" :key="item.id">
               <td><code>{{ item.id }}</code></td>
-              <td>{{ item.role === "gateway" ? "Gateway" : "Agent" }}</td>
+              <td>{{ item.role ? "兼容 token" : "通用 Node" }}</td>
               <td>{{ formatTime(item.expires_at) }}</td>
               <td>
                 <StatusPill v-if="item.used_at" tone="neutral">已使用/吊销</StatusPill>
@@ -224,7 +218,7 @@ async function confirmRevoke() {
             </tr>
           </tbody>
           <template #empty>
-            <EmptyState title="暂无 token 记录" description="签发的 token 会按角色与过期时间记录在这里。" />
+            <EmptyState title="暂无 token 记录" description="签发的 token 会按节点行为与过期时间记录在这里。" />
           </template>
         </DataTable>
       </PanelCard>

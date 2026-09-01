@@ -2,16 +2,16 @@
 
 AsterFerry is a private-network relay with a strict control-plane/data-plane
 split. The Controller is the only authority for identity, RBAC, desired state,
-scheduling, audit and SQLite persistence. Gateway and Agent nodes receive typed
-snapshots, keep an encrypted last-known-good cache, and carry traffic without
-an HTTP management surface.
+scheduling, audit and SQLite persistence. Nodes receive typed snapshots, keep
+an encrypted last-known-good cache, and carry traffic without an HTTP
+management surface; Gateway or Agent is selected by the Node Spec.
 
 ```text
-Dashboard / CLI -- HTTPS REST --> Controller -- mTLS gRPC --> Gateway / Agent
+  Dashboard / CLI -- HTTPS REST --> Controller -- mTLS gRPC --> Node daemon
                                       |
                                       +-- SQLite, audit, scheduling
 
-Gateway <============= AFDP/2 over QUIC =============> Agent
+  Node (Gateway behavior) <====== AFDP/2 over QUIC ======> Node (Agent behavior)
 ```
 
 This is a breaking generation. The current deployment accepts only the
@@ -20,7 +20,7 @@ Supervisor, management API, or v6 codec compatibility layer.
 
 ## Quick start
 
-For a complete three-server deployment (Controller, Gateway and Agent), use
+For a complete three-server deployment (Controller plus two Nodes), use
 the copy-and-run guides:
 
 - [End-to-end quick start in English](docs/quickstart.en.md)
@@ -39,27 +39,32 @@ asterferry controller run --config ./controller/controller.json
 ```
 
 Then open the Dashboard at `/dashboard/`. On the Nodes page create a pending
-installation task by choosing Gateway or Agent and the target platform. For a
-Gateway, enter its public AFDP endpoint and TCP/UDP port pools; this is
-data-plane configuration that A will use to reach B, not a second Controller
-registration address. The Controller returns one one-time Linux or Windows
-installer command. Run it once on B or A as Administrator/root. The command
-downloads and verifies the matching release, reaches the Controller to enroll
-the node, and starts its system service. The node and its initial spec are not
-created in the enrolled-node list until that first enrollment succeeds. After
-both nodes are online, create services in the Dashboard; the Controller
-schedules them automatically.
+installation task with only the Node ID, name, labels and target platform. The
+Controller returns one one-time Linux or Windows installer command. Run it once
+on the target Node host as Administrator/root. The command downloads and verifies
+the matching release, reaches the Controller to enroll the Node, and starts the generic
+`asterferry node run` service. The Node is not created in the enrolled-node list
+until that first enrollment succeeds.
 
-The manual enrollment path remains available for offline or custom images:
+After the Node is online, open its details and save a behavior spec: choose
+`Gateway` for the public node and configure its reachable AFDP endpoint/port
+pools, or choose `Agent` for the private node and configure its selector/routing.
+This is the only point where a
+Node becomes a Gateway or Agent. After both behavior specs are healthy, create
+services in the Dashboard; the Controller schedules them automatically.
+
+The manual enrollment path remains available for offline or custom images. The
+Node identity must already exist (the command below binds the token to it); for
+a new identity, use the install-first Dashboard flow:
 
 ```powershell
-asterferry enroll-token create --config ./controller/controller.json --role gateway
-asterferry gateway enroll --controller controller.example:9443 --token <one-time-token> --node-id gw-east --ca ./controller/ca/ca.crt --output gw-bootstrap.json
-asterferry gateway run --bootstrap gw-bootstrap.json
+asterferry enroll-token create --config ./controller/controller.json --node-id edge-east
+asterferry node enroll --controller controller.example:9443 --token <one-time-token> --node-id edge-east --ca ./controller/ca/ca.crt --output node-bootstrap.json
+asterferry node run --bootstrap node-bootstrap.json
 ```
 
-Use the corresponding `agent enroll` and `agent run --bootstrap` commands for
-an Agent. Business resources are managed through `/api/v1` or the optional
+The legacy `gateway` and `agent` commands remain available for existing
+role-bound bootstrap files. Business resources are managed through `/api/v1` or the optional
 Dashboard at `/dashboard/`. Mutating API requests use `If-Match` revisions and
 may include an `Idempotency-Key`.
 
@@ -79,9 +84,9 @@ are AES-GCM encrypted with the master key, passwords use Argon2id, and API or
 enrollment tokens are stored only as hashes.
 
 The REST API supports login/logout, Cookie sessions with CSRF protection, API
-tokens, fixed Viewer/Operator/Admin roles, Node/Gateway/Agent/Service CRUD,
-assignments, enrollment tokens, runtime actions, observed state, events and
-audit queries. `/healthz` is anonymous; `/readyz` and `/metrics` are protected
+tokens, fixed Viewer/Operator/Admin roles, Node and Node Spec resources,
+typed Gateway/Agent behavior documents, services, assignments, enrollment
+tokens, runtime actions, observed state, events and audit queries. `/healthz` is anonymous; `/readyz` and `/metrics` are protected
 by deployment policy. OpenAPI is served at `/openapi.yaml`.
 
 The Controller scheduler preserves a healthy existing assignment when possible,
@@ -100,7 +105,7 @@ asterferry controller migrate --config ./controller/controller.json --dry-run
 asterferry controller migrate --config ./controller/controller.json
 ```
 
-The command upgrades schema v3, v4 or v5 to v6, keeps the original database as
+The command upgrades schema v3, v4, v5 or v6 to v7, keeps the original database as
 a rollback backup, and never runs while `controller run` is active. Existing
 databases are not rewritten by `OpenStore`; take a complete Controller backup
 before the maintenance window.

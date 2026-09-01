@@ -23,13 +23,16 @@ services:
       timeout: 3s
       retries: 6
 
+  # These service names are deployment slots kept for compose compatibility;
+  # each process starts as a generic Node and receives its behavior from the
+  # Controller after enrollment.
   gateway:
     build:
       context: ../..
       dockerfile: Dockerfile
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
     user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
-    command: ["gateway", "run", "--bootstrap", "/var/lib/asterferry/gateway-bootstrap.json"]
+    command: ["node", "run", "--bootstrap", "/var/lib/asterferry/gateway-bootstrap.json"]
     working_dir: /var/lib/asterferry
     restart: unless-stopped
     stop_grace_period: 35s
@@ -56,7 +59,7 @@ services:
       dockerfile: Dockerfile
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
     user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
-    command: ["agent", "run", "--bootstrap", "/var/lib/asterferry/agent-bootstrap.json"]
+    command: ["node", "run", "--bootstrap", "/var/lib/asterferry/agent-bootstrap.json"]
     working_dir: /var/lib/asterferry
     restart: unless-stopped
     stop_grace_period: 35s

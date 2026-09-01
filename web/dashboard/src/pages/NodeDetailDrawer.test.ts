@@ -5,14 +5,12 @@ import type { ControllerNode } from "../controller-api";
 import NodeDetailDrawer from "./NodeDetailDrawer.vue";
 
 const apiMocks = vi.hoisted(() => ({
-  getGateway: vi.fn(),
-  getAgent: vi.fn(),
+  getNodeSpec: vi.fn(),
 }));
 
 vi.mock("../controller-api", async () => ({
   ...(await vi.importActual<typeof import("../controller-api")>("../controller-api")),
-  getGateway: apiMocks.getGateway,
-  getAgent: apiMocks.getAgent,
+  getNodeSpec: apiMocks.getNodeSpec,
 }));
 
 const stubs = {
@@ -43,7 +41,7 @@ const stubs = {
 function makeNode(id: string): ControllerNode {
   return {
     id,
-    role: "gateway",
+    spec_kind: "gateway",
     name: id,
     labels: {},
     enabled: true,
@@ -73,13 +71,12 @@ function mountDrawer(node: ControllerNode, open = true) {
 
 describe("NodeDetailDrawer", () => {
   afterEach(() => {
-    apiMocks.getGateway.mockReset();
-    apiMocks.getAgent.mockReset();
+    apiMocks.getNodeSpec.mockReset();
   });
 
   it("keeps the selected section when the same node object is refreshed", async () => {
     const node = makeNode("gw-1");
-    apiMocks.getGateway.mockResolvedValue(makeSpec(node.id));
+    apiMocks.getNodeSpec.mockResolvedValue({ node_id: node.id, kind: "gateway", gateway: makeSpec(node.id), revision: 1 });
     const wrapper = mountDrawer(node);
     await flushPromises();
 
@@ -97,7 +94,7 @@ describe("NodeDetailDrawer", () => {
   it("resets the section when switching nodes or reopening the drawer", async () => {
     const first = makeNode("gw-1");
     const second = makeNode("gw-2");
-    apiMocks.getGateway.mockImplementation(async (id: string) => makeSpec(id));
+    apiMocks.getNodeSpec.mockImplementation(async (id: string) => ({ node_id: id, kind: "gateway", gateway: makeSpec(id), revision: 1 }));
     const wrapper = mountDrawer(first);
     await flushPromises();
 
@@ -120,17 +117,17 @@ describe("NodeDetailDrawer", () => {
     const first = makeNode("gw-1");
     const second = makeNode("gw-2");
     const pending = new Map<string, (value: unknown) => void>();
-    apiMocks.getGateway.mockImplementation((id: string) => new Promise((resolve) => {
+    apiMocks.getNodeSpec.mockImplementation((id: string) => new Promise((resolve) => {
       pending.set(id, resolve);
     }));
     const wrapper = mountDrawer(first);
     await wrapper.setProps({ node: second });
 
-    pending.get(first.id)?.(makeSpec(first.id));
+    pending.get(first.id)?.({ node_id: first.id, kind: "gateway", gateway: makeSpec(first.id), revision: 1 });
     await flushPromises();
     expect(wrapper.find(".json-editor-stub").exists()).toBe(false);
 
-    pending.get(second.id)?.(makeSpec(second.id));
+    pending.get(second.id)?.({ node_id: second.id, kind: "gateway", gateway: makeSpec(second.id), revision: 1 });
     await flushPromises();
     expect((wrapper.get(".json-editor-stub").element as HTMLTextAreaElement).value).toContain(second.id);
     wrapper.unmount();

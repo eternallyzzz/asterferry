@@ -13,7 +13,7 @@ tags:
   - name: auth
     description: Authentication, users, and API tokens.
   - name: nodes
-    description: Enrolled Gateway and Agent identities and observed state.
+    description: Enrolled Node identities, behavior specs, and observed state.
   - name: resources
     description: Typed desired-state resources.
   - name: operations
@@ -122,10 +122,10 @@ components:
         updated_at: { type: string, format: date-time }
     Node:
       type: object
-      required: [id, role, name, enabled, certificate_state]
+      required: [id, name, enabled, certificate_state]
       properties:
         id: { type: string }
-        role: { type: string, enum: [gateway, agent] }
+        spec_kind: { type: string, enum: [gateway, agent], description: Configured behavior projection; omitted until a spec is saved. }
         name: { type: string }
         labels: { type: object, additionalProperties: { type: string } }
         enabled: { type: boolean }
@@ -134,22 +134,37 @@ components:
         revision: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    NodeSpec:
+      type: object
+      required: [node_id, kind]
+      description: The behavior selected for a Node. Exactly one typed document is present.
+      properties:
+        node_id: { type: string }
+        kind: { type: string, enum: [gateway, agent] }
+        gateway: { $ref: '#/components/schemas/GatewaySpec' }
+        agent: { $ref: '#/components/schemas/AgentSpec' }
+        revision: { type: integer, format: int64 }
+        updated_at: { type: string, format: date-time }
+      oneOf:
+        - required: [gateway]
+        - required: [agent]
     NodeBootstrapRequest:
       type: object
       required: [platform, arch]
       properties:
         platform: { type: string, enum: [linux, windows] }
         arch: { type: string, enum: [amd64, arm64] }
+        spec: { $ref: '#/components/schemas/NodeSpec' }
         gateway_spec: { $ref: '#/components/schemas/GatewaySpec' }
         agent_spec: { $ref: '#/components/schemas/AgentSpec' }
     NodeBootstrapResponse:
       type: object
-      required: [node_id, role, platform, arch, version, expires_at, command]
+      required: [node_id, platform, arch, version, expires_at, command]
       properties:
         installation_id: { type: string, description: Pending installation identifier; set only by the install-first endpoint. }
         state: { type: string, enum: [pending], description: Pending installation state; set only by the install-first endpoint. }
         node_id: { type: string }
-        role: { type: string, enum: [gateway, agent] }
+        role: { type: string, enum: [gateway, agent], deprecated: true, description: Present only for legacy role-bound requests. }
         platform: { type: string, enum: [linux, windows] }
         arch: { type: string, enum: [amd64, arm64] }
         version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
@@ -157,24 +172,25 @@ components:
         command: { type: string }
     NodeInstallationRequest:
       type: object
-      required: [node_id, role, name, platform, arch]
+      required: [node_id, name, platform, arch]
       description: Creates a pending installation intent. It does not create an enrolled node until the installer completes Enroll.
       properties:
         node_id: { type: string, minLength: 1, maxLength: 128 }
-        role: { type: string, enum: [gateway, agent] }
+        role: { type: string, enum: [gateway, agent], deprecated: true }
         name: { type: string, minLength: 1, maxLength: 256 }
         labels: { type: object, additionalProperties: { type: string } }
         enabled: { type: boolean, default: true }
         platform: { type: string, enum: [linux, windows] }
         arch: { type: string, enum: [amd64, arm64] }
+        spec: { $ref: '#/components/schemas/NodeSpec' }
         gateway_spec: { $ref: '#/components/schemas/GatewaySpec' }
         agent_spec: { $ref: '#/components/schemas/AgentSpec' }
     PendingNodeInstallation:
       type: object
-      required: [node_id, role, name, enabled, platform, arch, expires_at, created_at]
+      required: [node_id, name, enabled, platform, arch, expires_at, created_at]
       properties:
         node_id: { type: string }
-        role: { type: string, enum: [gateway, agent] }
+        spec_kind: { type: string, enum: [gateway, agent], description: Initial behavior, omitted for a generic pending installation. }
         name: { type: string }
         labels: { type: object, additionalProperties: { type: string } }
         enabled: { type: boolean }
@@ -283,6 +299,7 @@ paths:
   /me: { get: { responses: { "200": { description: Current user } } } }
   /nodes: { get: { responses: { "200": { description: Nodes } } }, post: { responses: { "201": { description: Created }, "409": { description: Conflict } } } }
   /nodes/{nodeId}: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Node } } }, patch: { responses: { "200": { description: Updated }, "409": { description: Conflict } } }, delete: { responses: { "204": { description: Deleted } } } }
+  /nodes/{nodeId}/spec: { parameters: [{ $ref: '#/components/parameters/NodeId' }], get: { responses: { "200": { description: Configured Node behavior, content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } } }, "404": { description: Node has no behavior spec yet } } }, put: { requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } } }, responses: { "200": { description: Updated behavior }, "201": { description: First behavior }, "409": { description: Conflict } } }, delete: { responses: { "204": { description: Behavior removed } } } }
   /nodes/{nodeId}/bootstrap: { parameters: [{ $ref: '#/components/parameters/NodeId' }], post: { requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapRequest' } } } }, responses: { "201": { description: One-time platform installer command, content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } } }, "409": { description: Token already created }, "503": { description: Bootstrap configuration unavailable } } } }
   /node-installations: { get: { responses: { "200": { description: Pending node installations, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/PendingNodeInstallation' } } } } } } } }, post: { requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NodeInstallationRequest' } } } }, responses: { "201": { description: One-time platform installer command; the node is created only after enrollment, content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } } }, "409": { description: Pending installation conflict or unrecoverable token retry }, "503": { description: Bootstrap configuration unavailable } } } }
   /node-installations/{nodeId}: { parameters: [{ $ref: '#/components/parameters/NodeId' }], delete: { responses: { "204": { description: Pending installation cancelled }, "404": { description: Pending installation not found } } } }

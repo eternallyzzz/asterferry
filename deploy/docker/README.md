@@ -1,7 +1,7 @@
 # Docker Compose deployment
 
-This Compose file runs the Controller, Gateway and Agent as independent
-processes. Only the Controller mounts the SQLite/CA/TLS directory. Nodes mount
+This Compose file runs the Controller and two generic Node deployment slots as
+independent processes. Only the Controller mounts the SQLite/CA/TLS directory. Nodes mount
 an enrolled bootstrap JSON and an encrypted state directory; they do not mount
 YAML business configuration or expose a management API.
 
@@ -16,8 +16,10 @@ asterferry controller init --dir ./controller `
 docker compose -f deploy/docker/compose.yaml build
 ```
 
-Create a Gateway and Agent Node in the Controller, mint role-bound enrollment
-tokens, and enroll their bootstrap files. By default Compose expects:
+Create two generic Node installation tasks in the Controller and run the
+generated commands on the target hosts, or enroll bootstrap files manually.
+After each Node is online, select Gateway or Agent behavior in its Dashboard
+detail page. By default Compose expects:
 
 ```text
 controller/controller.json
@@ -43,8 +45,8 @@ docker compose -f deploy/docker/compose.yaml ps
 ```
 
 The Controller health check is anonymous `/healthz`; readiness and metrics are
-authenticated API endpoints. Gateway and Agent reconnect to the Controller and
-continue their last encrypted snapshot while it is unavailable.
+authenticated API endpoints. Nodes reconnect to the Controller and continue
+their last encrypted snapshot while it is unavailable.
 
 Stop the stack with `docker compose ... down`. Back up the Controller before
 upgrades using `asterferry controller backup`; restore into a fresh data

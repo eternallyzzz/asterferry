@@ -46,6 +46,13 @@ func (s *Server) nodeBootstrap(w http.ResponseWriter, r *http.Request, nodeID st
 		writeStoreError(w, err)
 		return
 	}
+	// ensureBootstrapSpec may have materialized the first behavior for a
+	// generic identity. Reload the node before binding the one-time token so the
+	// token role and generated command cannot carry the stale empty hint.
+	if node, err = s.store.GetNode(r.Context(), nodeID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	plain, token, err := s.store.CreateNodeEnrollmentTokenWithOptions(r.Context(), node.ID, node.Role, EnrollmentTTL, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		if errors.Is(err, ErrSecretAlreadyCreated) {
@@ -65,6 +72,31 @@ func (s *Server) nodeBootstrap(w http.ResponseWriter, r *http.Request, nodeID st
 }
 
 func (s *Server) ensureBootstrapSpec(r *http.Request, node domain.Node, input NodeBootstrapRequest, actor string) error {
+	if _, err := s.store.GetNodeSpec(r.Context(), node.ID); err == nil {
+		// Existing behavior is never replaced by an install/bootstrap request.
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if input.Spec != nil {
+		spec := *input.Spec
+		spec.NodeID = node.ID
+		if spec.Gateway != nil {
+			spec.Gateway.NodeID = node.ID
+		}
+		if spec.Agent != nil {
+			spec.Agent.NodeID = node.ID
+		}
+		if spec.Kind == "" {
+			switch {
+			case spec.Gateway != nil:
+				spec.Kind = domain.NodeSpecGateway
+			case spec.Agent != nil:
+				spec.Kind = domain.NodeSpecAgent
+			}
+		}
+		return s.store.PutNodeSpec(r.Context(), spec, WriteOptions{Actor: actor})
+	}
 	if node.Role == domain.RoleGateway {
 		_, err := s.store.GetGatewaySpec(r.Context(), node.ID)
 		if err == nil {
@@ -93,8 +125,8 @@ func (s *Server) ensureBootstrapSpec(r *http.Request, node domain.Node, input No
 			return err
 		}
 		spec := domain.AgentSpec{
-			NodeID: node.ID,
-			Limits: domain.AgentLimits{MaxConnections: 4096, MaxStreams: 1024, MaxBufferBytes: 64 << 20},
+			NodeID:  node.ID,
+			Limits:  domain.AgentLimits{MaxConnections: 4096, MaxStreams: 1024, MaxBufferBytes: 64 << 20},
 			Logging: domain.LoggingPolicy{Level: "info", Format: "json"},
 		}
 		if input.AgentSpec != nil {
@@ -104,7 +136,9 @@ func (s *Server) ensureBootstrapSpec(r *http.Request, node domain.Node, input No
 		}
 		return s.store.PutAgentSpec(r.Context(), spec, WriteOptions{Actor: actor})
 	}
-	return &domain.ApplyError{Code: "invalid_role", Path: "node.role", Message: "node role must be gateway or agent"}
+	// A generic node may be bootstrapped before its behavior is chosen. It will
+	// enroll, establish a control stream, and remain idle until /spec is set.
+	return nil
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

@@ -165,29 +165,31 @@ https://controller.example.com:8443/dashboard/
 登录 `https://controller.example.com:8443/dashboard/`，打开“节点”页。
 所有业务配置仍由 Controller 管理，A、B 不读取业务 YAML。
 
-### 4.1 创建 Gateway
+### 4.1 创建第一个 Node 安装任务
 
-点击“生成安装命令”，填写 Node ID、名称、标签，角色选择 `Gateway`，再选择 B 的实际平台和架构。这里创建的是“待安装任务”，不会立即创建正式节点。Gateway 额外填写：
+点击“生成安装命令”，填写 Node ID、名称、标签，再选择目标机器的平台和架构。这里不选择 Gateway/Agent，也不填写 AFDP 地址；创建的是“待安装任务”，不会立即创建正式节点。
 
-- `公网 AFDP 地址`：例如 `gateway.example.com:4433`。这是 A 连接 B 的 UDP 地址，不是业务服务端口。
-- `TCP 端口池`、`UDP 端口池`：例如 `28080-28999`，用于 Dashboard 创建服务时自动分配公网端口。
+提交后 Dashboard 会返回一条只显示一次的安装命令。把 B 的命令复制到 B、把 A 的命令复制到 A：Linux 在 root shell 执行，Windows 在“以管理员身份运行”的 PowerShell 执行。目标机器执行命令并首次连接 Controller 完成 Enroll 后，Node 才会出现在正式节点列表。
 
-提交后 Dashboard 会返回一条只显示一次的安装命令。把命令复制到 B：Linux 在 root shell 执行，Windows 在“以管理员身份运行”的 PowerShell 执行。B 执行命令并首次连接 Controller 完成 Enroll 后，节点才会出现在正式节点列表。
+### 4.2 在 Node 详情配置行为
 
-### 4.2 创建 Agent
+节点上线后，打开对应 Node 的“详情”→“规格”，选择行为并保存：
 
-再次点击“生成安装命令”，角色选择 `Agent`，填写 A 的平台和架构即可；Agent 会自动生成可用的默认规格。提交后把命令复制到 A 执行。
+- B 选择 `Gateway`，在规格 JSON 中配置 `public_endpoints`、监听器和 TCP/UDP 端口池；`public_endpoints` 是 A 连接 B 的数据面地址，不是 Controller 地址。
+- A 选择 `Agent`，配置 `gateway_selector`、代理入口和路由。
+
+行为保存后，Controller 才会向 Node 下发对应数据面快照。删除规格会让 Node 回到未配置状态；切换已有行为前需先删除当前规格。
 
 安装命令会下载与 Controller 配置版本完全一致的官方发布包，校验 SHA-256，写入 CA 和 bootstrap/cache 私有目录，调用一次性节点 Token 完成证书 enrollment，并创建、启用和启动系统服务：
 
-- Linux：`asterferry-gateway.service` 或 `asterferry-agent.service`。
-- Windows：`AsterFerry-gateway` 或 `AsterFerry-agent` Windows 服务。
+- Linux：`asterferry-Node.service`。
+- Windows：`AsterFerry-Node` Windows 服务。
 
-Token 默认 15 分钟有效，只能用于创建它对应的 Node ID 和角色。命令不要发到公开聊天、工单或日志中；过期或丢失时，在“待安装任务”中重新生成即可。B、A 不需要手工复制 CA、编辑 bootstrap JSON 或执行第二条启动命令。
+Token 默认 15 分钟有效，只能用于创建它对应的 Node ID。命令不要发到公开聊天、工单或日志中；过期或丢失时，在“待安装任务”中重新生成即可。B、A 不需要手工复制 CA、编辑 bootstrap JSON 或执行第二条启动命令。
 
 ### 4.3 旧版/高级手工 enrollment
 
-仍可使用 `enroll-token create`、`gateway enroll`、`agent enroll` 和 systemd/Windows 服务模板完成手工部署，适合离线镜像、私有发布源或自定义服务账户。手工流程与一键命令使用相同的 15 分钟角色绑定 Token；不要混用 Gateway 和 Agent Token。
+仍可使用 `enroll-token create`、`node enroll`、`node run` 和 systemd/Windows 服务模板完成手工部署，适合离线镜像、私有发布源或自定义服务账户。旧的 `gateway`/`agent` 命令继续兼容已有 bootstrap 文件。
 
 ## 5. 创建第一个 TCP 服务
 
@@ -220,7 +222,7 @@ UDP 服务的配置方式相同，只需把协议改为 UDP、端口改为 `2808
 
 在 Dashboard 检查：
 
-1. “节点” → Gateway/Agent →“观测”：节点应为健康，已应用 Generation 应大于 0。
+1. “节点” → 对应 Node →“观测”：节点应为健康，已应用 Generation 应大于 0；“信息”中的行为规格应显示 Gateway 或 Agent。
 2. “调度”：Assignment 应为 `applied`，端点应显示 `gateway.example.com:4433`，绑定应显示 `28080/tcp`。
 3. “活动”：可以看到节点、服务、调度和运行时事件。
 
@@ -362,7 +364,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-v3/v4/v5 数据库升级必须停止 Controller，先 dry-run 再发布到当前 schema v6：
+v3/v4/v5/v6 数据库升级必须停止 Controller，先 dry-run 再发布到当前 schema v7：
 
 ```sh
 asterferry controller migrate --config ./controller/controller.json --dry-run
@@ -377,9 +379,9 @@ Controller 暂时不可用时，节点会继续使用加密的 last-known-good �
 
 - [ ] C 的 `8443/tcp` 和 `9443/tcp` 已监听并可达。
 - [ ] Dashboard 可以登录，Gateway 和 Agent 已完成安装并注册。
-- [ ] Gateway `public_endpoints` 使用 B 的可达 `4433/udp` 地址。
+- [ ] Gateway 行为的 `public_endpoints` 使用 B 的可达 `4433/udp` 地址。
 - [ ] Agent selector 与 Gateway 标签匹配。
-- [ ] A、B 已用角色匹配的一次性 token 完成 enrollment。
+- [ ] A、B 已完成 Node 一次性 token enrollment，并分别保存了 Agent/Gateway 行为规格。
 - [ ] 节点证书为 active，观测健康，Assignment 为 applied。
 - [ ] Service 的 `local_target` 从 A 的 Agent 进程视角可访问。
 - [ ] 客户端可以访问 B 的业务端口。

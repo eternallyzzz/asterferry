@@ -19,7 +19,7 @@ import (
 // committed together, so a failed or racing enrollment cannot leave a node
 // that has no certificate, or a certificate for a node that has no spec.
 func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, token, role, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
-	if pending.Role != role {
+	if pending.Role != "" && pending.Role != role {
 		return Certificate{}, ErrEnrollmentRoleMismatch
 	}
 	if pending.NodeID != nodeID {
@@ -56,7 +56,7 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 	if current.TokenHash != HashToken(token) {
 		return Certificate{}, ErrInvalidEnrollmentToken
 	}
-	if current.Role != role {
+	if current.Role != "" && current.Role != role {
 		return Certificate{}, ErrEnrollmentRoleMismatch
 	}
 	if !time.Now().UTC().Before(current.ExpiresAt) {
@@ -107,6 +107,13 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 		if _, err := tx.ExecContext(ctx, `INSERT INTO gateway_specs(node_id,document_json,revision,updated_at) VALUES(?,?,?,?)`, nodeID, document, 1, now.Format(time.RFC3339Nano)); err != nil {
 			return Certificate{}, storageFailure("create enrolled gateway spec", err)
 		}
+		envelope, err := json.Marshal(domain.NodeSpec{NodeID: nodeID, Kind: domain.NodeSpecGateway, Gateway: &spec, Revision: 1, UpdatedAt: now})
+		if err != nil {
+			return Certificate{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, nodeID, string(domain.NodeSpecGateway), envelope, 1, now.Format(time.RFC3339Nano)); err != nil {
+			return Certificate{}, storageFailure("create enrolled gateway node spec", err)
+		}
 	} else if len(current.AgentSpecJSON) > 0 {
 		var spec domain.AgentSpec
 		if err := json.Unmarshal(current.AgentSpecJSON, &spec); err != nil {
@@ -124,8 +131,13 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_specs(node_id,document_json,revision,updated_at) VALUES(?,?,?,?)`, nodeID, document, 1, now.Format(time.RFC3339Nano)); err != nil {
 			return Certificate{}, storageFailure("create enrolled agent spec", err)
 		}
-	} else {
-		return Certificate{}, errors.New("pending node bootstrap has no node spec")
+		envelope, err := json.Marshal(domain.NodeSpec{NodeID: nodeID, Kind: domain.NodeSpecAgent, Agent: &spec, Revision: 1, UpdatedAt: now})
+		if err != nil {
+			return Certificate{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, nodeID, string(domain.NodeSpecAgent), envelope, 1, now.Format(time.RFC3339Nano)); err != nil {
+			return Certificate{}, storageFailure("create enrolled agent node spec", err)
+		}
 	}
 	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial, "role": role}); err != nil {
 		return Certificate{}, storageFailure("record pending node enrollment", err)

@@ -195,7 +195,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		slog.Default().Error("control stream node lookup failed", "node_id", hello.GetNodeId(), "error", err)
 		return status.Error(codes.Unavailable, "controller storage is temporarily unavailable")
 	}
-	if node.Role != role || !node.Enabled || node.CertificateState != domain.CertificateActive {
+	if (role != "" && node.Role != role) || !node.Enabled || node.CertificateState != domain.CertificateActive {
 		return status.Error(codes.PermissionDenied, "control stream authentication failed")
 	}
 	if certificate, certErr := peerCertificate(stream.Context()); certErr != nil || node.CertificateSerial == "" || !strings.EqualFold(certificate.SerialNumber.Text(16), node.CertificateSerial) {
@@ -820,8 +820,10 @@ func protoRole(role v1.NodeRole) (string, error) {
 		return domain.RoleGateway, nil
 	case v1.NodeRole_NODE_ROLE_AGENT:
 		return domain.RoleAgent, nil
+	case v1.NodeRole_NODE_ROLE_UNSPECIFIED:
+		return "", nil
 	default:
-		return "", errors.New("node role is required")
+		return "", errors.New("node behavior value is invalid")
 	}
 }
 

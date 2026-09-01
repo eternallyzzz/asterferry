@@ -40,12 +40,14 @@ type Bootstrap struct {
 	// certificate on every reconnect.
 	ControllerServerName string `json:"controller_server_name,omitempty"`
 	NodeID               string `json:"node_id"`
-	Role                 string `json:"role"`
-	CertificatePEM       string `json:"certificate_pem"`
-	PrivateKeyPEM        string `json:"private_key_pem"`
-	CAPEM                string `json:"ca_pem"`
-	CachePath            string `json:"cache_path"`
-	LogLevel             string `json:"log_level"`
+	// Role is an optional legacy runtime hint. The Controller binds the
+	// certificate to NodeID; active behavior is delivered later as a spec.
+	Role           string `json:"role,omitempty"`
+	CertificatePEM string `json:"certificate_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+	CAPEM          string `json:"ca_pem"`
+	CachePath      string `json:"cache_path"`
+	LogLevel       string `json:"log_level"`
 }
 
 type EnrollOptions struct {
@@ -65,8 +67,8 @@ func GenerateCSR(nodeID, role string) (der []byte, privateKeyPEM []byte, err err
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return nil, nil, err
 	}
-	if role != domain.RoleGateway && role != domain.RoleAgent {
-		return nil, nil, errors.New("node role must be gateway or agent")
+	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
+		return nil, nil, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -90,8 +92,8 @@ func GenerateCSRWithPrivateKey(nodeID, role string, privateKeyPEM []byte) ([]byt
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return nil, err
 	}
-	if role != domain.RoleGateway && role != domain.RoleAgent {
-		return nil, errors.New("node role must be gateway or agent")
+	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
+		return nil, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	block, _ := pem.Decode(privateKeyPEM)
 	if block == nil {
@@ -109,7 +111,11 @@ func GenerateCSRWithPrivateKey(nodeID, role string, privateKeyPEM []byte) ([]byt
 }
 
 func createCSR(nodeID, role string, private ed25519.PrivateKey) ([]byte, error) {
-	return x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}}, private)
+	organization := []string{"AsterFerry"}
+	if role != "" {
+		organization = append(organization, role)
+	}
+	return x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: organization}}, private)
 }
 
 func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
@@ -119,8 +125,8 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	if strings.TrimSpace(options.ControllerAddress) == "" || strings.TrimSpace(options.Token) == "" {
 		return Bootstrap{}, errors.New("controller address and enrollment token are required")
 	}
-	if options.Role != domain.RoleGateway && options.Role != domain.RoleAgent {
-		return Bootstrap{}, errors.New("node role must be gateway or agent")
+	if options.Role != "" && options.Role != domain.RoleGateway && options.Role != domain.RoleAgent {
+		return Bootstrap{}, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	if err := domain.ValidateID(options.NodeID, "node_id"); err != nil {
 		return Bootstrap{}, err
@@ -166,8 +172,10 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	}
 	defer conn.Close()
 	client := v1.NewControlClient(conn)
-	roleValue := v1.NodeRole_NODE_ROLE_GATEWAY
-	if options.Role == domain.RoleAgent {
+	roleValue := v1.NodeRole_NODE_ROLE_UNSPECIFIED
+	if options.Role == domain.RoleGateway {
+		roleValue = v1.NodeRole_NODE_ROLE_GATEWAY
+	} else if options.Role == domain.RoleAgent {
 		roleValue = v1.NodeRole_NODE_ROLE_AGENT
 	}
 	requestCtx, cancelRequest := boundedControllerContext(ctx, controllerRequestTimeout)
@@ -249,8 +257,8 @@ func validateBootstrap(bootstrap Bootstrap) error {
 	if err := domain.ValidateID(bootstrap.NodeID, "node_id"); err != nil {
 		return err
 	}
-	if bootstrap.Role != domain.RoleGateway && bootstrap.Role != domain.RoleAgent {
-		return errors.New("bootstrap role must be gateway or agent")
+	if bootstrap.Role != "" && bootstrap.Role != domain.RoleGateway && bootstrap.Role != domain.RoleAgent {
+		return errors.New("bootstrap behavior must be gateway or agent when supplied")
 	}
 	certificate, err := tls.X509KeyPair([]byte(bootstrap.CertificatePEM), []byte(bootstrap.PrivateKeyPEM))
 	if err != nil || len(certificate.Certificate) == 0 {

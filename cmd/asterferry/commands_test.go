@@ -9,7 +9,7 @@ import (
 func TestRootExposesOnlyCurrentGenerationCommands(t *testing.T) {
 	var out bytes.Buffer
 	root := newRootCommand(&out, &out)
-	for _, name := range []string{"controller", "enroll-token", "gateway", "agent", "healthcheck", "version", "completion"} {
+	for _, name := range []string{"controller", "enroll-token", "node", "gateway", "agent", "healthcheck", "version", "completion"} {
 		if command, _, err := root.Find([]string{name}); err != nil || command == root {
 			t.Fatalf("missing command %q", name)
 		}
@@ -25,7 +25,11 @@ func TestRootExposesOnlyCurrentGenerationCommands(t *testing.T) {
 }
 
 func TestNodeRunRequiresBootstrap(t *testing.T) {
-	err := run([]string{"gateway", "run"})
+	err := run([]string{"node", "run"})
+	if err == nil || !strings.Contains(err.Error(), "--bootstrap is required") {
+		t.Fatalf("generic node run error = %v", err)
+	}
+	err = run([]string{"gateway", "run"})
 	if err == nil || !strings.Contains(err.Error(), "--bootstrap is required") {
 		t.Fatalf("gateway run error = %v", err)
 	}

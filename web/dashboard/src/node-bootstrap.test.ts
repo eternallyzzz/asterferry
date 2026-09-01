@@ -4,7 +4,7 @@ import { buildGatewayBootstrapSpec, formatPortRanges, parsePortRanges } from "./
 
 const gateway: ControllerNode = {
   id: "gw-public",
-  role: "gateway",
+  spec_kind: "gateway",
   name: "Public Gateway",
   labels: { site: "public" },
   enabled: true,

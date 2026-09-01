@@ -105,8 +105,8 @@ func newControllerMigrateCommand() *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "upgrade a stopped v3 or v4 Controller database to schema v5",
-		Long:  "validate and upgrade a stopped v3 or v4 Controller database in a maintenance window; the original database is retained as a rollback backup",
+		Short: "upgrade a stopped v3-v6 Controller database to schema v7",
+		Long:  "validate and upgrade a stopped v3-v6 Controller database in a maintenance window; the original database is retained as a rollback backup",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			config, err := controller.LoadConfig(path)
@@ -181,9 +181,9 @@ func newEnrollTokenCommand() *cobra.Command {
 }
 
 func newEnrollTokenCreateCommand() *cobra.Command {
-	var path, role string
+	var path, role, nodeID string
 	var ttl time.Duration
-	cmd := &cobra.Command{Use: "create", Short: "create a single-use, role-bound enrollment token", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	cmd := &cobra.Command{Use: "create", Short: "create a single-use node enrollment token", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		config, err := controller.LoadConfig(path)
 		if err != nil {
 			return err
@@ -197,7 +197,13 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 			return err
 		}
 		defer store.Close()
-		plain, token, err := store.CreateEnrollmentToken(cmd.Context(), role, ttl)
+		var plain string
+		var token controller.EnrollmentToken
+		if strings.TrimSpace(nodeID) != "" {
+			plain, token, err = store.CreateNodeEnrollmentToken(cmd.Context(), nodeID, role, ttl)
+		} else {
+			plain, token, err = store.CreateEnrollmentToken(cmd.Context(), role, ttl)
+		}
 		if err != nil {
 			return err
 		}
@@ -205,9 +211,15 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 		return err
 	}}
 	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
-	cmd.Flags().StringVar(&role, "role", "", "node role: gateway or agent")
+	cmd.Flags().StringVar(&role, "role", "", "optional legacy behavior binding: gateway or agent")
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "bind the token to an existing generic Node identity")
 	cmd.Flags().DurationVar(&ttl, "ttl", controller.EnrollmentTTL, "token lifetime (maximum 15m)")
-	_ = cmd.MarkFlagRequired("role")
+	return cmd
+}
+
+func newNodeCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "node", Short: "enroll and run the generic AsterFerry node daemon"}
+	cmd.AddCommand(newNodeEnrollCommand(""), newNodeRunCommand())
 	return cmd
 }
 
@@ -303,12 +315,24 @@ func newAgentRunCommand() *cobra.Command {
 	return cmd
 }
 
+func newNodeRunCommand() *cobra.Command {
+	var bootstrapPath string
+	cmd := &cobra.Command{Use: "run", Short: "run the generic Node daemon", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if strings.TrimSpace(bootstrapPath) == "" {
+			return &codedError{code: 2, err: errors.New("--bootstrap is required; configure behavior in the Controller Dashboard")}
+		}
+		return runNodeBootstrap(cmd.Context(), bootstrapPath, "", cmd.ErrOrStderr())
+	}}
+	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
+	return cmd
+}
+
 func runNodeBootstrap(ctx context.Context, path, role string, errorsOut io.Writer) error {
 	bootstrap, err := node.LoadBootstrap(path)
 	if err != nil {
 		return err
 	}
-	if bootstrap.Role != role {
+	if role != "" && bootstrap.Role != role {
 		return fmt.Errorf("bootstrap role %q cannot run as %s", bootstrap.Role, role)
 	}
 	runtime, err := node.NewRuntime(bootstrap, node.RuntimeOptions{BootstrapPath: path, Logger: slog.New(slog.NewTextHandler(errorsOut, &slog.HandlerOptions{Level: slog.LevelInfo}))})

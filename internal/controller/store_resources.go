@@ -63,22 +63,32 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 
 func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, role, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at FROM nodes WHERE id = ?`, id)
-	return scanNode(row)
+	node, err := scanNode(row)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	if err := s.decorateNodeSpecKind(ctx, &node); err != nil {
+		return domain.Node{}, err
+	}
+	return node, nil
 }
 
-func (s *Store) ListNodes(ctx context.Context, role string) ([]domain.Node, error) {
-	query := `SELECT id, role, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at FROM nodes`
+func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
+	// node_specs is the public source of behavior. Keep the role fallback for
+	// databases carrying a legacy typed row that has not been backfilled yet;
+	// generic identities with no spec remain visible in the unfiltered list.
+	kind = strings.TrimSpace(kind)
+	query := `SELECT n.id, n.role, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at FROM nodes n`
 	args := []any{}
-	if strings.TrimSpace(role) != "" {
-		query += ` WHERE role = ?`
-		args = append(args, role)
+	if kind != "" {
+		query += ` LEFT JOIN node_specs ns ON ns.node_id=n.id WHERE COALESCE(ns.kind,n.role) = ?`
+		args = append(args, kind)
 	}
-	query += ` ORDER BY id`
+	query += ` ORDER BY n.id`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	result := []domain.Node{}
 	for rows.Next() {
 		node, err := scanNode(rows)
@@ -87,7 +97,18 @@ func (s *Store) ListNodes(ctx context.Context, role string) ([]domain.Node, erro
 		}
 		result = append(result, node)
 	}
-	return result, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range result {
+		if err := s.decorateNodeSpecKind(ctx, &result[index]); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 // GatewayView and AgentView are one-query list projections used by the REST
@@ -425,7 +446,7 @@ func (s *Store) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, opt
 	if err != nil {
 		return err
 	}
-	if node.Role != domain.RoleGateway {
+	if node.Role != "" && node.Role != domain.RoleGateway {
 		return errors.New("gateway spec node has the wrong role")
 	}
 	if err := s.protectObfuscationPolicy(&spec.Obfuscation); err != nil {
@@ -466,7 +487,7 @@ func (s *Store) PutAgentSpec(ctx context.Context, spec domain.AgentSpec, options
 	if err != nil {
 		return err
 	}
-	if node.Role != domain.RoleAgent {
+	if node.Role != "" && node.Role != domain.RoleAgent {
 		return errors.New("agent spec node has the wrong role")
 	}
 	return s.putDocument(ctx, "agent_specs", spec.NodeID, spec, options)

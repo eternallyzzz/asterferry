@@ -47,7 +47,7 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
-	node := domain.Node{ID: strings.TrimSpace(input.NodeID), Role: strings.TrimSpace(input.Role), Name: strings.TrimSpace(input.Name), Labels: input.Labels, Enabled: enabled}
+	node := domain.Node{ID: strings.TrimSpace(input.NodeID), Name: strings.TrimSpace(input.Name), Labels: input.Labels, Enabled: enabled}
 	if err := node.Validate(); err != nil {
 		writeStoreError(w, err)
 		return
@@ -59,7 +59,43 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 
 	var gatewaySpec *domain.GatewaySpec
 	var agentSpec *domain.AgentSpec
-	if node.Role == domain.RoleGateway {
+	if input.Spec != nil {
+		spec := *input.Spec
+		spec.NodeID = node.ID
+		if spec.Gateway != nil {
+			spec.Gateway.NodeID = node.ID
+		}
+		if spec.Agent != nil {
+			spec.Agent.NodeID = node.ID
+		}
+		if spec.Kind == "" {
+			if spec.Gateway != nil {
+				spec.Kind = domain.NodeSpecGateway
+			} else if spec.Agent != nil {
+				spec.Kind = domain.NodeSpecAgent
+			}
+		}
+		switch spec.Kind {
+		case domain.NodeSpecGateway:
+			if spec.Gateway == nil {
+				writeError(w, http.StatusBadRequest, "gateway_spec_required", "gateway spec is required for a gateway node spec")
+				return
+			}
+			node.Role = domain.RoleGateway
+			gatewaySpec = spec.Gateway
+		case domain.NodeSpecAgent:
+			if spec.Agent == nil {
+				writeError(w, http.StatusBadRequest, "agent_spec_required", "agent spec is required for an agent node spec")
+				return
+			}
+			node.Role = domain.RoleAgent
+			agentSpec = spec.Agent
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_spec_kind", "spec kind must be gateway or agent")
+			return
+		}
+	} else if strings.TrimSpace(input.Role) == domain.RoleGateway {
+		node.Role = domain.RoleGateway
 		if input.GatewaySpec == nil {
 			writeError(w, http.StatusBadRequest, "gateway_spec_required", "Gateway data-plane endpoint and port pools are required before installation")
 			return
@@ -70,7 +106,8 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 			spec.Labels = cloneStringMap(node.Labels)
 		}
 		gatewaySpec = &spec
-	} else {
+	} else if strings.TrimSpace(input.Role) == domain.RoleAgent {
+		node.Role = domain.RoleAgent
 		spec := domain.AgentSpec{
 			NodeID:  node.ID,
 			Limits:  domain.AgentLimits{MaxConnections: 4096, MaxStreams: 1024, MaxBufferBytes: 64 << 20},
@@ -81,6 +118,9 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 			spec.NodeID = node.ID
 		}
 		agentSpec = &spec
+	} else if input.GatewaySpec != nil || input.AgentSpec != nil {
+		writeError(w, http.StatusBadRequest, "invalid_spec", "typed gateway_spec or agent_spec requires a matching spec kind")
+		return
 	}
 
 	plain, pending, err := s.store.CreatePendingNodeBootstrap(r.Context(), node, platform, arch, gatewaySpec, agentSpec, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})

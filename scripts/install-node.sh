@@ -3,8 +3,9 @@ set -Eeuo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: install-node.sh --role agent|gateway --node-id ID --controller HOST:PORT
+Usage: install-node.sh --node-id ID --controller HOST:PORT
   --token TOKEN --ca-pem-b64 BASE64 --release-base-url URL --version X.Y.Z --arch amd64|arm64
+  --role agent|gateway is accepted only for legacy installations.
 USAGE
   exit 2
 }
@@ -33,7 +34,7 @@ while (($# > 0)); do
   esac
 done
 
-[[ "$ROLE" == "agent" || "$ROLE" == "gateway" ]] || { echo "role must be agent or gateway" >&2; exit 2; }
+[[ -z "$ROLE" || "$ROLE" == "agent" || "$ROLE" == "gateway" ]] || { echo "role must be agent or gateway" >&2; exit 2; }
 [[ "$EXPECTED_ARCH" == "amd64" || "$EXPECTED_ARCH" == "arm64" ]] || { echo "arch must be amd64 or arm64" >&2; exit 2; }
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z" >&2; exit 2; }
 [[ -n "$NODE_ID" && -n "$CONTROLLER" && -n "$TOKEN" && -n "$CA_PEM_B64" && -n "$RELEASE_BASE_URL" ]] || usage
@@ -77,11 +78,23 @@ install -m 0755 "$tmp_dir/asterferry" /usr/local/bin/asterferry
 ca_path=/var/lib/asterferry/controller-ca.crt
 printf '%s' "$CA_PEM_B64" | base64 --decode > "$tmp_dir/controller-ca.crt"
 install -o asterferry -g asterferry -m 0644 "$tmp_dir/controller-ca.crt" "$ca_path"
-bootstrap_path="/var/lib/asterferry/${ROLE}-bootstrap.json"
+bootstrap_name="node-bootstrap.json"
+if [[ -n "$ROLE" ]]; then bootstrap_name="${ROLE}-bootstrap.json"; fi
+bootstrap_path="/var/lib/asterferry/${bootstrap_name}"
 cache_path=/var/lib/asterferry/snapshot.cache
 
+node_command=(/usr/local/bin/asterferry node enroll)
+node_run_command="node"
+service_suffix="Node"
+service_description="generic Node daemon"
+if [[ -n "$ROLE" ]]; then
+  node_command=(/usr/local/bin/asterferry "$ROLE" enroll)
+  node_run_command="$ROLE"
+  service_suffix="$ROLE"
+  service_description="$ROLE data-plane node"
+fi
 if [[ ! -f "$bootstrap_path" ]]; then
-  runuser -u asterferry -- /usr/local/bin/asterferry "$ROLE" enroll \
+  runuser -u asterferry -- "${node_command[@]}" \
     --controller "$CONTROLLER" \
     --token "$TOKEN" \
     --node-id "$NODE_ID" \
@@ -94,16 +107,16 @@ fi
 chown asterferry:asterferry "$bootstrap_path" "$cache_path" 2>/dev/null || true
 chmod 0600 "$bootstrap_path" "$cache_path" 2>/dev/null || true
 
-unit_path="/etc/systemd/system/asterferry-${ROLE}.service"
+unit_path="/etc/systemd/system/asterferry-${service_suffix}.service"
 cat > "$unit_path" <<UNIT
 [Unit]
-Description=AsterFerry ${ROLE} data-plane node
+Description=AsterFerry ${service_description}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/asterferry ${ROLE} run --bootstrap ${bootstrap_path}
+ExecStart=/usr/local/bin/asterferry ${node_run_command} run --bootstrap ${bootstrap_path}
 WorkingDirectory=/var/lib/asterferry
 User=asterferry
 Group=asterferry
@@ -121,5 +134,5 @@ WantedBy=multi-user.target
 UNIT
 chmod 0644 "$unit_path"
 systemctl daemon-reload
-systemctl enable --now "asterferry-${ROLE}.service"
-echo "AsterFerry ${ROLE} ${NODE_ID} installed and started"
+systemctl enable --now "asterferry-${service_suffix}.service"
+echo "AsterFerry ${service_description} ${NODE_ID} installed and started"

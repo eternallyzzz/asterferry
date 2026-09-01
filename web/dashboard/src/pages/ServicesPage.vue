@@ -29,7 +29,7 @@ const saving = ref(false);
 const services = ref<ControllerService[]>([]);
 const nodes = ref<ControllerNode[]>([]);
 
-const agentNodes = computed(() => nodes.value.filter((node) => node.role === "agent"));
+const agentNodes = computed(() => nodes.value.filter((node) => node.spec_kind === "agent"));
 
 const emptyForm = () => ({
   id: "",
@@ -139,10 +139,10 @@ async function confirmDelete() {
 
 <template>
   <div class="page-stack">
-    <PageHeader
+      <PageHeader
       eyebrow="Service Catalog"
       title="服务"
-      description="创建 TCP/UDP reverse 服务；Controller 会自动选择 Gateway，public_port 为 0 时由端口池分配。"
+        description="创建 TCP/UDP reverse 服务；只会选择已配置 Agent 行为的 Node，Controller 自动选择 Gateway。"
     >
       <template #actions>
         <button v-if="session.canOperate.value" type="button" class="af-button primary" :disabled="!agentNodes.length" @click="openCreate">创建服务</button>
@@ -173,7 +173,7 @@ async function confirmDelete() {
         <template #empty>
           <EmptyState
             title="暂无服务"
-            :description="agentNodes.length ? '创建服务后，Controller 会按 selector 调度到匹配的 Gateway。' : '先在节点页注册 Agent，再回来创建服务。'"
+            :description="agentNodes.length ? '创建服务后，Controller 会按 selector 调度到匹配的 Gateway。' : '先在节点页注册 Node，并在详情中配置 Agent 行为。'"
           />
         </template>
       </DataTable>

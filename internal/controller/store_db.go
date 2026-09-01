@@ -3,18 +3,22 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
+	"asterferry/internal/domain"
 )
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 6
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v6"
+	currentDBSchema     = 7
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v7"
 	maxSnapshotDocument = 16 << 20
 )
 
@@ -99,6 +103,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if !empty && !compatible {
+		// v7 keeps the existing assignment/service rows intact but introduces
+		// the unified node_specs envelope. Upgrade this narrow boundary in place
+		// so an operator does not have to run a separate migration command merely
+		// to start a Controller after a normal binary upgrade.
+		if version, fingerprint, markerErr := schemaIdentity(ctx, s.db); markerErr == nil && version == 6 && fingerprint == "asterferry-controller-sqlite-v6" {
+			if err := upgradeStoreSchemaV6(ctx, s.db); err != nil {
+				return err
+			}
+			return validateRequiredTables(ctx, s.db)
+		}
 		return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, dbSchemaFingerprint)
 	}
 	if compatible {
@@ -141,6 +155,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE node_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, kind TEXT NOT NULL, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, UNIQUE(node_id))`,
 		`CREATE TABLE gateway_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE agent_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE services (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
@@ -155,6 +170,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE enrollment_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
 		`CREATE TABLE node_bootstraps (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, name TEXT NOT NULL, labels_json BLOB NOT NULL, enabled INTEGER NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, gateway_spec_json BLOB, agent_spec_json BLOB, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE INDEX idx_nodes_role_enabled ON nodes(role, enabled)`,
+		`CREATE INDEX idx_node_specs_kind ON node_specs(kind, node_id)`,
 		`CREATE INDEX idx_services_agent ON services(agent_id)`,
 		`CREATE INDEX idx_assignments_gateway ON assignments(gateway_id)`,
 		`CREATE INDEX idx_assignments_agent ON assignments(agent_id)`,
@@ -175,6 +191,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?), ('fingerprint', ?)`, strconv.Itoa(currentDBSchema), dbSchemaFingerprint); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=7`); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -221,6 +241,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 		"users":               {"id", "username", "password_hash", "password_changed_at", "role", "enabled", "revision", "created_at", "updated_at"},
 		"api_tokens":          {"id", "user_id", "token_hash", "name", "expires_at", "revoked_at", "created_at"},
 		"nodes":               {"id", "role", "name", "labels_json", "enabled", "certificate_state", "certificate_serial", "revision", "created_at", "updated_at"},
+		"node_specs":          {"node_id", "kind", "document_json", "revision", "updated_at"},
 		"gateway_specs":       {"node_id", "document_json", "revision", "updated_at"},
 		"agent_specs":         {"node_id", "document_json", "revision", "updated_at"},
 		"services":            {"id", "agent_id", "document_json", "revision", "updated_at"},
@@ -247,7 +268,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
-	for _, index := range []string{"idx_nodes_role_enabled", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"} {
+	for _, index := range []string{"idx_nodes_role_enabled", "idx_node_specs_kind", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"} {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil {
 			return err
@@ -257,6 +278,114 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// upgradeStoreSchemaV6 installs the unified spec envelope and backfills it
+// from the legacy typed tables. The legacy tables remain readable for one
+// release as an internal compatibility bridge; all new writes go through the
+// envelope and keep both representations synchronized until the next planned
+// cleanup migration.
+func upgradeStoreSchemaV6(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin v6 to v7 migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS node_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, kind TEXT NOT NULL, document_json BLOB NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL, UNIQUE(node_id))`); err != nil {
+		return fmt.Errorf("create node spec table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_node_specs_kind ON node_specs(kind, node_id)`); err != nil {
+		return fmt.Errorf("create node spec index: %w", err)
+	}
+	if err := backfillNodeSpecsTx(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='schema_version'`, strconv.Itoa(currentDBSchema)); err != nil {
+		return fmt.Errorf("write v7 schema version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='fingerprint'`, dbSchemaFingerprint); err != nil {
+		return fmt.Errorf("write v7 schema fingerprint: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=7`); err != nil {
+		return fmt.Errorf("write v7 sqlite user version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit v6 to v7 migration: %w", err)
+	}
+	return nil
+}
+
+func backfillNodeSpecsTx(ctx context.Context, tx *sql.Tx) error {
+	type legacySpec struct {
+		nodeID, kind string
+		document     []byte
+		revision     int64
+		updatedAt    string
+	}
+	load := func(table, kind string) ([]legacySpec, error) {
+		rows, err := tx.QueryContext(ctx, `SELECT node_id,document_json,revision,updated_at FROM `+table+` ORDER BY node_id`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		items := make([]legacySpec, 0)
+		for rows.Next() {
+			var item legacySpec
+			item.kind = kind
+			if err := rows.Scan(&item.nodeID, &item.document, &item.revision, &item.updatedAt); err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+		}
+		return items, rows.Err()
+	}
+	for _, source := range []struct {
+		table string
+		kind  string
+	}{
+		{table: "gateway_specs", kind: string(domain.NodeSpecGateway)},
+		{table: "agent_specs", kind: string(domain.NodeSpecAgent)},
+	} {
+		items, err := load(source.table, source.kind)
+		if err != nil {
+			return fmt.Errorf("read %s during v7 migration: %w", source.table, err)
+		}
+		for _, item := range items {
+			var value any
+			switch item.kind {
+			case string(domain.NodeSpecGateway):
+				var spec domain.GatewaySpec
+				if err := json.Unmarshal(item.document, &spec); err != nil {
+					return fmt.Errorf("decode gateway spec %q during v7 migration: %w", item.nodeID, err)
+				}
+				spec.Revision = item.revision
+				value = domain.NewGatewayNodeSpec(spec)
+			case string(domain.NodeSpecAgent):
+				var spec domain.AgentSpec
+				if err := json.Unmarshal(item.document, &spec); err != nil {
+					return fmt.Errorf("decode agent spec %q during v7 migration: %w", item.nodeID, err)
+				}
+				spec.Revision = item.revision
+				value = domain.NewAgentNodeSpec(spec)
+			}
+			spec := value.(domain.NodeSpec)
+			spec.NodeID = item.nodeID
+			spec.UpdatedAt = parseMigrationTime(item.updatedAt)
+			data, err := json.Marshal(spec)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, item.nodeID, item.kind, data, item.revision, item.updatedAt); err != nil {
+				return fmt.Errorf("write node spec %q during v7 migration: %w", item.nodeID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func parseMigrationTime(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, value)
+	return parsed
 }
 
 func (s *Store) Close() error {

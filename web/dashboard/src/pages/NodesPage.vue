@@ -18,15 +18,15 @@ import {
   nodeAction,
   reissueNodeInstallation,
   updateNode,
-	type ControllerNode,
+	 type ControllerNode,
+	type NodeSpecKind,
 	type NodeBootstrapResponse,
 	type PendingNodeInstallation,
 } from "../controller-api";
 import { usePolling } from "../composables/usePolling";
 import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
-import { certificateTone, describeError, formatTime, newIdempotencyKey, parseLabels, prettyJson, roleLabel } from "../utils/format";
-import { buildGatewayBootstrapSpec } from "../node-bootstrap";
+import { certificateTone, describeError, formatTime, newIdempotencyKey, parseLabels, prettyJson } from "../utils/format";
 
 const notify = useNotify();
 const session = useSession();
@@ -38,7 +38,7 @@ const drawerNode = ref<ControllerNode | null>(null);
 const drawerOpen = ref(false);
 
 const formOpen = ref(false);
-const form = ref({ id: "", role: "gateway" as ControllerNode["role"], name: "", labels: "{}", enabled: true, platform: "linux" as "linux" | "windows", arch: "amd64" as "amd64" | "arm64", publicEndpoint: "", tcpPool: "28080-28999", udpPool: "28080-28999" });
+const form = ref({ id: "", name: "", labels: "{}", enabled: true, platform: "linux" as "linux" | "windows", arch: "amd64" as "amd64" | "arm64" });
 const editID = ref("");
 const editRevision = ref(0);
 const formError = ref("");
@@ -49,6 +49,10 @@ const deleting = ref(false);
 const installOpen = ref(false);
 const installResult = ref<NodeBootstrapResponse | null>(null);
 const copiedInstallCommand = ref(false);
+
+function specKindLabel(kind?: NodeSpecKind): string {
+  return kind === "gateway" ? "Gateway" : kind === "agent" ? "Agent" : "未配置";
+}
 
 async function load() {
   try {
@@ -75,7 +79,7 @@ function openDrawer(node: ControllerNode) {
 }
 
 function openCreate() {
-	form.value = { id: "", role: "gateway", name: "", labels: "{}", enabled: true, platform: "linux", arch: "amd64", publicEndpoint: "", tcpPool: "28080-28999", udpPool: "28080-28999" };
+  form.value = { id: "", name: "", labels: "{}", enabled: true, platform: "linux", arch: "amd64" };
   editID.value = "";
   editRevision.value = 0;
   formError.value = "";
@@ -83,7 +87,7 @@ function openCreate() {
 }
 
 function openEdit(node: ControllerNode) {
-  form.value = { id: node.id, role: node.role, name: node.name, labels: prettyJson(node.labels || {}), enabled: node.enabled, platform: "linux", arch: "amd64", publicEndpoint: "", tcpPool: "28080-28999", udpPool: "28080-28999" };
+  form.value = { id: node.id, name: node.name, labels: prettyJson(node.labels || {}), enabled: node.enabled, platform: "linux", arch: "amd64" };
   editID.value = node.id;
   editRevision.value = node.revision;
   formError.value = "";
@@ -98,18 +102,16 @@ async function save() {
     const nodeID = form.value.id.trim();
     const name = form.value.name.trim();
     if (editID.value) {
-      await updateNode(editID.value, { role: form.value.role, name, labels, enabled: form.value.enabled }, editRevision.value, undefined, newIdempotencyKey());
+      await updateNode(editID.value, { name, labels, enabled: form.value.enabled }, editRevision.value, undefined, newIdempotencyKey());
       notify.success(`节点 ${editID.value} 已更新。`);
     } else {
       const bootstrap = await createNodeInstallation({
         node_id: nodeID,
-        role: form.value.role,
         name,
         labels,
         enabled: form.value.enabled,
         platform: form.value.platform,
         arch: form.value.arch,
-        ...(form.value.role === "gateway" ? { gateway_spec: buildGatewayBootstrapSpec({ id: nodeID, labels }, form.value.publicEndpoint, form.value.tcpPool, form.value.udpPool) } : {}),
       }, undefined, newIdempotencyKey());
       notify.success(`安装任务 ${nodeID} 已创建；节点执行命令后才会注册。`);
       formOpen.value = false;
@@ -216,12 +218,12 @@ async function confirmDelete() {
       <div v-if="loading" class="loading-row"><Spinner :size="18" /></div>
       <DataTable v-else :empty="!nodes.length">
         <thead>
-          <tr><th>节点</th><th>角色</th><th>证书</th><th>状态</th><th>Revision</th><th>操作</th></tr>
+          <tr><th>节点</th><th>行为规格</th><th>证书</th><th>状态</th><th>Revision</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="node in nodes" :key="node.id" class="clickable" @click="openDrawer(node)">
             <td><strong>{{ node.name }}</strong><small><code>{{ node.id }}</code></small></td>
-            <td>{{ roleLabel(node.role) }}</td>
+            <td>{{ specKindLabel(node.spec_kind) }}</td>
             <td><StatusPill :tone="certificateTone(node.certificate_state)">{{ node.certificate_state }}</StatusPill></td>
             <td><StatusPill :tone="node.enabled ? 'good' : 'neutral'">{{ node.enabled ? "启用" : "停用" }}</StatusPill></td>
             <td>{{ node.revision }}</td>
@@ -246,11 +248,11 @@ async function confirmDelete() {
 
     <PanelCard v-if="pendingInstallations.length" :title="`待安装任务 · ${pendingInstallations.length}`">
       <DataTable>
-        <thead><tr><th>节点</th><th>角色</th><th>平台</th><th>有效期</th><th>操作</th></tr></thead>
+        <thead><tr><th>节点</th><th>行为规格</th><th>平台</th><th>有效期</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="item in pendingInstallations" :key="item.node_id">
             <td><strong>{{ item.name }}</strong><small><code>{{ item.node_id }}</code></small></td>
-            <td>{{ roleLabel(item.role) }}</td>
+            <td>{{ specKindLabel(item.spec_kind) }}</td>
             <td>{{ item.platform }}/{{ item.arch }}</td>
             <td>{{ formatTime(item.expires_at) }}</td>
             <td>
@@ -270,12 +272,6 @@ async function confirmDelete() {
       <form class="form-stack" @submit.prevent="save">
         <FormField label="Node ID">
           <input v-model="form.id" :disabled="Boolean(editID)" required placeholder="gw-east" />
-        </FormField>
-        <FormField label="角色">
-          <select v-model="form.role" :disabled="Boolean(editID)">
-            <option value="gateway">Gateway</option>
-            <option value="agent">Agent</option>
-          </select>
         </FormField>
         <template v-if="!editID">
           <FormField label="目标平台">
@@ -297,24 +293,12 @@ async function confirmDelete() {
         <FormField label="标签 JSON">
           <textarea v-model="form.labels" rows="3" spellcheck="false" placeholder='{"region":"east"}' />
         </FormField>
-        <template v-if="!editID && form.role === 'gateway'">
-          <FormField label="Gateway 数据面地址" hint="Agent 连接 Gateway 的公网/NAT 地址，例如 gateway.example.com:4433；不是 Controller 地址">
-            <input v-model="form.publicEndpoint" required placeholder="gateway.example.com:4433" />
-          </FormField>
-          <div />
-          <FormField label="TCP 端口池" hint="逗号分隔端口或范围">
-            <input v-model="form.tcpPool" placeholder="28080-28999" />
-          </FormField>
-          <FormField label="UDP 端口池" hint="逗号分隔端口或范围">
-            <input v-model="form.udpPool" placeholder="28080-28999" />
-          </FormField>
-        </template>
         <label class="check-label">
           <input v-model="form.enabled" type="checkbox" /> 启用节点
         </label>
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <p v-if="editID" class="form-note">If-Match revision: {{ editRevision }}。并发修改会被 Controller 拒绝。</p>
-        <p v-else class="form-note">这里只创建待安装任务，不会提前注册节点。Agent 使用默认规格；Gateway 的地址和端口池属于数据面预配置。</p>
+        <p v-else class="form-note">这里只创建待安装任务，不会提前注册节点。目标机器完成注册后，再在节点详情中选择 Gateway 或 Agent 行为并配置规格。</p>
       </form>
       <template #footer>
         <button type="button" class="af-button secondary" @click="formOpen = false">取消</button>
@@ -324,7 +308,7 @@ async function confirmDelete() {
 
     <ModalDialog :open="installOpen" title="一键安装注册命令" width="680px" @close="installOpen = false">
       <div v-if="installResult" class="install-dialog">
-        <p class="form-note">{{ installResult.role.toUpperCase() }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
+        <p class="form-note">Node daemon{{ installResult.role ? ` · 兼容角色 ${installResult.role.toUpperCase()}` : "" }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
         <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。不要发到公开聊天或日志中。</p>
         <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
         <p class="form-note">在对应机器的管理员 PowerShell 或 root shell 中执行。执行前节点不会出现在正式节点列表；Enroll 成功后才会自动上线。</p>

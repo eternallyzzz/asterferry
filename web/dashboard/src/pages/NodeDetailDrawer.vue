@@ -13,25 +13,21 @@ import SnapshotView from "../components/nodes/SnapshotView.vue";
 import {
 	bootstrapNode,
 	ControllerAPIError,
-  createAgent,
-  createGateway,
-  deleteAgent,
-  deleteGateway,
-  getAgent,
-  getGateway,
+  deleteNodeSpec,
+  getNodeSpec,
   nodeAction,
-  updateAgent,
-	updateGateway,
+	putNodeSpec,
 	type ControllerNode,
+	type ControllerNodeSpec,
 	type EgressPolicy,
 	type NodeBootstrapResponse,
+  type NodeSpecKind,
   type ProxySpec,
   type RouteRule,
 } from "../controller-api";
-import { buildGatewayBootstrapSpec, formatPortRanges } from "../node-bootstrap";
 import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
-import { certificateTone, describeError, formatTime, newIdempotencyKey, parseObject, prettyJson, roleLabel } from "../utils/format";
+import { certificateTone, describeError, formatTime, newIdempotencyKey, parseObject, prettyJson } from "../utils/format";
 
 type SpecDocument = Record<string, unknown>;
 type Section = "info" | "spec" | "egress" | "proxies" | "routes" | "observed" | "snapshot";
@@ -47,6 +43,8 @@ const visited = ref<Set<Section>>(new Set(["info"]));
 const specDoc = ref<SpecDocument | undefined>();
 const specText = ref("");
 const specRevision = ref<number | undefined>();
+const specKind = ref<NodeSpecKind | undefined>();
+const selectedKind = ref<NodeSpecKind>("agent");
 const specValid = ref(true);
 const specLoading = ref(false);
 const specSaving = ref(false);
@@ -56,13 +54,16 @@ const deletingSpec = ref(false);
 const installOpen = ref(false);
 const installPlatform = ref<"linux" | "windows">("linux");
 const installArch = ref<"amd64" | "arm64">("amd64");
-const installEndpoint = ref("");
-const installTCPPool = ref("28080-28999");
-const installUDPPool = ref("28080-28999");
 const installResult = ref<NodeBootstrapResponse | null>(null);
 const installError = ref("");
 const installing = ref(false);
 const copiedInstallCommand = ref(false);
+
+const activeKind = computed(() => specKind.value ?? selectedKind.value);
+
+function specKindLabel(kind?: NodeSpecKind): string {
+  return kind === "gateway" ? "Gateway" : kind === "agent" ? "Agent" : "未配置";
+}
 
 const sections = computed(() => {
   const base: Array<{ id: Section; label: string }> = [
@@ -70,7 +71,10 @@ const sections = computed(() => {
     { id: "spec", label: "规格" },
     { id: "egress", label: "出口策略" },
   ];
-  if (props.node?.role === "agent") {
+  // An unconfigured Node has no behavior-specific panels yet. The draft kind
+  // is only a form choice; it must not make the identity look like an Agent
+  // before the spec is actually persisted.
+  if (specKind.value === "agent") {
     base.push({ id: "proxies", label: "代理" }, { id: "routes", label: "路由" });
   }
   base.push({ id: "observed", label: "观测" }, { id: "snapshot", label: "快照" });
@@ -81,8 +85,8 @@ const specEgress = computed(() => specDoc.value?.egress as EgressPolicy | undefi
 const specProxies = computed(() => (Array.isArray(specDoc.value?.proxies) ? (specDoc.value?.proxies as ProxySpec[]) : []));
 const specRoutes = computed(() => (Array.isArray(specDoc.value?.routes) ? (specDoc.value?.routes as RouteRule[]) : []));
 
-function defaultSpec(node: ControllerNode): SpecDocument {
-  if (node.role === "gateway") {
+function defaultSpec(node: ControllerNode, kind: NodeSpecKind): SpecDocument {
+  if (kind === "gateway") {
     return {
       node_id: node.id,
       public_endpoints: ["127.0.0.1:4433"],
@@ -114,6 +118,8 @@ function resetDetailState() {
   specDoc.value = undefined;
   specText.value = "";
   specRevision.value = undefined;
+  specKind.value = undefined;
+  selectedKind.value = "agent";
   specValid.value = true;
   specError.value = "";
 }
@@ -122,19 +128,23 @@ async function loadSpec(node: ControllerNode) {
   const requestVersion = ++specRequestVersion;
   specLoading.value = true;
   specError.value = "";
+  selectedKind.value = node.spec_kind ?? "agent";
   try {
-    const result = node.role === "gateway" ? await getGateway(node.id) : await getAgent(node.id);
+    const result = await getNodeSpec(node.id);
     if (requestVersion !== specRequestVersion || props.node?.id !== node.id) return;
-    const doc = result && typeof result === "object" ? (result as SpecDocument) : undefined;
+    specKind.value = result.kind;
+    selectedKind.value = result.kind;
+    const doc = (result.kind === "gateway" ? result.gateway : result.agent) as SpecDocument | undefined;
     specDoc.value = doc;
-    specRevision.value = typeof doc?.revision === "number" ? doc.revision : undefined;
-    specText.value = prettyJson(doc ?? defaultSpec(node));
+    specRevision.value = result.revision;
+    specText.value = prettyJson(doc ?? defaultSpec(node, result.kind));
   } catch (caught) {
     if (requestVersion !== specRequestVersion || props.node?.id !== node.id) return;
     if (caught instanceof ControllerAPIError && caught.status === 404) {
       specDoc.value = undefined;
       specRevision.value = undefined;
-      specText.value = prettyJson(defaultSpec(node));
+      specKind.value = undefined;
+      specText.value = prettyJson(defaultSpec(node, selectedKind.value));
     } else {
       specError.value = describeError(caught);
     }
@@ -144,12 +154,12 @@ async function loadSpec(node: ControllerNode) {
 }
 
 watch(
-  () => [props.open, props.node?.id, props.node?.role] as const,
-  ([open, nodeId, nodeRole], previous) => {
-    if (!open || !nodeId || !nodeRole || !props.node) return;
-    const [wasOpen, previousNodeId, previousNodeRole] = previous ?? [];
+  () => [props.open, props.node?.id] as const,
+  ([open, nodeId], previous) => {
+    if (!open || !nodeId || !props.node) return;
+    const [wasOpen, previousNodeId] = previous ?? [];
     const opening = wasOpen !== true;
-    const changingNode = nodeId !== previousNodeId || nodeRole !== previousNodeRole;
+    const changingNode = nodeId !== previousNodeId;
     if (!opening && !changingNode) return;
 
     const node = props.node;
@@ -170,12 +180,6 @@ function openInstall() {
   installError.value = "";
   copiedInstallCommand.value = false;
   installResult.value = null;
-  if (props.node.role === "gateway") {
-    installEndpoint.value = Array.isArray(specDoc.value?.public_endpoints) && typeof specDoc.value.public_endpoints[0] === "string" ? specDoc.value.public_endpoints[0] as string : "";
-    const pool = specDoc.value?.port_pool as { tcp?: unknown; udp?: unknown } | undefined;
-    installTCPPool.value = formatPortRanges(pool?.tcp) || "28080-28999";
-    installUDPPool.value = formatPortRanges(pool?.udp) || "28080-28999";
-  }
   installOpen.value = true;
 }
 
@@ -188,11 +192,7 @@ async function generateInstallCommand() {
   installing.value = true;
   installError.value = "";
   try {
-    const input = {
-      platform: installPlatform.value,
-      arch: installArch.value,
-      ...(props.node.role === "gateway" ? { gateway_spec: buildGatewayBootstrapSpec(props.node, installEndpoint.value, installTCPPool.value, installUDPPool.value) } : {}),
-    };
+    const input = { platform: installPlatform.value, arch: installArch.value };
     installResult.value = await bootstrapNode(props.node.id, input, undefined, newIdempotencyKey());
     copiedInstallCommand.value = false;
   } catch (caught) {
@@ -224,6 +224,12 @@ function select(id: Section) {
   visited.value = next;
 }
 
+function changeSpecKind() {
+  if (!props.node || specRevision.value !== undefined) return;
+  specDoc.value = undefined;
+  specText.value = prettyJson(defaultSpec(props.node, selectedKind.value));
+}
+
 async function saveSpec() {
   if (!props.node) return;
   specSaving.value = true;
@@ -231,18 +237,18 @@ async function saveSpec() {
   try {
     const document = parseObject(specText.value, "规格");
     document.node_id = props.node.id;
-    const result = specRevision.value === undefined
-      ? props.node.role === "gateway"
-        ? await createGateway(document, undefined, newIdempotencyKey())
-        : await createAgent(document, undefined, newIdempotencyKey())
-      : props.node.role === "gateway"
-        ? await updateGateway(props.node.id, document, specRevision.value, undefined, newIdempotencyKey())
-        : await updateAgent(props.node.id, document, specRevision.value, undefined, newIdempotencyKey());
-    const doc = result && typeof result === "object" ? (result as SpecDocument) : undefined;
+    const envelope: ControllerNodeSpec = selectedKind.value === "gateway"
+      ? { node_id: props.node.id, kind: "gateway", gateway: document }
+      : { node_id: props.node.id, kind: "agent", agent: document };
+    const result = await putNodeSpec(props.node.id, envelope, specRevision.value, undefined, newIdempotencyKey());
+    const doc = (result.kind === "gateway" ? result.gateway : result.agent) as SpecDocument | undefined;
+    specKind.value = result.kind;
+    selectedKind.value = result.kind;
     specDoc.value = doc;
-    specRevision.value = typeof doc?.revision === "number" ? doc.revision : undefined;
+    specRevision.value = result.revision;
     if (doc) specText.value = prettyJson(doc);
-    notify.success(`${roleLabel(props.node.role)} 规格 ${props.node.id} 已保存。`);
+    notify.success(`${specKindLabel(result.kind)} 规格 ${props.node.id} 已保存。`);
+    emit("changed");
   } catch (caught) {
     specError.value = describeError(caught);
   } finally {
@@ -254,13 +260,14 @@ async function removeSpec() {
   if (!props.node || specRevision.value === undefined) return;
   deletingSpec.value = true;
   try {
-    const remove = props.node.role === "gateway" ? deleteGateway : deleteAgent;
-    await remove(props.node.id, specRevision.value, undefined, newIdempotencyKey());
+    await deleteNodeSpec(props.node.id, specRevision.value, undefined, newIdempotencyKey());
     notify.success(`规格 ${props.node.id} 已删除，已重置为默认草稿。`);
     confirmDeleteSpec.value = false;
     specDoc.value = undefined;
+    specKind.value = undefined;
     specRevision.value = undefined;
-    specText.value = prettyJson(defaultSpec(props.node));
+    specText.value = prettyJson(defaultSpec(props.node, selectedKind.value));
+    emit("changed");
   } catch (caught) {
     notify.error(describeError(caught));
   } finally {
@@ -281,7 +288,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
 </script>
 
 <template>
-  <DrawerPanel :open="open" :title="node ? `${node.name} · ${roleLabel(node.role)}` : ''" @close="emit('close')">
+  <DrawerPanel :open="open" :title="node ? `${node.name} · ${specKindLabel(specKind || undefined)}` : ''" @close="emit('close')">
     <div v-if="node" class="drawer-layout">
       <nav class="section-nav" aria-label="节点详情分段">
         <button
@@ -297,7 +304,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
         <PanelCard v-show="section === 'info'" title="基本信息">
           <dl class="info-grid">
             <div><dt>Node ID</dt><dd><code>{{ node.id }}</code></dd></div>
-            <div><dt>角色</dt><dd>{{ roleLabel(node.role) }}</dd></div>
+            <div><dt>行为规格</dt><dd>{{ specKindLabel(specKind) }}</dd></div>
             <div><dt>证书</dt><dd><StatusPill :tone="certificateTone(node.certificate_state)">{{ node.certificate_state }}</StatusPill></dd></div>
             <div><dt>状态</dt><dd><StatusPill :tone="node.enabled ? 'good' : 'neutral'">{{ node.enabled ? "启用" : "停用" }}</StatusPill></dd></div>
             <div><dt>Revision</dt><dd>{{ node.revision }}</dd></div>
@@ -328,6 +335,13 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
           </template>
           <div v-if="specLoading" class="loading-row"><Spinner :size="18" /></div>
           <template v-else>
+            <label class="spec-kind-field">行为类型
+              <select v-model="selectedKind" :disabled="specRevision !== undefined" @change="changeSpecKind">
+                <option value="gateway">Gateway</option>
+                <option value="agent">Agent</option>
+              </select>
+            </label>
+            <p v-if="specRevision !== undefined" class="form-note">已有规格如需切换行为，请先删除当前规格，再选择新的行为类型保存。</p>
             <JsonEditor
               v-model="specText"
               :rows="18"
@@ -347,13 +361,10 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
         </PanelCard>
 
         <PanelCard v-show="section === 'egress'" title="出口策略">
-          <EgressForm
-            :kind="node.role"
-            :node-id="node.id"
-            :revision="specRevision"
-            :initial="specEgress"
-            @saved="reloadSpec"
-          />
+          <template v-if="specKind">
+            <EgressForm :kind="activeKind" :node-id="node.id" :revision="specRevision" :initial="specEgress" @saved="reloadSpec" />
+          </template>
+          <p v-else class="form-note">请先在“规格”中选择 Gateway 或 Agent 并保存，才能配置出口策略。</p>
         </PanelCard>
 
         <PanelCard v-if="visited.has('proxies')" v-show="section === 'proxies'" title="代理入口">
@@ -401,17 +412,11 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             <label>目标平台<select v-model="installPlatform" @change="changeInstallPlatform"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>
             <label>架构<select v-model="installArch"><option value="amd64">amd64</option><option v-if="installPlatform === 'linux'" value="arm64">arm64</option></select></label>
           </div>
-          <template v-if="node?.role === 'gateway'">
-            <label>公网 AFDP 地址<input v-model="installEndpoint" placeholder="gateway.example.com:4433" /></label>
-            <div class="install-grid">
-              <label>TCP 端口池<input v-model="installTCPPool" placeholder="28080-28999" /></label>
-              <label>UDP 端口池<input v-model="installUDPPool" placeholder="28080-28999" /></label>
-            </div>
-          </template>
+          <p class="form-note">安装命令只安装并注册 Node daemon，不预设 Gateway 或 Agent。完成注册后，在“规格”中选择行为并保存。</p>
           <p v-if="installError" class="section-error">{{ installError }}</p>
         </template>
         <template v-else>
-          <p class="form-note">{{ installResult.role.toUpperCase() }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
+          <p class="form-note">Node daemon{{ installResult.role ? ` · 兼容角色 ${installResult.role.toUpperCase()}` : "" }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
           <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。</p>
           <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
           <p class="form-note">请在对应机器的管理员 PowerShell 或 root shell 中执行。</p>
@@ -498,6 +503,21 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
   margin: 8px 0 0;
   color: var(--af-red);
   font-size: 12px;
+}
+.spec-kind-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+  color: var(--af-faint);
+  font-size: 12px;
+}
+.spec-kind-field select { width: 100%; box-sizing: border-box; }
+.form-note {
+  margin: 8px 0 0;
+  color: var(--af-faint);
+  font-size: 12px;
+  line-height: 1.6;
 }
 .section-foot {
   display: flex;

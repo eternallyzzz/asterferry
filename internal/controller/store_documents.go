@@ -318,6 +318,19 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	if hit {
 		return nil
 	}
+	// Nodes created through the generic API have no behavior yet. A legacy
+	// typed writer is still allowed to configure such a node, so materialize
+	// the compatibility discriminator inside the same transaction as the spec
+	// write.
+	if table == "gateway_specs" || table == "agent_specs" {
+		kind := domain.RoleAgent
+		if table == "gateway_specs" {
+			kind = domain.RoleGateway
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET role=?,revision=revision+1,updated_at=? WHERE id=? AND role=''`, kind, time.Now().UTC().Format(time.RFC3339Nano), nodeID); err != nil {
+			return err
+		}
+	}
 	affectedNodes := []string{nodeID}
 	if table == "gateway_specs" {
 		participants, err := assignmentParticipantIDsTx(ctx, tx, nodeID)
@@ -381,6 +394,30 @@ func (s *Store) putDocument(ctx context.Context, table, nodeID string, value any
 	}
 	if err != nil {
 		return err
+	}
+	// v7 exposes one node_specs envelope to the API while the legacy typed
+	// tables remain as a compatibility bridge for the scheduler. Keep the
+	// envelope synchronized in this same transaction so a snapshot builder can
+	// never observe a kind without its document (or vice versa).
+	var nodeSpec domain.NodeSpec
+	switch typed := value.(type) {
+	case domain.GatewaySpec:
+		nodeSpec = domain.NewGatewayNodeSpec(typed)
+	case domain.AgentSpec:
+		nodeSpec = domain.NewAgentNodeSpec(typed)
+	default:
+		return errors.New("node spec document has an invalid type")
+	}
+	nodeSpec.UpdatedAt, err = time.Parse(time.RFC3339Nano, now)
+	if err != nil {
+		return err
+	}
+	specDocument, err := json.Marshal(nodeSpec)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET kind=excluded.kind,document_json=excluded.document_json,revision=excluded.revision,updated_at=excluded.updated_at`, nodeID, string(nodeSpec.Kind), specDocument, revision, now); err != nil {
+		return fmt.Errorf("write node spec envelope: %w", err)
 	}
 	// A Gateway endpoint and its obfuscation policy are part of the assignment's
 	// data-plane dial contract. Keep every assignment on this Gateway aligned
@@ -556,6 +593,11 @@ func validateAgentSpecTx(ctx context.Context, tx *sql.Tx, spec domain.AgentSpec)
 }
 
 func (s *Store) deleteDocument(ctx context.Context, table, nodeID string, options WriteOptions) error {
+	// Deleting a behavior is a data-plane state transition. Serialize it with
+	// snapshot materialization so an online generic Node cannot win a race and
+	// retain the old role after the spec row has disappeared.
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -601,6 +643,17 @@ func (s *Store) deleteDocument(ctx context.Context, table, nodeID string, option
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE node_id=? AND revision=?`, nodeID, revision); err != nil {
 		return err
+	}
+	if table == "gateway_specs" || table == "agent_specs" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM node_specs WHERE node_id=?`, nodeID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET role='',revision=revision+1,updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), nodeID); err != nil {
+			return err
+		}
+		if err := clearDesiredSnapshotTx(ctx, tx, nodeID); err != nil {
+			return err
+		}
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "delete", strings.TrimSuffix(table, "_specs"), nodeID, revision, nil); err != nil {
 		return err

@@ -68,8 +68,8 @@ func (s *Store) CreateNodeEnrollmentTokenWithOptions(ctx context.Context, nodeID
 }
 
 func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
-	if role != domain.RoleGateway && role != domain.RoleAgent {
-		return "", EnrollmentToken{}, errors.New("enrollment token role must be gateway or agent")
+	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
+		return "", EnrollmentToken{}, errors.New("enrollment token behavior must be gateway or agent when supplied")
 	}
 	if ttl <= 0 {
 		ttl = EnrollmentTTL
@@ -143,8 +143,8 @@ func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, ro
 			}
 			return "", EnrollmentToken{}, err
 		}
-		if storedRole != role || enabled == 0 {
-			return "", EnrollmentToken{}, fmt.Errorf("%w: node is disabled or role does not match", ErrNodeEnrollmentNotAllowed)
+		if (role != "" && storedRole != role) || enabled == 0 {
+			return "", EnrollmentToken{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
 		}
 		plain = nodeEnrollmentToken(nodeID, plain)
 		digest = HashToken(plain)
@@ -384,8 +384,8 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
-	if role != domain.RoleGateway && role != domain.RoleAgent {
-		return Certificate{}, fmt.Errorf("%w: node role must be gateway or agent", ErrInvalidEnrollmentRequest)
+	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
+		return Certificate{}, fmt.Errorf("%w: node behavior must be gateway or agent when supplied", ErrInvalidEnrollmentRequest)
 	}
 	if boundNodeID, bound, err := parseNodeEnrollmentToken(token); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
@@ -413,8 +413,8 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 		}
 		return Certificate{}, storageFailure("load node for enrollment", err)
 	}
-	if node.Role != role || !node.Enabled || node.CertificateState == domain.CertificateRevoked {
-		return Certificate{}, fmt.Errorf("%w: node is disabled or role does not match", ErrNodeEnrollmentNotAllowed)
+	if (role != "" && node.Role != role) || !node.Enabled || node.CertificateState == domain.CertificateRevoked {
+		return Certificate{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
 	}
 	request, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
@@ -454,8 +454,8 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	// Re-check mutable enrollment preconditions inside the write transaction.
 	// The initial GetNode call is only a fast rejection path; an administrator
 	// can revoke/disable a node while CSR parsing and signing are in progress.
-	if currentRole != role || enabled == 0 || certificateState == domain.CertificateRevoked {
-		return Certificate{}, fmt.Errorf("%w: node is disabled or role does not match", ErrNodeEnrollmentNotAllowed)
+	if (role != "" && currentRole != role) || enabled == 0 || certificateState == domain.CertificateRevoked {
+		return Certificate{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
 	}
 	// Consume the one-time token before performing the CA signature while the
 	// transaction is still open. Any signing or persistence failure rolls the
@@ -572,7 +572,7 @@ func validateCSRIdentity(request *x509.CertificateRequest, nodeID, role string) 
 	// require the role marker used by our own CSR generator.  This prevents a
 	// valid node key from being accidentally enrolled for the other role while
 	// still accepting CSRs produced by external clients that omit Organization.
-	if len(request.Subject.Organization) > 0 {
+	if role != "" && len(request.Subject.Organization) > 0 {
 		matched := false
 		for _, value := range request.Subject.Organization {
 			if value == role {
@@ -609,7 +609,11 @@ func signNodeCertificateWithCA(caCert *x509.Certificate, caKey ed25519.PrivateKe
 	}
 	now := time.Now().UTC()
 	uri := domain.NodeIdentityURI(nodeID)
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
+	organization := []string{"AsterFerry"}
+	if role != "" {
+		organization = append(organization, role)
+	}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: organization}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, publicKey, caKey)
 	if err != nil {
 		return Certificate{}, err
@@ -632,14 +636,18 @@ func GenerateNodeCSR(nodeID string, role string) (csrDER, keyPEM []byte, err err
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return nil, nil, err
 	}
-	if role != domain.RoleGateway && role != domain.RoleAgent {
-		return nil, nil, errors.New("node role must be gateway or agent")
+	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
+		return nil, nil, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry", role}}}, private)
+	organization := []string{"AsterFerry"}
+	if role != "" {
+		organization = append(organization, role)
+	}
+	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: organization}}, private)
 	if err != nil {
 		return nil, nil, err
 	}

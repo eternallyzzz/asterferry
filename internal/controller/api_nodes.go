@@ -15,8 +15,13 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		role := r.URL.Query().Get("role")
-		nodes, err := s.store.ListNodes(r.Context(), role)
+		kind := r.URL.Query().Get("kind")
+		if kind == "" {
+			// Keep the old query name for one release so existing automation does
+			// not lose access while the public resource is renamed to Node.
+			kind = r.URL.Query().Get("role")
+		}
+		nodes, err := s.store.ListNodes(r.Context(), kind)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -34,7 +39,6 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		ID      string            `json:"id"`
-		Role    string            `json:"role"`
 		Name    string            `json:"name"`
 		Labels  map[string]string `json:"labels"`
 		Enabled *bool             `json:"enabled"`
@@ -47,7 +51,7 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
-	node := domain.Node{ID: input.ID, Role: input.Role, Name: input.Name, Labels: input.Labels, Enabled: enabled}
+	node := domain.Node{ID: input.ID, Name: input.Name, Labels: input.Labels, Enabled: enabled}
 	if err := s.store.CreateNode(r.Context(), node, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
@@ -71,6 +75,10 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 	nodeID := parts[0]
 	if len(parts) == 2 && parts[1] == "bootstrap" {
 		s.nodeBootstrap(w, r, nodeID)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "spec" {
+		s.nodeSpecAction(w, r, nodeID)
 		return
 	}
 	if len(parts) == 2 && r.Method == http.MethodGet && (parts[1] == "observed" || parts[1] == "snapshot" || parts[1] == "desired") {
@@ -122,7 +130,6 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var input struct {
-			Role              *string            `json:"role"`
 			Name              *string            `json:"name"`
 			Labels            *map[string]string `json:"labels"`
 			Enabled           *bool              `json:"enabled"`
@@ -137,9 +144,6 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		if getErr != nil {
 			writeStoreError(w, getErr)
 			return
-		}
-		if input.Role != nil {
-			node.Role = *input.Role
 		}
 		if input.Name != nil {
 			node.Name = *input.Name

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"asterferry/internal/domain"
 )
@@ -118,13 +119,18 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 	}
 	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: node.ID}
 	serviceByID := make(map[string]domain.Service)
-	switch node.Role {
-	case domain.RoleGateway:
-		spec, specErr := s.GetGatewaySpec(ctx, node.ID)
-		if specErr != nil {
-			return domain.DesiredSnapshot{}, specErr
-		}
-		snapshot.Gateway = &spec
+	nodeSpec, specErr := s.GetNodeSpec(ctx, node.ID)
+	if errors.Is(specErr, sql.ErrNoRows) {
+		// An enrolled but unconfigured generic node is healthy enough to keep a
+		// control stream; it simply has no desired data-plane snapshot yet.
+		return domain.DesiredSnapshot{}, sql.ErrNoRows
+	}
+	if specErr != nil {
+		return domain.DesiredSnapshot{}, specErr
+	}
+	switch nodeSpec.Kind {
+	case domain.NodeSpecGateway:
+		snapshot.Gateway = nodeSpec.Gateway
 		assignments, listErr := s.ListAssignments(ctx, node.ID, "")
 		if listErr != nil {
 			return domain.DesiredSnapshot{}, listErr
@@ -142,12 +148,8 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 				serviceByID[service.ID] = service
 			}
 		}
-	case domain.RoleAgent:
-		spec, specErr := s.GetAgentSpec(ctx, node.ID)
-		if specErr != nil {
-			return domain.DesiredSnapshot{}, specErr
-		}
-		snapshot.Agent = &spec
+	case domain.NodeSpecAgent:
+		snapshot.Agent = nodeSpec.Agent
 		services, listErr := s.ListServices(ctx, node.ID)
 		if listErr != nil {
 			return domain.DesiredSnapshot{}, listErr
@@ -161,7 +163,7 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 		}
 		snapshot.Assignments = assignments
 	default:
-		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "invalid_role", Path: "node.role", Message: "node role must be gateway or agent"}
+		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "node_spec.kind", Message: "node spec kind must be gateway or agent"}
 	}
 	serviceIDs := make([]string, 0, len(serviceByID))
 	for serviceID := range serviceByID {
@@ -241,6 +243,41 @@ func (s *Store) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (Snaps
 	defer s.snapshotMu.Unlock()
 	snapshot, err := s.BuildDesiredSnapshot(ctx, nodeID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A deleted NodeSpec leaves an explicit empty snapshot behind so the
+			// connected Node can retire its previous role. A stale non-empty row
+			// from an older binary is fail-closed here as well.
+			if existing, loadErr := s.LoadSnapshot(ctx, nodeID); loadErr == nil {
+				var current domain.DesiredSnapshot
+				if unmarshalErr := json.Unmarshal(existing.Document, &current); unmarshalErr != nil {
+					return SnapshotRecord{}, unmarshalErr
+				}
+				if current.Gateway == nil && current.Agent == nil {
+					return existing, nil
+				}
+				if existing.Generation == math.MaxInt64 {
+					return SnapshotRecord{}, errors.New("desired snapshot generation is exhausted")
+				}
+				cleared, clearErr := (domain.DesiredSnapshot{
+					SchemaVersion: domain.SchemaVersion,
+					NodeID:        nodeID,
+					Generation:    existing.Generation + 1,
+				}).WithChecksum()
+				if clearErr != nil {
+					return SnapshotRecord{}, clearErr
+				}
+				data, marshalErr := json.Marshal(cleared)
+				if marshalErr != nil {
+					return SnapshotRecord{}, marshalErr
+				}
+				if saveErr := s.SaveSnapshot(ctx, SnapshotRecord{NodeID: nodeID, Generation: cleared.Generation, Checksum: cleared.Checksum, Document: data}); saveErr != nil {
+					return SnapshotRecord{}, saveErr
+				}
+				return s.LoadSnapshot(ctx, nodeID)
+			} else if !errors.Is(loadErr, sql.ErrNoRows) {
+				return SnapshotRecord{}, loadErr
+			}
+		}
 		return SnapshotRecord{}, err
 	}
 	data, err := json.Marshal(snapshot)
@@ -251,6 +288,36 @@ func (s *Store) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (Snaps
 		return SnapshotRecord{}, err
 	}
 	return s.LoadSnapshot(ctx, nodeID)
+}
+
+// clearDesiredSnapshotTx writes the fail-closed empty snapshot used when a
+// node behavior is deleted. The caller owns the surrounding resource
+// transaction and snapshotMu, so spec deletion and data-plane retirement are
+// published as one generation transition.
+func clearDesiredSnapshotTx(ctx context.Context, tx *sql.Tx, nodeID string) error {
+	var current uint64
+	err := tx.QueryRowContext(ctx, `SELECT generation FROM desired_snapshots WHERE node_id=?`, nodeID).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	generation := uint64(1)
+	if err == nil {
+		if current >= math.MaxInt64 {
+			return errors.New("desired snapshot generation is exhausted")
+		}
+		generation = current + 1
+	}
+	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: nodeID, Generation: generation}).WithChecksum()
+	if err != nil {
+		return err
+	}
+	document, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, nodeID, snapshot.Generation, snapshot.Checksum, document, now.Format(time.RFC3339Nano))
+	return err
 }
 
 // RebuildDesiredSnapshots refreshes every node that has a complete spec.  A

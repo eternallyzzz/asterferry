@@ -42,8 +42,16 @@ const (
 // Node is the identity and lifecycle record for a control-plane participant.
 // ID is immutable once a node has enrolled.
 type Node struct {
-	ID                string            `json:"id"`
-	Role              string            `json:"role"`
+	ID string `json:"id"`
+	// Role is retained as an internal compatibility hint for the legacy
+	// scheduler/data-plane code. It is not part of the Node API anymore: the
+	// configured behavior of a node lives in NodeSpec below and is allowed to
+	// change independently of the node identity.
+	Role string `json:"-"`
+	// SpecKind is a read-only projection used by list/detail clients. It is
+	// derived from node_specs and is intentionally not accepted as Node
+	// identity input.
+	SpecKind          NodeSpecKind      `json:"spec_kind,omitempty"`
 	Name              string            `json:"name"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Enabled           bool              `json:"enabled"`
@@ -61,8 +69,8 @@ func (n Node) Validate() error {
 	if name := strings.TrimSpace(n.Name); name == "" || len(name) > 128 || containsControl(name) {
 		return &ApplyError{Code: "invalid_name", Path: "node.name", Message: "name must contain 1 to 128 printable characters"}
 	}
-	if n.Role != RoleGateway && n.Role != RoleAgent {
-		return &ApplyError{Code: "invalid_role", Path: "node.role", Message: "node role must be gateway or agent"}
+	if n.Role != "" && n.Role != RoleGateway && n.Role != RoleAgent {
+		return &ApplyError{Code: "invalid_role", Path: "node.role", Message: "node role must be gateway or agent when supplied internally"}
 	}
 	if n.CertificateState != "" && n.CertificateState != CertificatePending && n.CertificateState != CertificateActive && n.CertificateState != CertificateRevoked && n.CertificateState != CertificateExpired {
 		return &ApplyError{Code: "invalid_certificate_state", Path: "node.certificate_state", Message: "certificate state is invalid"}
@@ -86,6 +94,77 @@ func (n Node) Validate() error {
 	}
 	return nil
 }
+
+// NodeSpecKind identifies the behavior configured for a Node. A node may be
+// enrolled without a spec; it then remains connected and waits for the
+// operator to choose a behavior. Keeping this discriminator in the spec (and
+// not in Node) makes one daemon and one lifecycle sufficient for both data
+// plane modes.
+type NodeSpecKind string
+
+const (
+	NodeSpecGateway NodeSpecKind = NodeSpecKind(RoleGateway)
+	NodeSpecAgent   NodeSpecKind = NodeSpecKind(RoleAgent)
+)
+
+// NodeSpec is the single persisted configuration envelope for a node. The
+// typed GatewaySpec and AgentSpec documents remain deliberately explicit so
+// their validation and snapshot shapes do not become a weak map[string]any.
+type NodeSpec struct {
+	NodeID    string       `json:"node_id"`
+	Kind      NodeSpecKind `json:"kind"`
+	Gateway   *GatewaySpec `json:"gateway,omitempty"`
+	Agent     *AgentSpec   `json:"agent,omitempty"`
+	Revision  int64        `json:"revision,omitempty"`
+	UpdatedAt time.Time    `json:"updated_at,omitempty"`
+}
+
+func (s NodeSpec) Validate() error {
+	if err := ValidateID(s.NodeID, "node_spec.node_id"); err != nil {
+		return err
+	}
+	if s.Kind != NodeSpecGateway && s.Kind != NodeSpecAgent {
+		return &ApplyError{Code: "invalid_spec_kind", Path: "node_spec.kind", Message: "node spec kind must be gateway or agent"}
+	}
+	if (s.Gateway == nil) == (s.Agent == nil) {
+		return &ApplyError{Code: "invalid_node_spec", Path: "node_spec", Message: "node spec must contain exactly one typed configuration"}
+	}
+	if s.Kind == NodeSpecGateway {
+		if s.Gateway == nil {
+			return &ApplyError{Code: "invalid_node_spec", Path: "node_spec.gateway", Message: "gateway configuration is required"}
+		}
+		if s.Gateway.NodeID != s.NodeID {
+			return &ApplyError{Code: "node_mismatch", Path: "node_spec.gateway.node_id", Message: "gateway spec node id does not match node spec"}
+		}
+		if err := s.Gateway.Validate(); err != nil {
+			return err
+		}
+	} else {
+		if s.Agent == nil {
+			return &ApplyError{Code: "invalid_node_spec", Path: "node_spec.agent", Message: "agent configuration is required"}
+		}
+		if s.Agent.NodeID != s.NodeID {
+			return &ApplyError{Code: "node_mismatch", Path: "node_spec.agent.node_id", Message: "agent spec node id does not match node spec"}
+		}
+		if err := s.Agent.Validate(); err != nil {
+			return err
+		}
+	}
+	if s.Revision < 0 {
+		return &ApplyError{Code: "invalid_revision", Path: "node_spec.revision", Message: "node spec revision cannot be negative"}
+	}
+	return nil
+}
+
+func NewGatewayNodeSpec(spec GatewaySpec) NodeSpec {
+	return NodeSpec{NodeID: spec.NodeID, Kind: NodeSpecGateway, Gateway: &spec, Revision: spec.Revision}
+}
+
+func NewAgentNodeSpec(spec AgentSpec) NodeSpec {
+	return NodeSpec{NodeID: spec.NodeID, Kind: NodeSpecAgent, Agent: &spec, Revision: spec.Revision}
+}
+
+func (s NodeSpec) RuntimeKind() string { return string(s.Kind) }
 
 type Capacity struct {
 	MaxAgents       int `json:"max_agents"`
@@ -539,8 +618,15 @@ func (s DesiredSnapshot) Validate() error {
 	if len(s.Services) > maxSnapshotServices || len(s.Assignments) > maxSnapshotAssignments {
 		return &ApplyError{Code: "snapshot_too_large", Message: "snapshot contains too many resources"}
 	}
-	if (s.Gateway == nil) == (s.Agent == nil) {
-		return &ApplyError{Code: "invalid_role_spec", Message: "snapshot must contain exactly one gateway or agent spec"}
+	if s.Gateway != nil && s.Agent != nil {
+		return &ApplyError{Code: "invalid_role_spec", Message: "snapshot must contain at most one gateway or agent spec"}
+	}
+	// An empty snapshot is the explicit fail-closed state used after an
+	// operator removes a NodeSpec. It carries no data-plane resources and lets
+	// a connected generic Node retire its previous role without inventing a
+	// second control-protocol message type.
+	if s.Gateway == nil && s.Agent == nil && (len(s.Services) > 0 || len(s.Assignments) > 0) {
+		return &ApplyError{Code: "invalid_role_spec", Message: "an unconfigured snapshot cannot contain services or assignments"}
 	}
 	if s.Gateway != nil {
 		if s.Gateway.NodeID != s.NodeID {
