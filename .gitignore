@@ -6,5 +6,5 @@ tmp/
 node_modules/
 .idea/
 .vscode/
-controller/
+/controller/
 .codebuddy/
