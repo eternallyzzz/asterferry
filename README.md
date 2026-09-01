@@ -26,10 +26,11 @@ the copy-and-run guides:
 - [End-to-end quick start in English](docs/quickstart.en.md)
 - [中文端到端快速开始](docs/quickstart.zh-CN.md)
 
-Initialize the Controller. Set `--grpc-advertise` to the address that Gateway
-and Agent hosts can reach, and set `--release-version` to an existing release
-asset version. The generated Admin password is printed once when no password
-is supplied:
+Initialize the Controller. `--grpc-advertise` is required and must be the
+host:port that Gateway and Agent hosts can reach; it is not the local bind
+address and must not be `0.0.0.0`. Set `--release-version` to an existing
+release asset version. The generated Admin password is printed once when no
+password is supplied:
 
 ```powershell
 asterferry controller init --dir ./controller `
@@ -37,6 +38,26 @@ asterferry controller init --dir ./controller `
   --release-version 1.0.0
 asterferry controller run --config ./controller/controller.json
 ```
+
+For an existing installation whose `grpc_advertise` is empty or has changed,
+stop the Controller and update it without replacing the database, CA, master
+key or Admin account. The command reissues the Controller certificate with the
+new address in its SAN; restart the Controller afterwards:
+
+```powershell
+asterferry controller configure `
+  --config ./controller/controller.json `
+  --grpc-advertise controller.example.com:9443
+```
+
+If the old configuration also has no published `release_version`, append
+`--release-version 1.0.0` (and use `--release-base-url` for a private HTTPS
+mirror).
+
+For a Windows Controller with Nodes running in the local WSL instance, the
+current WSL gateway is commonly `172.28.80.1:9443`. Use that only for local
+host-to-WSL testing; remote Nodes must use Controller C's stable LAN or DNS
+address.
 
 Then open the Dashboard at `/dashboard/`. On the Nodes page create a pending
 installation task with only the Node ID, name, labels and target platform. The
@@ -77,7 +98,7 @@ asterferry controller restore --config ./controller/controller.json --source ./b
 
 ## Control plane
 
-`controller init` creates a JSON-only local configuration, a Controller CA,
+`controller init --grpc-advertise <reachable-host:port>` creates a JSON-only local configuration, a Controller CA,
 HTTPS/gRPC certificates, a 32-byte owner-readable master key, and the first
 Admin account. SQLite runs with WAL, foreign keys and a busy timeout. Secrets
 are AES-GCM encrypted with the master key, passwords use Argon2id, and API or

@@ -132,6 +132,20 @@ asterferry.exe controller init `
 
 `--grpc-advertise` 是 A、B 实际连接的 C 地址；`--release-version` 必须替换为已经发布到 `release_base_url` 的版本。初始化会把广播地址写入 Controller 证书 SAN。自建发布镜像可通过 `--release-base-url` 指定，但必须是 HTTPS。
 
+如果已有 Controller 初始化时没有填写广播地址，先停止 Controller，再执行下面的命令修复；它不会替换数据库、CA、master key 或管理员账号：
+
+```powershell
+asterferry.exe controller configure `
+  --config .\controller\controller.json `
+  --grpc-advertise controller.example.com:9443
+```
+
+如果旧配置也没有已发布的 `release_version`，再加上
+`--release-version 1.0.0`；使用私有 HTTPS 发布镜像时再加
+`--release-base-url`。
+
+该命令会重新签发包含新地址 SAN 的 Controller 证书。重启 Controller 后再生成节点安装命令。Windows Controller 与本机 WSL 联调时，WSL 通常可访问 `172.28.80.1:9443`；远程节点必须使用 C 的稳定局域网地址或 DNS，不能使用这个 WSL 虚拟地址。
+
 不提供 `--password-file` 或 `--password` 时，CLI 会生成随机密码并在初始化输出中显示一次。密码不会保存到 `controller.json`。
 
 ### 3.3 启动并检查

@@ -187,9 +187,17 @@ func SaveConfig(path string, config Config) error {
 	if err := config.Validate(); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(config, "", "  ")
+	data, err := marshalConfig(config)
 	if err != nil {
 		return err
 	}
 	return atomicfile.AtomicWrite(path, append(data, '\n'), 0o600)
+}
+
+func marshalConfig(config Config) ([]byte, error) {
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }

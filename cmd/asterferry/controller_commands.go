@@ -21,7 +21,7 @@ import (
 
 func newControllerCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "controller", Short: "run and administer the AsterFerry Controller"}
-	cmd.AddCommand(newControllerInitCommand(), newControllerRunCommand(), newControllerMigrateCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
+	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerMigrateCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
 	return cmd
 }
 
@@ -71,6 +71,31 @@ func newControllerInitCommand() *cobra.Command {
 	cmd.Flags().StringVar(&releaseBaseURL, "release-base-url", "", "official release download base URL used by generated node install commands")
 	cmd.Flags().StringVar(&releaseVersion, "release-version", "", "release version used by generated node install commands (defaults to the binary version)")
 	cmd.Flags().BoolVar(&force, "force", false, "initialize an empty or existing directory")
+	_ = cmd.MarkFlagRequired("grpc-advertise")
+	return cmd
+}
+
+func newControllerConfigureCommand() *cobra.Command {
+	var path, grpcAdvertise, releaseBaseURL, releaseVersion string
+	cmd := &cobra.Command{
+		Use:   "configure",
+		Short: "update Controller advertised address and reissue its server certificate",
+		Long:  "update a stopped Controller configuration without replacing its database, CA or master key",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			config, err := controller.Configure(cmd.Context(), controller.ConfigureOptions{ConfigPath: path, GRPCAdvertise: grpcAdvertise, ReleaseBaseURL: releaseBaseURL, ReleaseVersion: releaseVersion})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "controller grpc_advertise updated to %s; restart Controller to load the new certificate\n", config.GRPCAdvertise)
+			return err
+		},
+	}
+	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
+	cmd.Flags().StringVar(&grpcAdvertise, "grpc-advertise", "", "reachable Controller gRPC address used by Nodes")
+	cmd.Flags().StringVar(&releaseBaseURL, "release-base-url", "", "HTTPS release download base URL used by generated node install commands")
+	cmd.Flags().StringVar(&releaseVersion, "release-version", "", "published semantic release version used by generated node install commands")
+	_ = cmd.MarkFlagRequired("grpc-advertise")
 	return cmd
 }
 

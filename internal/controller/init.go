@@ -57,6 +57,9 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if options.Password == "" {
 		return InitResult{}, errors.New("initial admin password is required")
 	}
+	if strings.TrimSpace(options.GRPCAdvertise) == "" {
+		return InitResult{}, errors.New("controller grpc_advertise is required during initialization; pass a reachable host:port")
+	}
 	config := DefaultConfig(dir)
 	if options.HTTPListen != "" {
 		config.HTTPListen = options.HTTPListen
@@ -64,9 +67,7 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if options.GRPCListen != "" {
 		config.GRPCListen = options.GRPCListen
 	}
-	if options.GRPCAdvertise != "" {
-		config.GRPCAdvertise = options.GRPCAdvertise
-	}
+	config.GRPCAdvertise = strings.TrimSpace(options.GRPCAdvertise)
 	if options.ReleaseBaseURL != "" {
 		config.ReleaseBaseURL = options.ReleaseBaseURL
 	}
@@ -326,20 +327,31 @@ func writeCA(keyPath, certPath string, nowFn func() time.Time) error {
 }
 
 func writeServerCertificate(config Config, nowFn func() time.Time) error {
+	certPEM, keyPEM, err := serverCertificatePEM(config, nowFn)
+	if err != nil {
+		return err
+	}
+	if err := writeSecure(config.TLSKeyPath, keyPEM); err != nil {
+		return err
+	}
+	return writeSecure(config.TLSCertPath, certPEM)
+}
+
+func serverCertificatePEM(config Config, nowFn func() time.Time) ([]byte, []byte, error) {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
 	caCert, caKey, err := readCA(config.CACertPath, config.CAKeyPath)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	serial, err := randomSerial()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	now := nowFn().UTC()
 	dnsNames := []string{"localhost"}
@@ -362,16 +374,13 @@ func writeServerCertificate(config Config, nowFn func() time.Time) error {
 	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "asterferry-controller"}, DNSNames: dnsNames, IPAddresses: ipAddresses, NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(2, 0, 0), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, public, caKey)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	keyBytes, err := x509.MarshalPKCS8PrivateKey(private)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if err := writeSecure(config.TLSKeyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})); err != nil {
-		return err
-	}
-	return writeSecure(config.TLSCertPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}), nil
 }
 
 func readCA(certPath, keyPath string) (*x509.Certificate, ed25519.PrivateKey, error) {

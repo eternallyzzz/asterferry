@@ -28,6 +28,9 @@ export function describeError(caught: unknown): string {
   if (caught instanceof ControllerAPIError) {
     if (caught.code === "revision_conflict") return "资源已被其他操作者修改，请刷新后重试（revision 冲突）。";
     if (caught.code === "already_exists") return "资源已存在，请使用其他 ID。";
+    if (caught.code === "bootstrap_unavailable" && caught.message.includes("grpc_advertise")) {
+      return "Controller 尚未配置 Node 可访问的 gRPC 地址（grpc_advertise）。请先执行 controller configure --grpc-advertise <host:port> 并重启 Controller。";
+    }
     if (caught.status === 409) return caught.message || "请求冲突，请刷新后重试。";
     if (caught.status === 403) return "当前账户没有执行此操作的权限。";
     if (caught.status === 404) return "资源不存在或已被删除。";

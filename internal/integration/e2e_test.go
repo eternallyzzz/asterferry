@@ -26,7 +26,7 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	root := t.TempDir()
-	configResult, err := controller.Init(ctx, controller.InitOptions{Dir: filepath.Join(root, "controller"), HTTPListen: "127.0.0.1:0", GRPCListen: "127.0.0.1:0", Username: "admin", Password: "integration-password"})
+	configResult, err := controller.Init(ctx, controller.InitOptions{Dir: filepath.Join(root, "controller"), HTTPListen: "127.0.0.1:0", GRPCListen: "127.0.0.1:0", GRPCAdvertise: "127.0.0.1:9443", Username: "admin", Password: "integration-password"})
 	if err != nil {
 		t.Fatal(err)
 	}

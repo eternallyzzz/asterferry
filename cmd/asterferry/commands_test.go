@@ -22,6 +22,9 @@ func TestRootExposesOnlyCurrentGenerationCommands(t *testing.T) {
 	if command, _, err := root.Find([]string{"controller", "migrate"}); err != nil || command == root {
 		t.Fatalf("controller migrate command is missing: command=%v err=%v", command, err)
 	}
+	if command, _, err := root.Find([]string{"controller", "configure"}); err != nil || command == root {
+		t.Fatalf("controller configure command is missing: command=%v err=%v", command, err)
+	}
 }
 
 func TestNodeRunRequiresBootstrap(t *testing.T) {

@@ -45,7 +45,7 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return &codedError{code: 2, err: fmt.Errorf("%w; run %q for help", err, "asterferry "+cmd.Name()+" --help")}
 	})
-	root.Example = `  asterferry controller init --dir ./controller
+	root.Example = `  asterferry controller init --dir ./controller --grpc-advertise controller.example:9443
 	asterferry node enroll --controller controller.example:9443 --token <one-time-token> --node-id edge-east --ca ./controller/ca/ca.crt
 	asterferry node run --bootstrap edge-east-bootstrap.json`
 	root.AddCommand(

@@ -48,6 +48,9 @@ func New(config Config) (*Controller, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	if err := validateControllerCertificate(config); err != nil {
+		return nil, err
+	}
 	masterKey, err := LoadOrCreateMasterKey(config.MasterKeyPath)
 	if err != nil {
 		return nil, err

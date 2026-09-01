@@ -38,7 +38,7 @@ func TestControllerCloseForcesGRPCStop(t *testing.T) {
 
 func TestEnrollmentOverGRPC(t *testing.T) {
 	root := t.TempDir()
-	result, err := Init(context.Background(), InitOptions{Dir: root, Password: "a-very-long-admin-password"})
+	result, err := Init(context.Background(), InitOptions{Dir: root, GRPCAdvertise: "127.0.0.1:9443", Password: "a-very-long-admin-password"})
 	if err != nil {
 		t.Fatal(err)
 	}

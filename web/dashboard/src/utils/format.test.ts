@@ -68,6 +68,10 @@ describe("describeError", () => {
     expect(describeError(new ControllerAPIError(404, "missing"))).toContain("不存在");
   });
 
+  it("explains how to fix missing Controller bootstrap address", () => {
+    expect(describeError(new ControllerAPIError(503, "controller grpc_advertise must be a reachable host:port before generating node installation commands", "bootstrap_unavailable"))).toContain("grpc_advertise");
+  });
+
   it("falls back to the message for other errors", () => {
     expect(describeError(new ControllerAPIError(500, "boom"))).toBe("boom");
     expect(describeError(new Error("plain"))).toBe("plain");

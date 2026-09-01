@@ -9,7 +9,7 @@ import (
 
 func TestBackupPublishesAndRestoreVerifiesManifest(t *testing.T) {
 	controllerDir := filepath.Join(t.TempDir(), "controller")
-	result, err := Init(context.Background(), InitOptions{Dir: controllerDir, Password: "a-very-long-admin-password"})
+	result, err := Init(context.Background(), InitOptions{Dir: controllerDir, GRPCAdvertise: "127.0.0.1:9443", Password: "a-very-long-admin-password"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestInitForcePreservesUnrelatedFiles(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Init(context.Background(), InitOptions{Dir: dir, Password: "a-very-long-admin-password", Force: true})
+	result, err := Init(context.Background(), InitOptions{Dir: dir, GRPCAdvertise: "127.0.0.1:9443", Password: "a-very-long-admin-password", Force: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -181,13 +181,9 @@ func (s *Store) ReconcilePendingServices(ctx context.Context) (result []domain.A
 		if !node.Enabled {
 			continue
 		}
-		var pending int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM services s LEFT JOIN assignment_services a ON a.service_id=s.id WHERE s.agent_id=? AND s.enabled=1 AND a.service_id IS NULL`, node.ID).Scan(&pending); err != nil {
-			return nil, err
-		}
-		if pending == 0 {
-			continue
-		}
+		// Service.Enabled lives in the authoritative JSON document, not as a
+		// denormalized SQLite column. Reuse the regular reconciliation path so
+		// pending detection and scheduling apply the same validation rules.
 		assignments, scheduleErr := s.ReconcileAssignmentsForAgents(ctx, node.ID)
 		if scheduleErr != nil {
 			return result, scheduleErr

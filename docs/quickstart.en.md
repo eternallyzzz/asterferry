@@ -136,6 +136,25 @@ Initialization includes the advertised address in the Controller certificate
 SAN. A private release mirror can be selected with `--release-base-url`, but
 it must use HTTPS.
 
+If an existing Controller was initialized without an advertised address, stop
+it and repair the configuration without replacing its database, CA, master key
+or Admin account:
+
+```powershell
+asterferry.exe controller configure `
+  --config .\controller\controller.json `
+  --grpc-advertise controller.example.com:9443
+```
+
+If the old configuration also has no published `release_version`, add
+`--release-version 1.0.0`; add `--release-base-url` when using a private HTTPS
+release mirror.
+
+The command reissues the Controller certificate with the new address in its
+SAN. Restart the Controller before generating Node installation commands. For
+local Windows-to-WSL testing, `172.28.80.1:9443` is commonly reachable from
+WSL; remote Nodes must use C's stable LAN or DNS address instead.
+
 If neither `--password-file` nor `--password` is supplied, the CLI generates a random password and prints it once in the initialization output. The password is not stored in `controller.json`.
 
 ### 3.3 Start and check
