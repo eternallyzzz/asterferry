@@ -164,7 +164,7 @@ https://controller.example.com:8443/dashboard/
 
 Initialization creates a self-signed Controller CA. In production, install `controller/ca/ca.crt` in the admin client's trust store. For temporary development, you may accept the browser warning manually. Never copy `ca.key`, `master.key`, or the Controller TLS private key to A or B.
 
-## 4. One-click node installation and enrollment from the Dashboard
+## 4. Generate one-click installation commands from the Dashboard
 
 Open `https://controller.example.com:8443/dashboard/` and go to **Nodes**.
 The Controller remains the only owner of business configuration; A and B do
@@ -172,8 +172,10 @@ not read business YAML.
 
 ### 4.1 Create the Gateway
 
-Click **Register node**, enter the Node ID, name and labels, choose `Gateway`,
-then select B's actual platform and architecture. A Gateway also requires:
+Click **Generate install command**, enter the Node ID, name and labels, choose
+`Gateway`, then select B's actual platform and architecture. This creates a
+pending installation intent; it does not create an enrolled node yet. A
+Gateway also requires:
 
 - **Public AFDP endpoint**, for example `gateway.example.com:4433`. This is
   the UDP address that A uses to reach B, not a business service port.
@@ -182,10 +184,12 @@ then select B's actual platform and architecture. A Gateway also requires:
 
 After submission, the Dashboard returns a one-time installer command. Copy it
 to B and run it in a root shell on Linux or an elevated PowerShell on Windows.
+The node appears in the enrolled-node list only after that command reaches the
+Controller and completes Enroll.
 
 ### 4.2 Create the Agent
 
-Click **Register node** again, choose `Agent`, and enter A's platform and
+Click **Generate install command** again, choose `Agent`, and enter A's platform and
 architecture. The Controller creates a usable default Agent spec. Copy the
 resulting command to A and run it once.
 
@@ -199,9 +203,9 @@ certificate, and creates, enables and starts the system service:
 
 The token is single-use and valid for 15 minutes. It can only enroll its own
 Node ID and role. Do not paste the command into public chats, tickets or logs.
-If it expires or is lost, generate a new command from the node details. B and
-A do not need a manually copied CA, edited bootstrap JSON or second start
-command.
+If it expires or is lost, reissue it from the Dashboard's pending installation
+list. B and A do not need a manually copied CA, edited bootstrap JSON or second
+start command.
 
 ### 4.3 Legacy/manual enrollment
 
@@ -383,7 +387,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-For a v3/v4 database upgrade, stop the Controller, run a dry-run, then publish the migration:
+For a v3/v4/v5 database upgrade, stop the Controller, run a dry-run, then publish the migration to the current schema v6:
 
 ```sh
 asterferry controller migrate --config ./controller/controller.json --dry-run
@@ -397,7 +401,7 @@ See [`deploy/README.md`](../deploy/README.md) for systemd, Docker Compose and Ku
 ## 10. Completion checklist
 
 - [ ] C's `8443/tcp` and `9443/tcp` are listening and reachable.
-- [ ] The Dashboard accepts login and both nodes are registered.
+- [ ] The Dashboard accepts login and both nodes have completed installation and enrollment.
 - [ ] The Gateway `public_endpoints` value is a reachable B address on UDP `4433`.
 - [ ] The Agent selector matches the Gateway labels.
 - [ ] A and B completed enrollment with role-matching one-time tokens.

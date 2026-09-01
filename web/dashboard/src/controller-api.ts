@@ -35,7 +35,17 @@ export interface NodeBootstrapRequest {
   agent_spec?: unknown;
 }
 
+export interface NodeInstallationRequest extends NodeBootstrapRequest {
+  node_id: string;
+  role: "gateway" | "agent";
+  name: string;
+  labels?: Record<string, string>;
+  enabled?: boolean;
+}
+
 export interface NodeBootstrapResponse {
+  installation_id?: string;
+  state?: string;
   node_id: string;
   role: "gateway" | "agent";
   platform: "linux" | "windows";
@@ -43,6 +53,18 @@ export interface NodeBootstrapResponse {
   version: string;
   expires_at: string;
   command: string;
+}
+
+export interface PendingNodeInstallation {
+  node_id: string;
+  role: "gateway" | "agent";
+  name: string;
+  labels?: Record<string, string>;
+  enabled: boolean;
+  platform: "linux" | "windows";
+  arch: "amd64" | "arm64";
+  expires_at: string;
+  created_at: string;
 }
 
 export interface ControllerService {
@@ -157,6 +179,10 @@ export function createNode(node: CreateNodeInput, token?: string, idempotencyKey
 export function updateNode(id: string, node: Partial<ControllerNode>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerNode> { return request<ControllerNode>(`/nodes/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(node) }, token); }
 export function deleteNode(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 export function bootstrapNode(id: string, input: NodeBootstrapRequest, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>(`/nodes/${encodeURIComponent(id)}/bootstrap`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
+export function listNodeInstallations(token?: string): Promise<{ items: PendingNodeInstallation[] }> { return request<{ items: PendingNodeInstallation[] }>("/node-installations", {}, token); }
+export function createNodeInstallation(input: NodeInstallationRequest, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>("/node-installations", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
+export function reissueNodeInstallation(id: string, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>(`/node-installations/${encodeURIComponent(id)}/reissue`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
+export function deleteNodeInstallation(id: string, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/node-installations/${encodeURIComponent(id)}`, { method: "DELETE", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function nodeAction(id: string, action: "drain" | "reconnect" | "resync", token?: string, idempotencyKey?: string): Promise<{ state: string }> { return request<{ state: string }>(`/nodes/${encodeURIComponent(id)}/actions/${action}`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function listGateways(token?: string): Promise<{ items: Array<{ node: ControllerNode; spec?: unknown }> }> { return request(`/gateways`, {}, token); }
 export function createGateway(spec: unknown, token?: string, idempotencyKey?: string): Promise<unknown> { return request(`/gateways`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }

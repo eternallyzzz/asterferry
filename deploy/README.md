@@ -27,9 +27,9 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-For an existing schema v3 or v4 database, stop the Controller and run the
-explicit v5 migration during a maintenance window. Validate first; the publish
-step retains the original file as a rollback backup:
+For an existing schema v3, v4 or v5 database, stop the Controller and run the
+explicit migration to schema v6 during a maintenance window. Validate first;
+the publish step retains the original file as a rollback backup:
 
 ```sh
 asterferry controller migrate --config /var/lib/asterferry/controller.json --dry-run
@@ -45,13 +45,16 @@ last-known-good snapshot while it is unavailable.
 
 ## Node enrollment
 
-The recommended path is Dashboard → **Nodes** → **Register node**. Choose the
-role and target platform. For a Gateway, enter its public AFDP endpoint and
-TCP/UDP port pools. The Controller returns one short-lived, node-bound
-installer command; run it once on B or A as root/Administrator. The installer
-downloads and verifies the matching release, enrolls the node, creates the
-system service and starts it. Once both nodes are online, create services in
-the Dashboard; resource changes trigger scheduling automatically.
+The recommended path is Dashboard → **Nodes** → **Generate install command**.
+Choose the role and target platform; this creates a pending installation intent,
+not an enrolled node. For a Gateway, enter its public AFDP endpoint and TCP/UDP
+port pools as data-plane preconfiguration. The Controller returns one
+short-lived, node-bound installer command; run it once on B or A as
+root/Administrator. The installer downloads and verifies the matching release,
+reaches the Controller to enroll the node, creates the system service and
+starts it. The identity and initial spec do not exist in the enrolled-node
+list until that enrollment succeeds. Once both nodes are online, create
+services in the Dashboard; resource changes trigger scheduling automatically.
 
 For offline images or custom service accounts, the manual path remains:
 

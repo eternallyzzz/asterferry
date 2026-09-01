@@ -20,10 +20,9 @@ const (
 	bootstrapInstallerWindows = "install-node.ps1"
 )
 
-// NodeBootstrapRequest contains the platform selected in the Dashboard and,
-// for a newly provisioned node, the minimum node-scoped business spec needed
-// before the first snapshot can be built. Existing specs are never replaced
-// by a bootstrap request.
+// NodeBootstrapRequest contains the platform and optional initial spec used to
+// provision an already-enrolled node. Existing specs are never replaced by a
+// bootstrap request.
 type NodeBootstrapRequest struct {
 	Platform    string              `json:"platform"`
 	Arch        string              `json:"arch"`
@@ -31,14 +30,31 @@ type NodeBootstrapRequest struct {
 	AgentSpec   *domain.AgentSpec   `json:"agent_spec,omitempty"`
 }
 
+// NodeInstallationRequest creates a pending installation intent. It is kept
+// separate from NodeBootstrapRequest so the API cannot accidentally confuse a
+// command for an existing identity with the install-first lifecycle.
+type NodeInstallationRequest struct {
+	NodeID      string              `json:"node_id"`
+	Role        string              `json:"role"`
+	Name        string              `json:"name"`
+	Labels      map[string]string   `json:"labels,omitempty"`
+	Enabled     *bool               `json:"enabled,omitempty"`
+	Platform    string              `json:"platform"`
+	Arch        string              `json:"arch"`
+	GatewaySpec *domain.GatewaySpec `json:"gateway_spec,omitempty"`
+	AgentSpec   *domain.AgentSpec   `json:"agent_spec,omitempty"`
+}
+
 type NodeBootstrapResponse struct {
-	NodeID    string `json:"node_id"`
-	Role      string `json:"role"`
-	Platform  string `json:"platform"`
-	Arch      string `json:"arch"`
-	Version   string `json:"version"`
-	ExpiresAt string `json:"expires_at"`
-	Command   string `json:"command"`
+	InstallationID string `json:"installation_id,omitempty"`
+	State          string `json:"state,omitempty"`
+	NodeID         string `json:"node_id"`
+	Role           string `json:"role"`
+	Platform       string `json:"platform"`
+	Arch           string `json:"arch"`
+	Version        string `json:"version"`
+	ExpiresAt      string `json:"expires_at"`
+	Command        string `json:"command"`
 }
 
 func normalizeBootstrapPlatform(platform, arch string) (string, string, error) {

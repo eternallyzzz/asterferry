@@ -33,7 +33,7 @@ export function formatPortRanges(value: unknown): string {
     .join(",");
 }
 
-export function buildGatewayBootstrapSpec(node: ControllerNode, endpoint: string, tcpPool: string, udpPool: string): Record<string, unknown> {
+export function buildGatewayBootstrapSpec(node: Pick<ControllerNode, "id" | "labels">, endpoint: string, tcpPool: string, udpPool: string): Record<string, unknown> {
   const publicEndpoint = endpoint.trim();
   if (!publicEndpoint) throw new Error("Gateway 公网 AFDP 地址不能为空，例如 gateway.example.com:4433");
   return {

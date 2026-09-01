@@ -160,30 +160,30 @@ https://controller.example.com:8443/dashboard/
 
 初始化会生成自签名 CA。生产环境应把 `controller/ca/ca.crt` 安装到管理端的信任库；临时开发环境可以手动接受浏览器证书警告。不要把 `ca.key`、`master.key` 或 Controller TLS 私钥复制到 A、B。
 
-## 4. 在 Dashboard 一键安装并注册 A、B
+## 4. 在 Dashboard 生成安装命令并注册 A、B
 
 登录 `https://controller.example.com:8443/dashboard/`，打开“节点”页。
 所有业务配置仍由 Controller 管理，A、B 不读取业务 YAML。
 
 ### 4.1 创建 Gateway
 
-点击“注册节点”，填写 Node ID、名称、标签，角色选择 `Gateway`，再选择 B 的实际平台和架构。Gateway 额外填写：
+点击“生成安装命令”，填写 Node ID、名称、标签，角色选择 `Gateway`，再选择 B 的实际平台和架构。这里创建的是“待安装任务”，不会立即创建正式节点。Gateway 额外填写：
 
 - `公网 AFDP 地址`：例如 `gateway.example.com:4433`。这是 A 连接 B 的 UDP 地址，不是业务服务端口。
 - `TCP 端口池`、`UDP 端口池`：例如 `28080-28999`，用于 Dashboard 创建服务时自动分配公网端口。
 
-提交后 Dashboard 会立即返回一条只显示一次的安装命令。把命令复制到 B：Linux 在 root shell 执行，Windows 在“以管理员身份运行”的 PowerShell 执行。
+提交后 Dashboard 会返回一条只显示一次的安装命令。把命令复制到 B：Linux 在 root shell 执行，Windows 在“以管理员身份运行”的 PowerShell 执行。B 执行命令并首次连接 Controller 完成 Enroll 后，节点才会出现在正式节点列表。
 
 ### 4.2 创建 Agent
 
-再次点击“注册节点”，角色选择 `Agent`，填写 A 的平台和架构即可；Agent 会自动生成可用的默认规格。提交后把命令复制到 A 执行。
+再次点击“生成安装命令”，角色选择 `Agent`，填写 A 的平台和架构即可；Agent 会自动生成可用的默认规格。提交后把命令复制到 A 执行。
 
 安装命令会下载与 Controller 配置版本完全一致的官方发布包，校验 SHA-256，写入 CA 和 bootstrap/cache 私有目录，调用一次性节点 Token 完成证书 enrollment，并创建、启用和启动系统服务：
 
 - Linux：`asterferry-gateway.service` 或 `asterferry-agent.service`。
 - Windows：`AsterFerry-gateway` 或 `AsterFerry-agent` Windows 服务。
 
-Token 默认 15 分钟有效，只能用于创建它对应的 Node ID 和角色。命令不要发到公开聊天、工单或日志中；过期或丢失时，在节点详情中重新生成即可。B、A 不需要手工复制 CA、编辑 bootstrap JSON 或执行第二条启动命令。
+Token 默认 15 分钟有效，只能用于创建它对应的 Node ID 和角色。命令不要发到公开聊天、工单或日志中；过期或丢失时，在“待安装任务”中重新生成即可。B、A 不需要手工复制 CA、编辑 bootstrap JSON 或执行第二条启动命令。
 
 ### 4.3 旧版/高级手工 enrollment
 
@@ -362,7 +362,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-v3/v4 数据库升级必须停止 Controller，先 dry-run 再发布迁移：
+v3/v4/v5 数据库升级必须停止 Controller，先 dry-run 再发布到当前 schema v6：
 
 ```sh
 asterferry controller migrate --config ./controller/controller.json --dry-run
@@ -376,7 +376,7 @@ Controller 暂时不可用时，节点会继续使用加密的 last-known-good �
 ## 10. 完成清单
 
 - [ ] C 的 `8443/tcp` 和 `9443/tcp` 已监听并可达。
-- [ ] Dashboard 可以登录，Gateway 和 Agent 已注册。
+- [ ] Dashboard 可以登录，Gateway 和 Agent 已完成安装并注册。
 - [ ] Gateway `public_endpoints` 使用 B 的可达 `4433/udp` 地址。
 - [ ] Agent selector 与 Gateway 标签匹配。
 - [ ] A、B 已用角色匹配的一次性 token 完成 enrollment。

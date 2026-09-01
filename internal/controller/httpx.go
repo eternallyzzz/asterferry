@@ -108,7 +108,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		// Domain conflicts are safe to retry only after the caller resolves the
 		// conflicting resource; expose them as HTTP 409 instead of collapsing
 		// them into a generic malformed-request response.
-		if applyErr.Code == "resource_conflict" || applyErr.Code == "port_conflict" || applyErr.Code == "bind_mismatch" || applyErr.Code == "port_mismatch" {
+		if applyErr.Code == "resource_conflict" || applyErr.Code == "port_conflict" || applyErr.Code == "bind_mismatch" || applyErr.Code == "port_mismatch" || applyErr.Code == "already_exists" || applyErr.Code == "bootstrap_pending" {
 			writeApplyError(w, http.StatusConflict, applyErr)
 			return
 		}

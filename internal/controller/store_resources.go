@@ -386,21 +386,18 @@ func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions)
 	if options.IfMatch <= 0 || options.IfMatch != revision {
 		return &RevisionConflictError{Resource: "node", Expected: options.IfMatch, Actual: revision}
 	}
-	// Node deletion is intentionally not a cascading business-data operation.
-	// A forgotten node must be disabled or its assignments/services removed
-	// explicitly first; otherwise a single identity CRUD request could silently
-	// erase the last-known desired state for an Agent or release a Gateway's
-	// public bindings without an auditable placement change.
+	// Specs are node-owned configuration and are safe to remove with an
+	// otherwise unused identity. Assignments and services remain explicit
+	// business dependencies: deleting a node must never silently remove a live
+	// placement or an Agent's service definitions.
 	var dependents int
 	if err := tx.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM assignments WHERE gateway_id=? OR agent_id=?) +
-		(SELECT COUNT(*) FROM services WHERE agent_id=?) +
-		(SELECT COUNT(*) FROM gateway_specs WHERE node_id=?) +
-		(SELECT COUNT(*) FROM agent_specs WHERE node_id=?)`, id, id, id, id, id).Scan(&dependents); err != nil {
+		(SELECT COUNT(*) FROM services WHERE agent_id=?)`, id, id, id).Scan(&dependents); err != nil {
 		return err
 	}
 	if dependents > 0 {
-		return &domain.ApplyError{Code: "resource_conflict", Path: "node", Message: "node has dependent specs, services, or assignments"}
+		return &domain.ApplyError{Code: "resource_conflict", Path: "node", Message: "node has dependent services or assignments"}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=? AND revision=?`, id, revision); err != nil {
 		return err

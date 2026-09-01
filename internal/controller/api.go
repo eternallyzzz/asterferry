@@ -64,6 +64,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/me", s.me)
 	mux.HandleFunc("/api/v1/nodes", s.nodes)
 	mux.HandleFunc("/api/v1/nodes/", s.nodeAction)
+	mux.HandleFunc("/api/v1/node-installations", s.nodeInstallations)
+	mux.HandleFunc("/api/v1/node-installations/", s.nodeInstallationAction)
 	mux.HandleFunc("/api/v1/gateways", s.gateways)
 	mux.HandleFunc("/api/v1/gateways/", s.gatewayAction)
 	mux.HandleFunc("/api/v1/agents", s.agents)

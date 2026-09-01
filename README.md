@@ -38,13 +38,17 @@ asterferry controller init --dir ./controller `
 asterferry controller run --config ./controller/controller.json
 ```
 
-Then open the Dashboard at `/dashboard/`. On the Nodes page choose Gateway or
-Agent and the target platform. For a Gateway, enter its public AFDP endpoint
-and TCP/UDP port pools. The Controller returns one one-time Linux or Windows
-installer command; run it once on B or A as Administrator/root. It downloads
-and verifies the matching release, enrolls the node and starts its system
-service. After both nodes are online, create services in the Dashboard; the
-Controller schedules them automatically.
+Then open the Dashboard at `/dashboard/`. On the Nodes page create a pending
+installation task by choosing Gateway or Agent and the target platform. For a
+Gateway, enter its public AFDP endpoint and TCP/UDP port pools; this is
+data-plane configuration that A will use to reach B, not a second Controller
+registration address. The Controller returns one one-time Linux or Windows
+installer command. Run it once on B or A as Administrator/root. The command
+downloads and verifies the matching release, reaches the Controller to enroll
+the node, and starts its system service. The node and its initial spec are not
+created in the enrolled-node list until that first enrollment succeeds. After
+both nodes are online, create services in the Dashboard; the Controller
+schedules them automatically.
 
 The manual enrollment path remains available for offline or custom images:
 
@@ -96,10 +100,10 @@ asterferry controller migrate --config ./controller/controller.json --dry-run
 asterferry controller migrate --config ./controller/controller.json
 ```
 
-The command upgrades schema v3 or v4 to v5, keeps the original database as a
-rollback backup, and never runs while `controller run` is active. Existing
-v3/v4 databases are not rewritten by `OpenStore`; take a complete Controller
-backup before the maintenance window.
+The command upgrades schema v3, v4 or v5 to v6, keeps the original database as
+a rollback backup, and never runs while `controller run` is active. Existing
+databases are not rewritten by `OpenStore`; take a complete Controller backup
+before the maintenance window.
 
 ## Node behavior
 

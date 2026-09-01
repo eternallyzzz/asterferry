@@ -29,5 +29,11 @@ func (s *Store) PruneHistory(ctx context.Context, now time.Time, idempotencyTTL,
 			return err
 		}
 	}
+	// Pending installation intents are credentials as well as UI state. Once
+	// their enrollment window has elapsed they can no longer be useful and
+	// must not accumulate indefinitely in the Controller database.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_bootstraps WHERE expires_at <= ?`, now.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
 	return tx.Commit()
 }

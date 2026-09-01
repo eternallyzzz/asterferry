@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"asterferry/internal/domain"
+	nodepkg "asterferry/internal/node"
 )
 
 func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
@@ -205,6 +207,166 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	server.Handler().ServeHTTP(retryResponse, retry)
 	if retryResponse.Code != http.StatusConflict || strings.Contains(retryResponse.Body.String(), `"command"`) {
 		t.Fatalf("bootstrap retry = %d, body=%s", retryResponse.Code, retryResponse.Body.String())
+	}
+}
+
+func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
+	root := t.TempDir()
+	initResult, err := Init(context.Background(), InitOptions{
+		Dir: root, Password: "a-very-long-admin-password",
+		GRPCAdvertise: "controller.example.com:9443", ReleaseVersion: "1.2.3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterKey, err := LoadOrCreateMasterKey(initResult.Config.MasterKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(initResult.Config.DatabasePath, masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	adminToken, _, err := store.CreateAPIToken(context.Background(), initResult.Admin.ID, "bootstrap-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(initResult.Config, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	body, err := json.Marshal(NodeInstallationRequest{
+		NodeID: "gw-install", Role: domain.RoleGateway, Name: "Gateway install", Labels: map[string]string{"site": "east"},
+		Platform: "linux", Arch: "amd64",
+		GatewaySpec: &domain.GatewaySpec{NodeID: "gw-install", PublicEndpoints: []string{"gateway.example.com:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/node-installations", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "pending-install-once")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("pending installation response = %d, body=%s", response.Code, response.Body.String())
+	}
+	var result NodeBootstrapResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "pending" || result.InstallationID != "gw-install" || result.Command == "" {
+		t.Fatalf("pending installation response = %#v", result)
+	}
+	if _, err := store.GetNode(context.Background(), "gw-install"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("node exists before enrollment: %v", err)
+	}
+	if _, err := store.GetGatewaySpec(context.Background(), "gw-install"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("gateway spec exists before enrollment: %v", err)
+	}
+	if _, err := store.GetPendingNodeBootstrap(context.Background(), "gw-install"); err != nil {
+		t.Fatalf("pending bootstrap was not stored: %v", err)
+	}
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/node-installations", nil)
+	listRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	listResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK || strings.Contains(listResponse.Body.String(), "token_hash") || strings.Contains(listResponse.Body.String(), "command") {
+		t.Fatalf("pending installation list = %d, body=%s", listResponse.Code, listResponse.Body.String())
+	}
+
+	const tokenMarker = "--token '"
+	start := strings.Index(result.Command, tokenMarker)
+	if start < 0 {
+		t.Fatalf("install command has no token: %s", result.Command)
+	}
+	start += len(tokenMarker)
+	end := strings.Index(result.Command[start:], "'")
+	if end < 0 {
+		t.Fatalf("install command token is unterminated: %s", result.Command)
+	}
+	originalToken := result.Command[start : start+end]
+	retry := httptest.NewRequest(http.MethodPost, "/api/v1/node-installations", bytes.NewReader(body))
+	retry.Header.Set("Authorization", "Bearer "+adminToken)
+	retry.Header.Set("Content-Type", "application/json")
+	retry.Header.Set("Idempotency-Key", "pending-install-once")
+	retryResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(retryResponse, retry)
+	if retryResponse.Code != http.StatusConflict || strings.Contains(retryResponse.Body.String(), `"command"`) {
+		t.Fatalf("pending installation retry = %d, body=%s", retryResponse.Code, retryResponse.Body.String())
+	}
+	reissue := httptest.NewRequest(http.MethodPost, "/api/v1/node-installations/gw-install/reissue", nil)
+	reissue.Header.Set("Authorization", "Bearer "+adminToken)
+	reissue.Header.Set("Idempotency-Key", "pending-install-reissue")
+	reissueResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(reissueResponse, reissue)
+	if reissueResponse.Code != http.StatusOK {
+		t.Fatalf("pending installation reissue = %d, body=%s", reissueResponse.Code, reissueResponse.Body.String())
+	}
+	var replacement NodeBootstrapResponse
+	if err := json.Unmarshal(reissueResponse.Body.Bytes(), &replacement); err != nil {
+		t.Fatal(err)
+	}
+	if replacement.State != "pending" || replacement.Command == result.Command {
+		t.Fatalf("pending installation replacement = %#v", replacement)
+	}
+	start = strings.Index(replacement.Command, tokenMarker)
+	if start < 0 {
+		t.Fatalf("replacement command has no token: %s", replacement.Command)
+	}
+	start += len(tokenMarker)
+	end = strings.Index(replacement.Command[start:], "'")
+	if end < 0 {
+		t.Fatalf("replacement command token is unterminated: %s", replacement.Command)
+	}
+	token := replacement.Command[start : start+end]
+	if token == originalToken {
+		t.Fatal("reissued installation reused the previous one-time token")
+	}
+	csr, _, err := nodepkg.GenerateCSR("gw-install", domain.RoleGateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IssueNodeCertificate(context.Background(), initResult.Config, token, domain.RoleGateway, "gw-install", csr); err != nil {
+		t.Fatalf("enroll pending node: %v", err)
+	}
+	node, err := store.GetNode(context.Background(), "gw-install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.CertificateState != domain.CertificateActive || node.CertificateSerial == "" {
+		t.Fatalf("enrolled node identity = %#v", node)
+	}
+	if _, err := store.GetPendingNodeBootstrap(context.Background(), "gw-install"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("pending bootstrap remained after enrollment: %v", err)
+	}
+	if spec, err := store.GetGatewaySpec(context.Background(), "gw-install"); err != nil || len(spec.PublicEndpoints) != 1 {
+		t.Fatalf("enrolled gateway spec = %#v, err=%v", spec, err)
+	}
+}
+
+func TestDeleteNodeAllowsUnusedOwnedSpec(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateNode(ctx, domain.Node{ID: "unused-gateway", Role: domain.RoleGateway, Name: "unused", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "unused-gateway", PublicEndpoints: []string{"gateway.example.com:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteNode(ctx, "unused-gateway", WriteOptions{IfMatch: 1}); err != nil {
+		t.Fatalf("delete unused node with owned spec: %v", err)
+	}
+	if _, err := store.GetGatewaySpec(ctx, "unused-gateway"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("owned gateway spec remained after node deletion: %v", err)
 	}
 }
 

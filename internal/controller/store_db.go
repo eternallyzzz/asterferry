@@ -13,8 +13,8 @@ import (
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 5
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v5"
+	currentDBSchema     = 6
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v6"
 	maxSnapshotDocument = 16 << 20
 )
 
@@ -153,6 +153,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, resource_id TEXT NOT NULL, revision INTEGER NOT NULL, attributes_json BLOB, created_at TEXT NOT NULL)`,
 		`CREATE TABLE idempotency_keys (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, response_json BLOB NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE enrollment_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
+		`CREATE TABLE node_bootstraps (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, name TEXT NOT NULL, labels_json BLOB NOT NULL, enabled INTEGER NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, gateway_spec_json BLOB, agent_spec_json BLOB, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE INDEX idx_nodes_role_enabled ON nodes(role, enabled)`,
 		`CREATE INDEX idx_services_agent ON services(agent_id)`,
 		`CREATE INDEX idx_assignments_gateway ON assignments(gateway_id)`,
@@ -161,6 +162,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX idx_assignment_acks_generation ON assignment_acks(assignment_id,generation)`,
 		`CREATE INDEX idx_audit_created ON audit_events(created_at)`,
 		`CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at)`,
+		`CREATE INDEX idx_node_bootstraps_expires ON node_bootstraps(expires_at)`,
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -231,6 +233,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 		"audit_events":        {"id", "actor", "action", "resource", "resource_id", "revision", "attributes_json", "created_at"},
 		"idempotency_keys":    {"key", "request_hash", "response_json", "created_at"},
 		"enrollment_tokens":   {"id", "token_hash", "role", "expires_at", "used_at", "created_at"},
+		"node_bootstraps":     {"node_id", "role", "name", "labels_json", "enabled", "platform", "arch", "gateway_spec_json", "agent_spec_json", "token_hash", "expires_at", "created_at"},
 	}
 	for table, columns := range requiredColumns {
 		for _, column := range columns {
@@ -244,7 +247,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
-	for _, index := range []string{"idx_nodes_role_enabled", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created"} {
+	for _, index := range []string{"idx_nodes_role_enabled", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"} {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil {
 			return err

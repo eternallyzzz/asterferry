@@ -20,9 +20,11 @@ const (
 	legacyDBFingerprint = "asterferry-controller-sqlite-v3"
 	v4DBSchema          = 4
 	v4DBFingerprint     = "asterferry-controller-sqlite-v4"
+	v5DBSchema          = 5
+	v5DBFingerprint     = "asterferry-controller-sqlite-v5"
 )
 
-// MigrationReport describes the v3/v4 -> v5 database migration without
+// MigrationReport describes the v3/v4/v5 -> v6 database migration without
 // exposing any resource document or secret material.
 type MigrationReport struct {
 	Path                  string
@@ -36,7 +38,7 @@ type MigrationReport struct {
 	BackupPath            string
 }
 
-// MigrateDatabase upgrades an on-disk v3 or v4 Controller database to v5. The
+// MigrateDatabase upgrades an on-disk v3, v4, or v5 Controller database to v6. The
 // operation is deliberately separate from OpenStore: a running Controller
 // never performs an implicit schema rewrite. A consistent SQLite copy is
 // upgraded first, then the original file is moved aside and the copy is
@@ -74,19 +76,21 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 		report.AlreadyCurrent = true
 		return report, nil
 	}
-	if version != legacyDBSchema && (version != v4DBSchema || fingerprint != v4DBFingerprint) {
-		return report, fmt.Errorf("%w: migration supports schema %d (%s) or schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, v4DBSchema, v4DBFingerprint, version, fingerprint)
+	if version != legacyDBSchema && version != v4DBSchema && version != v5DBSchema {
+		return report, fmt.Errorf("%w: migration supports schema %d (%s), schema %d (%s), or schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, v4DBSchema, v4DBFingerprint, v5DBSchema, v5DBFingerprint, version, fingerprint)
 	}
 	if version == legacyDBSchema {
 		if fingerprint != legacyDBFingerprint {
 			return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, legacyDBSchema, legacyDBFingerprint, version, fingerprint)
 		}
-	} else if fingerprint != v4DBFingerprint {
+	} else if version == v4DBSchema && fingerprint != v4DBFingerprint {
 		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, v4DBSchema, v4DBFingerprint, version, fingerprint)
+	} else if version == v5DBSchema && fingerprint != v5DBFingerprint {
+		return report, fmt.Errorf("%w: migration supports schema %d (%s), found schema %d (%s)", ErrIncompatibleDatabase, v5DBSchema, v5DBFingerprint, version, fingerprint)
 	}
 	tables := legacySchemaTables()
-	if version == v4DBSchema {
-		tables = currentSchemaTables()
+	if version == v4DBSchema || version == v5DBSchema {
+		tables = schemaV5Tables()
 	}
 	if err := validateTables(ctx, db, tables); err != nil {
 		return report, fmt.Errorf("validate legacy database: %w", err)
@@ -100,7 +104,7 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 		report.Assignments = len(relations.assignments)
 		report.AssignmentServices = len(relations.rows)
 	}
-	if version == v4DBSchema {
+	if version == v4DBSchema || version == v5DBSchema {
 		report.Assignments, report.AssignmentServices, err = countCurrentRelations(ctx, db)
 		if err != nil {
 			return report, err
@@ -148,11 +152,15 @@ func MigrateDatabase(ctx context.Context, path string, dryRun bool) (MigrationRe
 }
 
 func currentSchemaTables() []string {
-	return []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_services", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"}
+	return append(schemaV5Tables(), "node_bootstraps")
 }
 
 func legacySchemaTables() []string {
 	return []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"}
+}
+
+func schemaV5Tables() []string {
+	return []string{"schema_meta", "users", "api_tokens", "nodes", "gateway_specs", "agent_specs", "services", "service_bindings", "assignments", "assignment_services", "assignment_acks", "desired_snapshots", "observed_states", "audit_events", "idempotency_keys", "enrollment_tokens"}
 }
 
 type assignmentServiceMigration struct {
@@ -304,6 +312,12 @@ func upgradeMigrationCopy(ctx context.Context, path string, fromVersion int, rel
 			return fmt.Errorf("clear legacy idempotency keys: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS node_bootstraps (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, name TEXT NOT NULL, labels_json BLOB NOT NULL, enabled INTEGER NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, gateway_spec_json BLOB, agent_spec_json BLOB, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("create pending node bootstrap table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_node_bootstraps_expires ON node_bootstraps(expires_at)`); err != nil {
+		return fmt.Errorf("create pending node bootstrap index: %w", err)
+	}
 	var hasPasswordChangedAt int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='password_changed_at'`).Scan(&hasPasswordChangedAt); err != nil {
 		return fmt.Errorf("inspect users schema: %w", err)
@@ -325,7 +339,7 @@ func upgradeMigrationCopy(ctx context.Context, path string, fromVersion int, rel
 	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='fingerprint'`, dbSchemaFingerprint); err != nil {
 		return fmt.Errorf("write migrated schema fingerprint: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=5`); err != nil {
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=6`); err != nil {
 		return fmt.Errorf("write sqlite user version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -371,7 +385,7 @@ func migrationDatabasePath(path string) (string, error) {
 }
 
 func publishMigrationCopy(originalPath, copyPath string) (string, error) {
-	backupPath, err := reserveMigrationPath(originalPath, ".asterferry-pre-v5-*")
+	backupPath, err := reserveMigrationPath(originalPath, ".asterferry-pre-v6-*")
 	if err != nil {
 		return "", fmt.Errorf("reserve migration backup: %w", err)
 	}

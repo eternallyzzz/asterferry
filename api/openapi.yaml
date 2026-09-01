@@ -107,6 +107,54 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
         '409': { description: Idempotency key already created the one-time token, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
         '503': { description: Controller bootstrap configuration is unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /node-installations:
+    get:
+      tags: [operations]
+      description: List installation intents that have not enrolled yet. The response never contains the one-time token.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        '200':
+          description: Pending node installations.
+          content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/PendingNodeInstallation' } } } } } }
+    post:
+      tags: [operations]
+      operationId: createNodeInstallation
+      description: Create an installation intent and return a one-time platform installer command. The enrolled node and its initial spec are created atomically only when the installer completes Enroll.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeInstallationRequest' } } }
+      responses:
+        '201':
+          description: One-time installer command generated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
+        '409': { description: Pending installation conflict or unrecoverable token retry, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
+        '503': { description: Controller bootstrap configuration is unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /node-installations/{nodeId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    delete:
+      tags: [operations]
+      operationId: cancelNodeInstallation
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses:
+        '204': { description: Pending installation cancelled. }
+        '404': { description: Pending installation not found. }
+  /node-installations/{nodeId}/reissue:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    post:
+      tags: [operations]
+      operationId: reissueNodeInstallation
+      description: Replace the one-time token and return a fresh installer command for an existing pending installation.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses:
+        '200':
+          description: Replacement one-time installer command generated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
+        '404': { description: Pending installation not found. }
+        '409': { description: Unrecoverable token retry, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
   /nodes/{nodeId}/snapshot:
     get:
       tags: [nodes]
@@ -420,6 +468,8 @@ components:
       type: object
       required: [node_id, role, platform, arch, version, expires_at, command]
       properties:
+        installation_id: { type: string, description: Pending installation identifier; set only by the install-first endpoint. }
+        state: { type: string, enum: [pending], description: Pending installation state; set only by the install-first endpoint. }
         node_id: { type: string }
         role: { type: string, enum: [gateway, agent] }
         platform: { type: string, enum: [linux, windows] }
@@ -427,6 +477,33 @@ components:
         version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
         expires_at: { type: string, format: date-time }
         command: { type: string }
+    NodeInstallationRequest:
+      type: object
+      required: [node_id, role, name, platform, arch]
+      description: Creates a pending installation intent. It does not create an enrolled node until the installer completes Enroll.
+      properties:
+        node_id: { type: string, minLength: 1, maxLength: 128 }
+        role: { type: string, enum: [gateway, agent] }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        labels: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean, default: true }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        gateway_spec: { $ref: '#/components/schemas/GatewaySpec' }
+        agent_spec: { $ref: '#/components/schemas/AgentSpec' }
+    PendingNodeInstallation:
+      type: object
+      required: [node_id, role, name, enabled, platform, arch, expires_at, created_at]
+      properties:
+        node_id: { type: string }
+        role: { type: string, enum: [gateway, agent] }
+        name: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
     NodePatch:
       type: object
       properties: { role: { type: string, enum: [gateway, agent] }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean }, certificate_state: { type: string }, certificate_serial: { type: string } }

@@ -10,26 +10,29 @@ import EmptyState from "../components/ui/EmptyState.vue";
 import Spinner from "../components/ui/Spinner.vue";
 import NodeDetailDrawer from "./NodeDetailDrawer.vue";
 import {
-	bootstrapNode,
-	createNode,
+	createNodeInstallation,
   deleteNode,
+  deleteNodeInstallation,
+  listNodeInstallations,
   listNodes,
   nodeAction,
+  reissueNodeInstallation,
   updateNode,
 	type ControllerNode,
 	type NodeBootstrapResponse,
-	type CreateNodeInput,
+	type PendingNodeInstallation,
 } from "../controller-api";
 import { usePolling } from "../composables/usePolling";
 import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
-import { certificateTone, describeError, newIdempotencyKey, parseLabels, prettyJson, roleLabel } from "../utils/format";
+import { certificateTone, describeError, formatTime, newIdempotencyKey, parseLabels, prettyJson, roleLabel } from "../utils/format";
 import { buildGatewayBootstrapSpec } from "../node-bootstrap";
 
 const notify = useNotify();
 const session = useSession();
 const loading = ref(true);
 const nodes = ref<ControllerNode[]>([]);
+const pendingInstallations = ref<PendingNodeInstallation[]>([]);
 
 const drawerNode = ref<ControllerNode | null>(null);
 const drawerOpen = ref(false);
@@ -41,6 +44,7 @@ const editRevision = ref(0);
 const formError = ref("");
 const saving = ref(false);
 const pendingDelete = ref<ControllerNode | null>(null);
+const pendingInstallationDelete = ref<PendingNodeInstallation | null>(null);
 const deleting = ref(false);
 const installOpen = ref(false);
 const installResult = ref<NodeBootstrapResponse | null>(null);
@@ -48,8 +52,9 @@ const copiedInstallCommand = ref(false);
 
 async function load() {
   try {
-    const result = await listNodes();
+    const [result, pending] = await Promise.all([listNodes(), listNodeInstallations()]);
     nodes.value = result.items;
+    pendingInstallations.value = pending.items;
     // 抽屉打开时同步节点最新状态（证书、启用位等会随对账变化）。
     if (drawerNode.value) {
       const fresh = result.items.find((node) => node.id === drawerNode.value?.id);
@@ -89,33 +94,29 @@ async function save() {
   saving.value = true;
   formError.value = "";
   try {
-    const input: CreateNodeInput = {
-      id: form.value.id.trim(),
-      role: form.value.role,
-      name: form.value.name.trim(),
-      labels: parseLabels(form.value.labels),
-      enabled: form.value.enabled,
-    };
+    const labels = parseLabels(form.value.labels);
+    const nodeID = form.value.id.trim();
+    const name = form.value.name.trim();
     if (editID.value) {
-      await updateNode(editID.value, { role: input.role, name: input.name, labels: input.labels, enabled: input.enabled }, editRevision.value, undefined, newIdempotencyKey());
+      await updateNode(editID.value, { role: form.value.role, name, labels, enabled: form.value.enabled }, editRevision.value, undefined, newIdempotencyKey());
       notify.success(`节点 ${editID.value} 已更新。`);
     } else {
-      const created = await createNode(input, undefined, newIdempotencyKey());
-      notify.success(`节点 ${input.id} 已创建。`);
+      const bootstrap = await createNodeInstallation({
+        node_id: nodeID,
+        role: form.value.role,
+        name,
+        labels,
+        enabled: form.value.enabled,
+        platform: form.value.platform,
+        arch: form.value.arch,
+        ...(form.value.role === "gateway" ? { gateway_spec: buildGatewayBootstrapSpec({ id: nodeID, labels }, form.value.publicEndpoint, form.value.tcpPool, form.value.udpPool) } : {}),
+      }, undefined, newIdempotencyKey());
+      notify.success(`安装任务 ${nodeID} 已创建；节点执行命令后才会注册。`);
       formOpen.value = false;
       await refresh();
-      try {
-        const bootstrap = await bootstrapNode(created.id, {
-          platform: form.value.platform,
-          arch: form.value.arch,
-          ...(input.role === "gateway" ? { gateway_spec: buildGatewayBootstrapSpec(created, form.value.publicEndpoint, form.value.tcpPool, form.value.udpPool) } : {}),
-        }, undefined, newIdempotencyKey());
-        installResult.value = bootstrap;
-        copiedInstallCommand.value = false;
-        installOpen.value = true;
-      } catch (caught) {
-        notify.error(`节点已创建，但安装命令生成失败：${describeError(caught)}`);
-      }
+      installResult.value = bootstrap;
+      copiedInstallCommand.value = false;
+      installOpen.value = true;
       return;
     }
     formOpen.value = false;
@@ -124,6 +125,33 @@ async function save() {
     formError.value = describeError(caught);
   } finally {
     saving.value = false;
+  }
+}
+
+async function reissueInstallation(item: PendingNodeInstallation) {
+  try {
+    const bootstrap = await reissueNodeInstallation(item.node_id, undefined, newIdempotencyKey());
+    installResult.value = bootstrap;
+    copiedInstallCommand.value = false;
+    installOpen.value = true;
+    await refresh();
+  } catch (caught) {
+    notify.error(describeError(caught));
+  }
+}
+
+async function confirmPendingInstallationDelete() {
+  if (!pendingInstallationDelete.value) return;
+  deleting.value = true;
+  try {
+    await deleteNodeInstallation(pendingInstallationDelete.value.node_id, undefined, newIdempotencyKey());
+    notify.success(`安装任务 ${pendingInstallationDelete.value.node_id} 已取消。`);
+    pendingInstallationDelete.value = null;
+    await refresh();
+  } catch (caught) {
+    notify.error(describeError(caught));
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -177,10 +205,10 @@ async function confirmDelete() {
     <PageHeader
       eyebrow="Nodes"
       title="节点"
-      description="身份由 Admin 管理，Gateway/Agent 业务规格由 Operator 管理；点击行查看详情。"
+      description="先创建安装任务，节点执行命令并连接 Controller 后才会出现在这里。"
     >
       <template #actions>
-        <button v-if="session.canAdmin.value" type="button" class="af-button primary" @click="openCreate">注册节点</button>
+        <button v-if="session.canAdmin.value" type="button" class="af-button primary" @click="openCreate">生成安装命令</button>
       </template>
     </PageHeader>
 
@@ -211,14 +239,34 @@ async function confirmDelete() {
           </tr>
         </tbody>
         <template #empty>
-          <EmptyState title="暂无节点" description="注册第一个 Gateway 或 Agent，Dashboard 会生成一条安装注册命令。" />
+          <EmptyState title="暂无已注册节点" description="先生成安装命令，并在目标机器执行一次。" />
         </template>
+      </DataTable>
+    </PanelCard>
+
+    <PanelCard v-if="pendingInstallations.length" :title="`待安装任务 · ${pendingInstallations.length}`">
+      <DataTable>
+        <thead><tr><th>节点</th><th>角色</th><th>平台</th><th>有效期</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr v-for="item in pendingInstallations" :key="item.node_id">
+            <td><strong>{{ item.name }}</strong><small><code>{{ item.node_id }}</code></small></td>
+            <td>{{ roleLabel(item.role) }}</td>
+            <td>{{ item.platform }}/{{ item.arch }}</td>
+            <td>{{ formatTime(item.expires_at) }}</td>
+            <td>
+              <div class="row-actions">
+                <button v-if="session.canAdmin.value" type="button" class="af-button text" @click="reissueInstallation(item)">重新生成</button>
+                <button v-if="session.canAdmin.value" type="button" class="af-button danger-text" @click="pendingInstallationDelete = item">取消</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
       </DataTable>
     </PanelCard>
 
     <NodeDetailDrawer :open="drawerOpen" :node="drawerNode" @close="drawerOpen = false" @changed="refresh" />
 
-    <ModalDialog :open="formOpen" :title="editID ? '编辑节点' : '注册节点'" width="480px" @close="formOpen = false">
+    <ModalDialog :open="formOpen" :title="editID ? '编辑节点' : '生成节点安装命令'" width="480px" @close="formOpen = false">
       <form class="form-stack" @submit.prevent="save">
         <FormField label="Node ID">
           <input v-model="form.id" :disabled="Boolean(editID)" required placeholder="gw-east" />
@@ -250,7 +298,7 @@ async function confirmDelete() {
           <textarea v-model="form.labels" rows="3" spellcheck="false" placeholder='{"region":"east"}' />
         </FormField>
         <template v-if="!editID && form.role === 'gateway'">
-          <FormField label="公网 AFDP 地址" hint="Agent 连接 Gateway 的地址，例如 gateway.example.com:4433">
+          <FormField label="Gateway 数据面地址" hint="Agent 连接 Gateway 的公网/NAT 地址，例如 gateway.example.com:4433；不是 Controller 地址">
             <input v-model="form.publicEndpoint" required placeholder="gateway.example.com:4433" />
           </FormField>
           <div />
@@ -266,11 +314,11 @@ async function confirmDelete() {
         </label>
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <p v-if="editID" class="form-note">If-Match revision: {{ editRevision }}。并发修改会被 Controller 拒绝。</p>
-        <p v-else class="form-note">创建后会自动生成平台专用安装命令；Agent 使用默认规格，Gateway 需要上面的公网地址和端口池。</p>
+        <p v-else class="form-note">这里只创建待安装任务，不会提前注册节点。Agent 使用默认规格；Gateway 的地址和端口池属于数据面预配置。</p>
       </form>
       <template #footer>
         <button type="button" class="af-button secondary" @click="formOpen = false">取消</button>
-        <button type="button" class="af-button primary" :disabled="saving" @click="save">{{ saving ? "保存中…" : editID ? "保存节点" : "注册节点" }}</button>
+        <button type="button" class="af-button primary" :disabled="saving" @click="save">{{ saving ? "保存中…" : editID ? "保存节点" : "生成安装命令" }}</button>
       </template>
     </ModalDialog>
 
@@ -279,7 +327,7 @@ async function confirmDelete() {
         <p class="form-note">{{ installResult.role.toUpperCase() }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
         <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。不要发到公开聊天或日志中。</p>
         <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
-        <p class="form-note">在对应机器的管理员 PowerShell 或 root shell 中执行。执行完成后节点会自动上线。</p>
+        <p class="form-note">在对应机器的管理员 PowerShell 或 root shell 中执行。执行前节点不会出现在正式节点列表；Enroll 成功后才会自动上线。</p>
       </div>
       <template #footer>
         <button type="button" class="af-button secondary" @click="installOpen = false">稍后复制</button>
@@ -292,6 +340,14 @@ async function confirmDelete() {
       <template #footer>
         <button type="button" class="af-button secondary" @click="pendingDelete = null">取消</button>
         <button type="button" class="af-button danger" :disabled="deleting" @click="confirmDelete">{{ deleting ? "删除中…" : "确认删除" }}</button>
+      </template>
+    </ModalDialog>
+
+    <ModalDialog :open="Boolean(pendingInstallationDelete)" title="取消待安装任务" @close="pendingInstallationDelete = null">
+      <p class="confirm-text">确定取消 <strong>{{ pendingInstallationDelete?.node_id }}</strong> 的待安装任务吗？已有命令将立即失效。</p>
+      <template #footer>
+        <button type="button" class="af-button secondary" @click="pendingInstallationDelete = null">取消</button>
+        <button type="button" class="af-button danger" :disabled="deleting" @click="confirmPendingInstallationDelete">{{ deleting ? "取消中…" : "确认取消" }}</button>
       </template>
     </ModalDialog>
   </div>

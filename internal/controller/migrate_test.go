@@ -61,7 +61,7 @@ func TestMigrateDatabaseV3DryRunAndPublish(t *testing.T) {
 	assertSchemaMarker(t, report.BackupPath, legacyDBSchema, legacyDBFingerprint)
 }
 
-func TestMigrateDatabaseV4ToV5PreservesCurrentData(t *testing.T) {
+func TestMigrateDatabaseV4ToCurrentPreservesCurrentData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "controller-v4.db")
 	prepareV4Database(t, path)
 
@@ -88,18 +88,24 @@ func TestMigrateDatabaseV4ToV5PreservesCurrentData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var passwordChangedAt, retentionIndex, idempotency int
+	var passwordChangedAt, retentionIndex, pendingTable, pendingIndex, idempotency int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='password_changed_at'`).Scan(&passwordChangedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_idempotency_created'`).Scan(&retentionIndex); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='node_bootstraps'`).Scan(&pendingTable); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_node_bootstraps_expires'`).Scan(&pendingIndex); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM idempotency_keys`).Scan(&idempotency); err != nil {
 		t.Fatal(err)
 	}
-	if passwordChangedAt != 1 || retentionIndex != 1 || idempotency != 1 {
-		t.Fatalf("v4 migration markers/retention index/idempotency = %d/%d/%d", passwordChangedAt, retentionIndex, idempotency)
+	if passwordChangedAt != 1 || retentionIndex != 1 || pendingTable != 1 || pendingIndex != 1 || idempotency != 1 {
+		t.Fatalf("v4 migration markers/retention index/pending schema/idempotency = %d/%d/%d/%d/%d", passwordChangedAt, retentionIndex, pendingTable, pendingIndex, idempotency)
 	}
 
 	store, err := openTestStore(path)
@@ -112,6 +118,23 @@ func TestMigrateDatabaseV4ToV5PreservesCurrentData(t *testing.T) {
 		t.Fatalf("migrated v4 assignment = %#v, err=%v", assignment, err)
 	}
 	assertSchemaMarker(t, report.BackupPath, v4DBSchema, v4DBFingerprint)
+}
+
+func TestMigrateDatabaseV5AddsPendingInstallationSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "controller-v5.db")
+	prepareV5Database(t, path)
+
+	report, err := MigrateDatabase(context.Background(), path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.FromVersion != v5DBSchema || report.ToVersion != currentDBSchema || report.BackupPath == "" {
+		t.Fatalf("unexpected v5 migration report: %#v", report)
+	}
+	assertSchemaMarker(t, path, currentDBSchema, dbSchemaFingerprint)
+	if !tableExists(t, path, "node_bootstraps") {
+		t.Fatal("v5 migration did not create pending installation table")
+	}
 }
 
 func prepareV3Database(t *testing.T, path string) {
@@ -204,6 +227,34 @@ func prepareV4Database(t *testing.T, path string) {
 		`UPDATE schema_meta SET value='asterferry-controller-sqlite-v4' WHERE key='fingerprint'`,
 		`PRAGMA user_version=4`,
 		`INSERT INTO idempotency_keys(key,request_hash,response_json,created_at) VALUES('v4-key','v4-hash','{}','2026-01-01T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func prepareV5Database(t *testing.T, path string) {
+	t.Helper()
+	store, err := openTestStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	for _, statement := range []string{
+		`DROP INDEX idx_node_bootstraps_expires`,
+		`DROP TABLE node_bootstraps`,
+		`UPDATE schema_meta SET value='5' WHERE key='schema_version'`,
+		`UPDATE schema_meta SET value='asterferry-controller-sqlite-v5' WHERE key='fingerprint'`,
+		`PRAGMA user_version=5`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)

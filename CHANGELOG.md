@@ -16,10 +16,15 @@ architecture.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
   protocol. Existing node configurations must be initialized again; existing
   Controller stores require the explicit migration described below.
-- Adds an explicit stopped-database migration from Controller schema v3 or v4
-  to schema v5. Run `asterferry controller migrate --config <controller.json>`
-  during a maintenance window; `OpenStore` never rewrites a database
-  implicitly, and a pre-v5 rollback backup is retained after publication.
+- Adds an explicit stopped-database migration from Controller schema v3, v4 or
+  v5 to schema v6. The new `node_bootstraps` table stores pending installation
+  intents without pre-creating node identities. Run
+  `asterferry controller migrate --config <controller.json>` during a
+  maintenance window; `OpenStore` never rewrites a database implicitly, and a
+  pre-v6 rollback backup is retained after publication.
+- Adds Dashboard install-first provisioning: the generated command is the only
+  action required on a Gateway or Agent host, and the node/spec are created
+  atomically when the host completes its first enrollment.
 - AFDP/1 to AFDP/2 is an intentional wire-level breaking change: both the QUIC
   ALPN and version byte changed, with no fallback codec. Upgrade Controller,
   Gateway and Agent binaries as a coordinated rollout.

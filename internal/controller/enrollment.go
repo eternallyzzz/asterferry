@@ -392,6 +392,17 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	} else if bound && boundNodeID != nodeID {
 		return Certificate{}, ErrEnrollmentNodeMismatch
 	}
+	// A bootstrap token may refer to an installation intent whose node row does
+	// not exist yet. Complete that intent atomically during enrollment; legacy
+	// administrator-created tokens continue through the pre-created-node path
+	// below.
+	pending, pendingErr := s.pendingBootstrapForToken(ctx, HashToken(token))
+	if pendingErr == nil {
+		return s.issuePendingNodeCertificate(ctx, config, token, role, nodeID, csrDER, pending)
+	}
+	if !errors.Is(pendingErr, sql.ErrNoRows) {
+		return Certificate{}, storageFailure("look up pending node bootstrap", pendingErr)
+	}
 	if err := s.validateEnrollmentToken(ctx, token, role); err != nil {
 		return Certificate{}, err
 	}

@@ -79,6 +79,16 @@ func TestOpenStoreCreatesCurrentGenerationMarker(t *testing.T) {
 	if version != strconv.Itoa(currentDBSchema) || fingerprint != dbSchemaFingerprint {
 		t.Fatalf("unexpected schema marker version=%q fingerprint=%q", version, fingerprint)
 	}
+	var pendingTable, pendingIndex int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='node_bootstraps'`).Scan(&pendingTable); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_node_bootstraps_expires'`).Scan(&pendingIndex); err != nil {
+		t.Fatal(err)
+	}
+	if pendingTable != 1 || pendingIndex != 1 {
+		t.Fatalf("pending bootstrap schema objects = table:%d index:%d", pendingTable, pendingIndex)
+	}
 }
 
 func TestSQLiteConnectionPragmasSurvivePoolConnections(t *testing.T) {
