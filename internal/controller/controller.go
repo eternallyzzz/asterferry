@@ -55,7 +55,7 @@ func New(config Config) (*Controller, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := OpenStore(config.DatabasePath, masterKey)
+	store, err := OpenStoreWithConfig(config, masterKey)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (c *Controller) Close() error {
 		if c.grpcServer != nil {
 			// Connect is a long-lived bidirectional stream.  Waiting for a
 			// graceful gRPC drain here can block forever while a node keeps its
-			// control stream open, which in turn prevents SQLite and the HTTP
+			// control stream open, which in turn prevents the database and the HTTP
 			// listener from being released during process shutdown.  The
 			// controller context has already been cancelled above; force-stop the
 			// server so active Connect RPCs observe cancellation and unwind.

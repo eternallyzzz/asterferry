@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,7 +21,9 @@ import (
 type ControllerMetrics struct {
 	registry          *prometheus.Registry
 	up                prometheus.Gauge
+	databaseUp        *prometheus.GaugeVec
 	sqliteUp          prometheus.Gauge
+	databaseDriver    string
 	httpReq           *prometheus.CounterVec
 	httpTime          *prometheus.HistogramVec
 	grpcReq           *prometheus.CounterVec
@@ -57,9 +60,14 @@ type observedMetric struct {
 	listeners   map[string]int
 }
 
-func newControllerMetrics() *ControllerMetrics {
-	m := &ControllerMetrics{registry: prometheus.NewRegistry(), nodes: make(map[string]observedMetric)}
+func newControllerMetrics(databaseDrivers ...string) *ControllerMetrics {
+	databaseDriver := DatabaseDriverSQLite
+	if len(databaseDrivers) > 0 && strings.TrimSpace(databaseDrivers[0]) != "" {
+		databaseDriver = normalizeDatabaseDriver(databaseDrivers[0])
+	}
+	m := &ControllerMetrics{registry: prometheus.NewRegistry(), nodes: make(map[string]observedMetric), databaseDriver: databaseDriver}
 	m.up = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_up", Help: "Controller process health."})
+	m.databaseUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_database_up", Help: "Whether the configured Controller database is reachable."}, []string{"backend"})
 	m.sqliteUp = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_sqlite_up", Help: "Whether the Controller SQLite store is reachable."})
 	m.httpReq = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "asterferry_controller_http_requests_total", Help: "Controller HTTP requests."}, []string{"method", "route", "status"})
 	m.httpTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "asterferry_controller_http_request_duration_seconds", Help: "Controller HTTP request duration."}, []string{"method", "route"})
@@ -78,11 +86,18 @@ func newControllerMetrics() *ControllerMetrics {
 	m.bytesOut = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_bytes_out_total", Help: "Observed runtime bytes sent by node kind."}, []string{"kind"})
 	m.listeners = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_listeners", Help: "Observed listeners by protocol."}, []string{"protocol"})
 	m.geoipUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Number of observed nodes with an available optional GeoIP database, by node kind."}, []string{"kind"})
-	for _, collector := range []prometheus.Collector{m.up, m.sqliteUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.activeConnections, m.activeFlows, m.bytesIn, m.bytesOut, m.listeners, m.geoipUp} {
+	collectors := []prometheus.Collector{m.up, m.databaseUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.activeConnections, m.activeFlows, m.bytesIn, m.bytesOut, m.listeners, m.geoipUp}
+	if databaseDriver == DatabaseDriverSQLite {
+		collectors = append(collectors, m.sqliteUp)
+	}
+	for _, collector := range collectors {
 		m.registry.MustRegister(collector)
 	}
 	m.up.Set(1)
-	m.sqliteUp.Set(1)
+	m.databaseUp.WithLabelValues(databaseDriver).Set(1)
+	if databaseDriver == DatabaseDriverSQLite {
+		m.sqliteUp.Set(1)
+	}
 	for _, kind := range []string{string(domain.NodeSpecGateway), string(domain.NodeSpecAgent)} {
 		m.geoipUp.WithLabelValues(kind).Set(0)
 	}
@@ -96,17 +111,23 @@ func (m *ControllerMetrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{EnableOpenMetrics: true})
 }
 
-func (m *ControllerMetrics) refreshSQLite(store *Store) {
+func (m *ControllerMetrics) refreshDatabase(store *Store) {
 	if m == nil || store == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := store.Ping(ctx); err != nil {
-		m.sqliteUp.Set(0)
+		m.databaseUp.WithLabelValues(m.databaseDriver).Set(0)
+		if m.sqliteUp != nil && m.databaseDriver == DatabaseDriverSQLite {
+			m.sqliteUp.Set(0)
+		}
 		return
 	}
-	m.sqliteUp.Set(1)
+	m.databaseUp.WithLabelValues(m.databaseDriver).Set(1)
+	if m.sqliteUp != nil && m.databaseDriver == DatabaseDriverSQLite {
+		m.sqliteUp.Set(1)
+	}
 	if nodes, err := store.ListNodes(ctx, ""); err == nil {
 		existing := make(map[string]struct{}, len(nodes))
 		for _, node := range nodes {

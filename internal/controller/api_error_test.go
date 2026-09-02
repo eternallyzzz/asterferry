@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type fakeSQLiteError struct {
@@ -22,6 +24,14 @@ func TestWriteStoreErrorMapsSQLiteUniqueConstraintToConflict(t *testing.T) {
 	}
 	if got := recorder.Body.String(); !containsAll(got, `"code":"already_exists"`, "resource already exists") {
 		t.Fatalf("body = %s, missing duplicate-resource error", got)
+	}
+}
+
+func TestWriteStoreErrorMapsPostgresUniqueConstraintToConflict(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writeStoreError(recorder, &pgconn.PgError{Code: "23505", Message: "duplicate key value violates unique constraint"})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
 	}
 }
 

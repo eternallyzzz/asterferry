@@ -378,10 +378,34 @@ asterferry controller backup \
   --output ./backups
 ```
 
-当前 pre-1.0 版本使用 SQLite schema v9。v8 数据库启动时会执行一次附加式
-运行时观测迁移；更早或未知代际仍会被 `OpenStore` 拒绝。升级前备份完整
-Controller 目录并保留回滚副本，在维护窗口执行升级。运行时观测和高级
-操作开关见[运维指南](operations.zh-CN.md)。
+SQLite schema v9 仍是零依赖安装的默认选项。节点规模较大时，可以在初始化
+Controller 时直接使用 PostgreSQL：
+
+```sh
+asterferry controller init --dir /var/lib/asterferry \
+  --grpc-advertise controller.example.com:9443 \
+  --database-driver postgres \
+  --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
+```
+
+迁移已有 SQLite 安装时，先停止 Controller，并准备一个空的 PostgreSQL
+数据库。应用命令会在一个 PostgreSQL 事务中复制 Controller 和运行时表，
+并写出单独的 PostgreSQL 配置；原 SQLite 目录会保留，可用于回滚：
+
+```sh
+asterferry controller migrate --config ./controller/controller.json \
+  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' \
+  --dry-run
+asterferry controller migrate --config ./controller/controller.json \
+  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' \
+  --output-config ./controller/controller-postgres.json
+asterferry controller run --config ./controller/controller-postgres.json
+```
+
+PostgreSQL 备份/恢复使用外部 `pg_dump` 和 `pg_restore` 工具，因此执行备份
+或恢复命令的机器必须安装 PostgreSQL 客户端工具；SQLite 备份仍然直接复制
+本地数据库文件。两种后端的备份都包含配置、master key、CA 和 Controller
+TLS 身份。运行时观测和高级操作开关见[运维指南](operations.zh-CN.md)。
 
 Controller 暂时不可用时，节点会继续使用加密的 last-known-good 快照；但新的配置、调度和证书操作需要 Controller 恢复后才能完成。不要删除 `controller/`，其中包含数据库、CA、TLS 身份和 master key。
 

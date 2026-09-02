@@ -593,7 +593,7 @@ func assignmentParticipantIDsForServiceTx(ctx context.Context, tx *sql.Tx, servi
 
 // bumpAssignmentsForServiceTx invalidates the shared placement generation for
 // every assignment that consumes a changed Service. The resource and
-// assignment updates are deliberately part of one SQLite transaction so a
+// assignment updates are deliberately part of one database transaction so a
 // snapshot builder can never observe the new target with an old applied
 // assignment. Degraded/draining assignments remain fail-closed; a later
 // scheduler pass can replace them with a fresh placement.

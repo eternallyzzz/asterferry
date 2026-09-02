@@ -65,7 +65,15 @@ type runtimeChangeSubscription struct {
 
 var nextRuntimeSubscription atomic.Uint64
 
-func runtimeSchemaStatements() []string {
+func runtimeSchemaStatements(backends ...databaseBackend) []string {
+	backend := databaseBackendSQLite
+	if len(backends) > 0 {
+		backend = backends[0]
+	}
+	autoID := "INTEGER PRIMARY KEY AUTOINCREMENT"
+	if backend == databaseBackendPostgres {
+		autoID = "BIGSERIAL PRIMARY KEY"
+	}
 	return []string{
 		`CREATE TABLE IF NOT EXISTS runtime_connections (
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -79,30 +87,30 @@ func runtimeSchemaStatements() []string {
 			service_id TEXT NOT NULL DEFAULT '',
 			protocol TEXT NOT NULL DEFAULT '',
 			source_ip TEXT NOT NULL DEFAULT '',
-			source_port INTEGER NOT NULL DEFAULT 0,
+			source_port BIGINT NOT NULL DEFAULT 0,
 			target TEXT NOT NULL DEFAULT '',
 			parent_session_id TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL,
 			last_activity_at TEXT NOT NULL,
 			ended_at TEXT,
 			close_reason TEXT NOT NULL DEFAULT '',
-			bytes_in INTEGER NOT NULL DEFAULT 0,
-			bytes_out INTEGER NOT NULL DEFAULT 0,
-			rate_in REAL NOT NULL DEFAULT 0,
-			rate_out REAL NOT NULL DEFAULT 0,
-			limit_json BLOB,
+			bytes_in BIGINT NOT NULL DEFAULT 0,
+			bytes_out BIGINT NOT NULL DEFAULT 0,
+			rate_in DOUBLE PRECISION NOT NULL DEFAULT 0,
+			rate_out DOUBLE PRECISION NOT NULL DEFAULT 0,
+			limit_json BYTEA,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY(node_id,id)
 		)`,
-		`CREATE TABLE IF NOT EXISTS runtime_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS runtime_events (
+			id %s,
 			event_id TEXT NOT NULL UNIQUE,
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
 			connection_id TEXT NOT NULL DEFAULT '',
 			event_type TEXT NOT NULL,
-			payload_json BLOB NOT NULL,
+			payload_json BYTEA NOT NULL,
 			created_at TEXT NOT NULL
-		)`,
+		)`, autoID),
 		`CREATE TABLE IF NOT EXISTS runtime_traffic_rollups (
 			bucket_start TEXT NOT NULL,
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -111,13 +119,13 @@ func runtimeSchemaStatements() []string {
 			assignment_id TEXT NOT NULL DEFAULT '',
 			service_id TEXT NOT NULL DEFAULT '',
 			protocol TEXT NOT NULL DEFAULT '',
-			bytes_in INTEGER NOT NULL DEFAULT 0,
-			bytes_out INTEGER NOT NULL DEFAULT 0,
-			opened INTEGER NOT NULL DEFAULT 0,
-			closed INTEGER NOT NULL DEFAULT 0,
-			rejected INTEGER NOT NULL DEFAULT 0,
-			rate_limited INTEGER NOT NULL DEFAULT 0,
-			active_max INTEGER NOT NULL DEFAULT 0,
+			bytes_in BIGINT NOT NULL DEFAULT 0,
+			bytes_out BIGINT NOT NULL DEFAULT 0,
+			opened BIGINT NOT NULL DEFAULT 0,
+			closed BIGINT NOT NULL DEFAULT 0,
+			rejected BIGINT NOT NULL DEFAULT 0,
+			rate_limited BIGINT NOT NULL DEFAULT 0,
+			active_max BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY(bucket_start,node_id,assignment_id,service_id,protocol)
 		)`,
 		`CREATE TABLE IF NOT EXISTS runtime_settings (
@@ -125,7 +133,6 @@ func runtimeSchemaStatements() []string {
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`INSERT OR IGNORE INTO runtime_settings(key,value,updated_at) VALUES('advanced_operations_enabled','false',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_connections_node_state ON runtime_connections(node_id,state,last_activity_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_connections_source ON runtime_connections(source_ip,last_activity_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_runtime_connections_assignment ON runtime_connections(assignment_id,last_activity_at)`,
@@ -158,13 +165,10 @@ func migrateV8ToV9(ctx context.Context, db *sql.DB) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback()
-	for _, statement := range runtimeSchemaStatements() {
+	for _, statement := range runtimeSchemaStatements(databaseBackendSQLite) {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return false, fmt.Errorf("migrate controller schema to v9: %w", err)
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO runtime_settings(key,value,updated_at) VALUES('advanced_operations_enabled','false',?)`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='schema_version'`, strconv.Itoa(currentDBSchema)); err != nil {
 		return false, err
@@ -340,7 +344,11 @@ func (s *Store) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventTy
 	}
 	inserted := int64(1)
 	if persistEvent {
-		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO runtime_events(event_id,node_id,connection_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)`, eventID, nodeID, connectionID, eventType, payload, createdAt.Format(time.RFC3339Nano))
+		insertSQL := `INSERT OR IGNORE INTO runtime_events(event_id,node_id,connection_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)`
+		if s.backend == databaseBackendPostgres {
+			insertSQL = `INSERT INTO runtime_events(event_id,node_id,connection_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`
+		}
+		result, err := tx.ExecContext(ctx, insertSQL, eventID, nodeID, connectionID, eventType, payload, createdAt.Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
@@ -572,7 +580,7 @@ func upsertRuntimeConnectionTx(ctx context.Context, tx *sql.Tx, connection domai
 		ended = connection.EndedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO runtime_connections(node_id,id,type,state,peer_node_id,gateway_id,agent_id,assignment_id,service_id,protocol,source_ip,source_port,target,parent_session_id,started_at,last_activity_at,ended_at,close_reason,bytes_in,bytes_out,rate_in,rate_out,limit_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(node_id,id) DO UPDATE SET type=excluded.type,state=excluded.state,peer_node_id=excluded.peer_node_id,gateway_id=excluded.gateway_id,agent_id=excluded.agent_id,assignment_id=excluded.assignment_id,service_id=excluded.service_id,protocol=excluded.protocol,source_ip=excluded.source_ip,source_port=excluded.source_port,target=excluded.target,parent_session_id=excluded.parent_session_id,started_at=excluded.started_at,last_activity_at=excluded.last_activity_at,ended_at=excluded.ended_at,close_reason=excluded.close_reason,bytes_in=excluded.bytes_in,bytes_out=excluded.bytes_out,rate_in=excluded.rate_in,rate_out=excluded.rate_out,limit_json=excluded.limit_json,updated_at=excluded.updated_at`,
-		connection.NodeID, connection.ID, connection.Type, connection.State, connection.PeerNodeID, connection.GatewayID, connection.AgentID, connection.AssignmentID, connection.ServiceID, connection.Protocol, connection.SourceIP, connection.SourcePort, connection.Target, connection.ParentSessionID, connection.StartedAt.UTC().Format(time.RFC3339Nano), connection.LastActivityAt.UTC().Format(time.RFC3339Nano), ended, connection.CloseReason, uint64ToSQLite(connection.BytesIn), uint64ToSQLite(connection.BytesOut), connection.RateIn, connection.RateOut, limitJSON, updatedAt.UTC().Format(time.RFC3339Nano))
+		connection.NodeID, connection.ID, connection.Type, connection.State, connection.PeerNodeID, connection.GatewayID, connection.AgentID, connection.AssignmentID, connection.ServiceID, connection.Protocol, connection.SourceIP, connection.SourcePort, connection.Target, connection.ParentSessionID, connection.StartedAt.UTC().Format(time.RFC3339Nano), connection.LastActivityAt.UTC().Format(time.RFC3339Nano), ended, connection.CloseReason, uint64ToDatabaseInt(connection.BytesIn), uint64ToDatabaseInt(connection.BytesOut), connection.RateIn, connection.RateOut, limitJSON, updatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -607,7 +615,7 @@ func upsertRuntimeSnapshotTx(ctx context.Context, tx *sql.Tx, snapshot domain.Ru
 
 func upsertRuntimeRollupTx(ctx context.Context, tx *sql.Tx, txConnection domain.RuntimeConnection, at time.Time, opened, closed, rejected, limited, activeMax uint64) error {
 	bucket := at.UTC().Truncate(time.Minute).Format(time.RFC3339Nano)
-	_, err := tx.ExecContext(ctx, `INSERT INTO runtime_traffic_rollups(bucket_start,node_id,gateway_id,agent_id,assignment_id,service_id,protocol,bytes_in,bytes_out,opened,closed,rejected,rate_limited,active_max) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bucket_start,node_id,assignment_id,service_id,protocol) DO UPDATE SET bytes_in=runtime_traffic_rollups.bytes_in+excluded.bytes_in,bytes_out=runtime_traffic_rollups.bytes_out+excluded.bytes_out,opened=runtime_traffic_rollups.opened+excluded.opened,closed=runtime_traffic_rollups.closed+excluded.closed,rejected=runtime_traffic_rollups.rejected+excluded.rejected,rate_limited=runtime_traffic_rollups.rate_limited+excluded.rate_limited,active_max=CASE WHEN excluded.active_max>runtime_traffic_rollups.active_max THEN excluded.active_max ELSE runtime_traffic_rollups.active_max END`, bucket, txConnection.NodeID, txConnection.GatewayID, txConnection.AgentID, txConnection.AssignmentID, txConnection.ServiceID, txConnection.Protocol, uint64ToSQLite(txConnection.BytesIn), uint64ToSQLite(txConnection.BytesOut), uint64ToSQLite(opened), uint64ToSQLite(closed), uint64ToSQLite(rejected), uint64ToSQLite(limited), uint64ToSQLite(activeMax))
+	_, err := tx.ExecContext(ctx, `INSERT INTO runtime_traffic_rollups(bucket_start,node_id,gateway_id,agent_id,assignment_id,service_id,protocol,bytes_in,bytes_out,opened,closed,rejected,rate_limited,active_max) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bucket_start,node_id,assignment_id,service_id,protocol) DO UPDATE SET bytes_in=runtime_traffic_rollups.bytes_in+excluded.bytes_in,bytes_out=runtime_traffic_rollups.bytes_out+excluded.bytes_out,opened=runtime_traffic_rollups.opened+excluded.opened,closed=runtime_traffic_rollups.closed+excluded.closed,rejected=runtime_traffic_rollups.rejected+excluded.rejected,rate_limited=runtime_traffic_rollups.rate_limited+excluded.rate_limited,active_max=CASE WHEN excluded.active_max>runtime_traffic_rollups.active_max THEN excluded.active_max ELSE runtime_traffic_rollups.active_max END`, bucket, txConnection.NodeID, txConnection.GatewayID, txConnection.AgentID, txConnection.AssignmentID, txConnection.ServiceID, txConnection.Protocol, uint64ToDatabaseInt(txConnection.BytesIn), uint64ToDatabaseInt(txConnection.BytesOut), uint64ToDatabaseInt(opened), uint64ToDatabaseInt(closed), uint64ToDatabaseInt(rejected), uint64ToDatabaseInt(limited), uint64ToDatabaseInt(activeMax))
 	return err
 }
 
@@ -669,7 +677,7 @@ func nonNegativeUint64(value int64) (uint64, error) {
 	return uint64(value), nil
 }
 
-func uint64ToSQLite(value uint64) int64 {
+func uint64ToDatabaseInt(value uint64) int64 {
 	if value > math.MaxInt64 {
 		return math.MaxInt64
 	}

@@ -2,14 +2,15 @@
 
 AsterFerry is a private-network relay with a strict control-plane/data-plane
 split. The Controller is the only authority for identity, RBAC, desired state,
-scheduling, audit and SQLite persistence. Nodes receive typed snapshots, keep
+scheduling, audit and persistence. Nodes receive typed snapshots, keep
 an encrypted last-known-good cache, and carry traffic without an HTTP
 management surface; Gateway or Agent is selected by the Node Spec.
 
 ```text
   Dashboard / CLI -- HTTPS REST --> Controller -- mTLS gRPC --> Node daemon
                                       |
-                                      +-- SQLite, audit, scheduling
+                                      +-- SQLite (default) or PostgreSQL
+                                          audit, scheduling, runtime state
 
   Node (Gateway behavior) <====== AFDP/2 over QUIC ======> Node (Agent behavior)
 ```
@@ -102,7 +103,8 @@ asterferry controller restore --config ./controller/controller.json --source ./b
 
 `controller init --grpc-advertise <reachable-host:port>` creates a JSON-only local configuration, a Controller CA,
 HTTPS/gRPC certificates, a 32-byte owner-readable master key, and the first
-Admin account. SQLite runs with WAL, foreign keys and a busy timeout. Secrets
+Admin account. SQLite runs with WAL, foreign keys and a busy timeout; PostgreSQL
+uses a bounded connection pool for multi-node deployments. Secrets
 are AES-GCM encrypted with the master key, passwords use Argon2id, and API or
 enrollment tokens are stored only as hashes.
 
@@ -120,10 +122,36 @@ monotonic generation, schema version and SHA-256 checksum.
 
 ### Controller database lifecycle
 
-This pre-1.0 generation uses SQLite schema v9. A v8 database is upgraded once on
-startup with the additive runtime-observability migration; unknown or older
-generations are still rejected by `OpenStore`. Back up the complete Controller
-directory before upgrading and keep the backup for rollback.
+SQLite schema v9 remains the zero-dependency default. For a larger deployment,
+initialize directly against PostgreSQL:
+
+```powershell
+asterferry controller init --dir ./controller `
+  --grpc-advertise controller.example.com:9443 `
+  --database-driver postgres `
+  --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
+```
+
+Existing SQLite installations are migrated explicitly during a maintenance
+window. The target database or schema must be empty; `--dry-run` only validates
+connectivity and counts rows, while the apply form copies all Controller and
+runtime tables in one PostgreSQL transaction and writes a new config:
+
+```powershell
+asterferry controller migrate --config ./controller/controller.json `
+  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' `
+  --dry-run
+asterferry controller migrate --config ./controller/controller.json `
+  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' `
+  --output-config ./controller/controller-postgres.json
+asterferry controller run --config ./controller/controller-postgres.json
+```
+
+Stop the Controller before migration and keep the original SQLite directory as
+the rollback copy. PostgreSQL backup/restore uses the external `pg_dump` and
+`pg_restore` utilities (custom format); the CLI must run where those tools are
+installed. Both backends' backups include the Controller config, master key,
+CA and TLS identity.
 
 ## Node behavior
 

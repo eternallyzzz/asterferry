@@ -39,7 +39,7 @@ func NewServer(config Config, store *Store) (*Server, error) {
 		return nil, err
 	}
 	if store.metrics == nil {
-		store.metrics = newControllerMetrics()
+		store.metrics = newControllerMetrics(store.DatabaseDriver())
 	}
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
 	server := &Server{store: store, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: store.metrics}
@@ -198,6 +198,6 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorize(w, r, RoleViewer); !ok {
 		return
 	}
-	s.metrics.refreshSQLite(s.store)
+	s.metrics.refreshDatabase(s.store)
 	s.metrics.Handler().ServeHTTP(w, r)
 }

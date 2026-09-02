@@ -410,12 +410,37 @@ asterferry controller backup \
   --output ./backups
 ```
 
-This pre-1.0 generation uses SQLite schema v9. A v8 database receives the
-additive runtime-observability migration on startup; older or unknown database
-generations remain incompatible. Back up the complete Controller directory,
-keep the backup for rollback, and perform the upgrade during a maintenance
-window. See [the operations guide](operations.en.md) for runtime visibility and
-the advanced-operation switch.
+SQLite schema v9 remains the default for a zero-dependency installation. For a
+larger Controller, initialize with PostgreSQL instead:
+
+```sh
+asterferry controller init --dir /var/lib/asterferry \
+  --grpc-advertise controller.example.com:9443 \
+  --database-driver postgres \
+  --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
+```
+
+To move an existing SQLite installation, stop the Controller and validate an
+empty PostgreSQL database first. The apply command copies Controller and
+runtime tables in one transaction and writes a separate PostgreSQL config;
+the original directory remains available for rollback:
+
+```sh
+asterferry controller migrate --config ./controller/controller.json \
+  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' \
+  --dry-run
+asterferry controller migrate --config ./controller/controller.json \
+  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' \
+  --output-config ./controller/controller-postgres.json
+asterferry controller run --config ./controller/controller-postgres.json
+```
+
+The PostgreSQL backup format uses the external `pg_dump` and `pg_restore`
+utilities, so install the PostgreSQL client tools wherever the backup/restore
+CLI is run. SQLite backups continue to use the local database file. In both
+cases the backup contains the config, master key, CA and Controller TLS
+identity. See [the operations guide](operations.en.md) for runtime visibility
+and the advanced-operation switch.
 
 When the Controller is temporarily unavailable, nodes continue using their encrypted last-known-good snapshot. New configuration, scheduling and certificate operations require the Controller to recover. Do not delete `controller/`; it contains the database, CA, TLS identity and master key.
 

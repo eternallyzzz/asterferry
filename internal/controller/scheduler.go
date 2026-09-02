@@ -40,7 +40,7 @@ type scheduleTarget struct {
 	services []domain.Service
 }
 
-// ScheduleAgent selects a Gateway from the current SQLite state and commits
+// ScheduleAgent selects a Gateway from the current Controller state and commits
 // the resulting assignment with the repository's transactional port checks.
 // It is intentionally a convenience around Schedule; callers that already
 // have a consistent candidate view can use the pure function directly.

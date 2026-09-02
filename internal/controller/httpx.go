@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func decodeJSON(r *http.Request, value any, max int64) error {
@@ -89,7 +91,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	// modernc.org/sqlite exposes extended result codes through Code(). Classify
 	// duplicate resources from the code rather than matching driver prose, which
 	// may contain SQL fragments, paths, or change between driver versions.
-	if isSQLiteUniqueConstraint(err) {
+	if isUniqueConstraint(err) {
 		writeError(w, http.StatusConflict, "already_exists", "resource already exists")
 		return
 	}
@@ -119,7 +121,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "resource was not found")
 		return
 	}
-	if errors.Is(err, ErrStorageFailure) || isSQLiteError(err) || errors.Is(err, sql.ErrConnDone) {
+	if errors.Is(err, ErrStorageFailure) || isDatabaseError(err) || errors.Is(err, sql.ErrConnDone) {
 		slog.Default().Error("controller store operation failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller storage is temporarily unavailable")
 		return
@@ -131,12 +133,29 @@ func writeStoreError(w http.ResponseWriter, err error) {
 
 type sqliteError interface{ Code() int }
 
+func isPostgresError(err error) bool {
+	var coded *pgconn.PgError
+	if errors.As(err, &coded) {
+		return true
+	}
+	var connect *pgconn.ConnectError
+	return errors.As(err, &connect)
+}
+
+func isDatabaseError(err error) bool {
+	return isSQLiteError(err) || isPostgresError(err)
+}
+
 func isSQLiteError(err error) bool {
 	var coded sqliteError
 	return errors.As(err, &coded)
 }
 
-func isSQLiteUniqueConstraint(err error) bool {
+func isUniqueConstraint(err error) bool {
+	var postgres *pgconn.PgError
+	if errors.As(err, &postgres) {
+		return postgres.Code == "23505"
+	}
 	var coded sqliteError
 	if !errors.As(err, &coded) {
 		return false

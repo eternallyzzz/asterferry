@@ -6,7 +6,9 @@ This release is a deliberate breaking cutover to the Controller/data-plane
 architecture.
 
 - Adds the SQLite-backed Controller with RBAC, audit, enrollment, scheduling,
-  revision checks and encrypted node snapshots.
+  revision checks and encrypted node snapshots; PostgreSQL is now supported as
+  the production-scale backend with a bounded pool and explicit SQLite
+  migration command.
 - Adds AFDP/2 over QUIC with typed session negotiation, bounded TCP/UDP framing,
   routing, egress and packet obfuscation.
 - Makes Gateway and Agent behavior run through one generic Node identity and
@@ -34,3 +36,6 @@ architecture.
 - AFDP/1 to AFDP/2 and control/1 to control/2 are intentional wire-level
   breaking changes with no fallback or negotiation. Upgrade Controller and all
   Node binaries as a coordinated rollout.
+- PostgreSQL backup/restore uses the external `pg_dump`/`pg_restore` client
+  utilities. The Controller remains single-replica; PostgreSQL does not add
+  Controller HA.

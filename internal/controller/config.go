@@ -15,22 +15,33 @@ import (
 	"asterferry/internal/jsonutil"
 )
 
-// Config is intentionally small: business state belongs in SQLite and is
-// never read from a node YAML file.
+const (
+	DatabaseDriverSQLite    = "sqlite"
+	DatabaseDriverPostgres  = "postgres"
+	defaultPostgresPoolSize = 16
+	maxDatabasePoolSize     = 256
+)
+
+// Config is intentionally small: business state belongs in the configured
+// Controller database and is never read from a node YAML file. SQLite remains
+// the zero-dependency default; PostgreSQL is the production-scale backend.
 type Config struct {
-	HTTPListen      string `json:"http_listen"`
-	GRPCListen      string `json:"grpc_listen"`
-	GRPCAdvertise   string `json:"grpc_advertise,omitempty"`
-	ReleaseBaseURL  string `json:"release_base_url,omitempty"`
-	ReleaseVersion  string `json:"release_version,omitempty"`
-	DatabasePath    string `json:"database_path"`
-	CAKeyPath       string `json:"ca_key_path"`
-	CACertPath      string `json:"ca_cert_path"`
-	TLSCertPath     string `json:"tls_cert_path"`
-	TLSKeyPath      string `json:"tls_key_path"`
-	MasterKeyPath   string `json:"master_key_path"`
-	DashboardEnable bool   `json:"dashboard_enable"`
-	LogLevel        string `json:"log_level"`
+	HTTPListen           string `json:"http_listen"`
+	GRPCListen           string `json:"grpc_listen"`
+	GRPCAdvertise        string `json:"grpc_advertise,omitempty"`
+	ReleaseBaseURL       string `json:"release_base_url,omitempty"`
+	ReleaseVersion       string `json:"release_version,omitempty"`
+	DatabaseDriver       string `json:"database_driver,omitempty"`
+	DatabasePath         string `json:"database_path,omitempty"`
+	DatabaseURL          string `json:"database_url,omitempty"`
+	DatabaseMaxOpenConns int    `json:"database_max_open_conns,omitempty"`
+	CAKeyPath            string `json:"ca_key_path"`
+	CACertPath           string `json:"ca_cert_path"`
+	TLSCertPath          string `json:"tls_cert_path"`
+	TLSKeyPath           string `json:"tls_key_path"`
+	MasterKeyPath        string `json:"master_key_path"`
+	DashboardEnable      bool   `json:"dashboard_enable"`
+	LogLevel             string `json:"log_level"`
 	// History retention is expressed in operator-friendly units rather than
 	// time.Duration's nanosecond JSON representation. Zero disables cleanup for
 	// the corresponding table.
@@ -48,6 +59,7 @@ func DefaultConfig(dir string) Config {
 		HTTPListen:                ":8443",
 		GRPCListen:                ":9443",
 		ReleaseBaseURL:            "https://github.com/eternallyzzz/asterferry/releases/download",
+		DatabaseDriver:            DatabaseDriverSQLite,
 		DatabasePath:              filepath.Join(dir, "controller.db"),
 		CAKeyPath:                 filepath.Join(dir, "ca", "ca.key"),
 		CACertPath:                filepath.Join(dir, "ca", "ca.crt"),
@@ -82,7 +94,29 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.ReleaseVersion) != "" && !validReleaseVersion(c.ReleaseVersion) {
 		return errors.New("controller release_version must be a semantic version such as 1.0.0")
 	}
-	for field, value := range map[string]string{"database_path": c.DatabasePath, "ca_key_path": c.CAKeyPath, "ca_cert_path": c.CACertPath, "tls_cert_path": c.TLSCertPath, "tls_key_path": c.TLSKeyPath, "master_key_path": c.MasterKeyPath} {
+	databaseDriver := normalizeDatabaseDriver(c.DatabaseDriver)
+	if databaseDriver != DatabaseDriverSQLite && databaseDriver != DatabaseDriverPostgres {
+		return fmt.Errorf("controller database_driver must be %q or %q", DatabaseDriverSQLite, DatabaseDriverPostgres)
+	}
+	if c.DatabaseMaxOpenConns < 0 || c.DatabaseMaxOpenConns > maxDatabasePoolSize {
+		return fmt.Errorf("controller database_max_open_conns must be between 0 and %d", maxDatabasePoolSize)
+	}
+	if databaseDriver == DatabaseDriverSQLite {
+		if strings.TrimSpace(c.DatabasePath) == "" {
+			return errors.New("controller database_path is required for sqlite")
+		}
+		if strings.TrimSpace(c.DatabaseURL) != "" {
+			return errors.New("controller database_url is only valid for postgres")
+		}
+	} else {
+		if strings.TrimSpace(c.DatabaseURL) == "" {
+			return errors.New("controller database_url is required for postgres")
+		}
+		if strings.ContainsAny(c.DatabaseURL, "\x00\r\n") || len(c.DatabaseURL) > 4096 {
+			return errors.New("controller database_url is invalid")
+		}
+	}
+	for field, value := range map[string]string{"ca_key_path": c.CAKeyPath, "ca_cert_path": c.CACertPath, "tls_cert_path": c.TLSCertPath, "tls_key_path": c.TLSKeyPath, "master_key_path": c.MasterKeyPath} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("controller %s is required", field)
 		}
@@ -112,6 +146,9 @@ func LoadConfig(path string) (Config, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(b, &fields); err == nil {
 		defaults := DefaultConfig(filepath.Dir(path))
+		if _, ok := fields["database_driver"]; !ok || strings.TrimSpace(config.DatabaseDriver) == "" {
+			config.DatabaseDriver = defaults.DatabaseDriver
+		}
 		if _, ok := fields["release_base_url"]; !ok {
 			config.ReleaseBaseURL = defaults.ReleaseBaseURL
 		}
@@ -128,6 +165,30 @@ func LoadConfig(path string) (Config, error) {
 	config = resolveConfigPaths(config, filepath.Dir(path))
 	config.SourcePath = path
 	return config, nil
+}
+
+func normalizeDatabaseDriver(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return DatabaseDriverSQLite
+	}
+	if value == "postgresql" {
+		return DatabaseDriverPostgres
+	}
+	return value
+}
+
+func databasePoolSize(config Config) int {
+	if normalizeDatabaseDriver(config.DatabaseDriver) == DatabaseDriverSQLite {
+		return 1
+	}
+	if config.DatabaseMaxOpenConns > 0 {
+		return config.DatabaseMaxOpenConns
+	}
+	if normalizeDatabaseDriver(config.DatabaseDriver) == DatabaseDriverPostgres {
+		return defaultPostgresPoolSize
+	}
+	return 1
 }
 
 func resolveConfigPaths(config Config, base string) Config {

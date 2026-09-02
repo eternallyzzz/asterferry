@@ -32,5 +32,8 @@ to `/api/v1/services`; the scheduler assigns each enabled service to a healthy
 Gateway and allocates a port from that Gateway's configured pool.
 
 Never commit bootstrap files, private keys, passwords, or API tokens. The
-Controller database is a new-generation SQLite store; an existing database
-without its generation marker must be replaced with `controller init`.
+Controller database defaults to the new-generation SQLite store. Larger
+deployments can initialize with `--database-driver postgres --database-url
+'postgres://...'`; existing SQLite state can be moved with
+`controller migrate --dry-run` followed by the apply form into an empty
+PostgreSQL database.

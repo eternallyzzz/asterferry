@@ -69,7 +69,7 @@ func NewControlServer(config Config, store *Store) (*ControlServer, error) {
 		return nil, err
 	}
 	if store.metrics == nil {
-		store.metrics = newControllerMetrics()
+		store.metrics = newControllerMetrics(store.DatabaseDriver())
 	}
 	return &ControlServer{
 		store: store, config: config, streams: make(map[string]*controlStream), metrics: store.metrics,
@@ -182,7 +182,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		}
 		seenCapabilities[capability] = struct{}{}
 	}
-	// Authenticate the certificate identity before consulting SQLite. This
+	// Authenticate the certificate identity before consulting the database. This
 	// keeps unknown node IDs, disabled nodes and behavior mismatches from becoming
 	// an externally observable lookup oracle.
 	if err := verifyPeerIdentity(stream.Context(), hello.GetNodeId()); err != nil {

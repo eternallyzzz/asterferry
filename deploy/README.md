@@ -1,7 +1,7 @@
 # AsterFerry deployment
 
 AsterFerry is deployed as one Controller and independently managed data-plane
-Nodes. The Controller owns SQLite state, PKI, scheduling, RBAC and audit. A
+Nodes. The Controller owns SQLite (default) or PostgreSQL state, PKI, scheduling, RBAC and audit. A
 Node is a registered identity; its Gateway or Agent behavior is a separate
 specification selected in the Dashboard. Nodes receive typed snapshots and
 never expose a management HTTP API or read business YAML.
@@ -28,10 +28,23 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-This pre-1.0 generation uses SQLite schema v9. A v8 database receives the
-additive runtime-observability migration on startup; older or unknown
-generations remain incompatible. Export any needed resources, retain a
-complete backup, and upgrade during a maintenance window.
+SQLite schema v9 remains the default. For a production-sized Controller, use
+an external PostgreSQL database:
+
+```sh
+asterferry controller init --dir /var/lib/asterferry \
+  --grpc-advertise controller.example.com:9443 \
+  --database-driver postgres \
+  --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
+```
+
+To migrate an existing SQLite installation, stop the Controller and run
+`controller migrate --dry-run` against an empty PostgreSQL database first;
+the apply command writes a separate config and copies all application/runtime
+tables in one transaction. Older or unknown SQLite generations remain
+incompatible. Keep the original directory and a complete backup for rollback.
+PostgreSQL backup/restore requires `pg_dump`/`pg_restore` installed on the
+machine running the CLI; SQLite backup remains local-file based.
 
 `deploy/asterferry-controller.service` is a single-replica systemd unit; the
 Controller is not advertised as highly available. Nodes retain their encrypted

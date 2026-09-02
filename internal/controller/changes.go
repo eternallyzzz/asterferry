@@ -6,7 +6,7 @@ import (
 )
 
 // ResourceChange is a coalescing hint for the scheduler. The authoritative
-// state remains in SQLite; consumers only use these node IDs to limit the
+// state remains in the configured Controller database; consumers only use these node IDs to limit the
 // next reconciliation pass.
 type ResourceChange struct {
 	NodeIDs []string

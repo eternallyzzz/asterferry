@@ -8,7 +8,7 @@ Node's behavior spec after enrollment.
 ## Controller
 
 Create a namespace and install the single-replica Controller chart. The chart
-creates a PVC for the SQLite database, CA, TLS identity and master key:
+creates a PVC for the default SQLite database, CA, TLS identity and master key:
 
 ```sh
 kubectl create namespace asterferry
@@ -21,6 +21,14 @@ Run `controller init` once against the mounted data directory (for example in
 a maintenance Job) before starting the StatefulSet. Expose HTTPS `8443` and
 mTLS gRPC `9443` through an internal or external Service according to your
 deployment policy. Controller HA is outside this release.
+
+For a multi-Node or production deployment, use PostgreSQL instead of putting
+the Controller database on the PVC. Run `controller init` with
+`--database-driver postgres --database-url 'postgres://...'` against the
+managed database, and place the resulting `controller.json` plus the CA/TLS
+and master-key files in the Controller volume/Secret according to your secret
+management policy. The chart remains single-replica; PostgreSQL removes the
+SQLite write-connection bottleneck but does not add Controller HA.
 
 ## Node releases
 
@@ -59,7 +67,8 @@ helm template node deploy/helm/asterferry-node --namespace asterferry
 kubectl -n asterferry rollout status statefulset/asterferry-controller
 ```
 
-Keep bootstrap Secrets and the Controller PVC backed up using the Controller's
-`backup` command. Stop a node or Controller independently when testing the
+Keep bootstrap Secrets and the Controller PVC (or PostgreSQL backup) backed up
+using the Controller's `backup` command. PostgreSQL backup/restore requires
+`pg_dump`/`pg_restore` on the machine running the CLI. Stop a node or Controller independently when testing the
 offline behavior: an applied node snapshot continues serving traffic while
 the Controller is unavailable and reconciles automatically after reconnect.

@@ -286,7 +286,7 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 			}
 			_, bindingErr := tx.ExecContext(ctx, `INSERT INTO service_bindings(service_id,gateway_id,protocol,bind,port) VALUES(?,?,?,?,?) ON CONFLICT(service_id) DO UPDATE SET gateway_id=excluded.gateway_id,protocol=excluded.protocol,bind=excluded.bind,port=excluded.port`, binding.ServiceID, assignment.GatewayID, binding.Protocol, normalizeBind(binding.Bind), binding.Port)
 			if bindingErr != nil {
-				if isSQLiteUniqueConstraint(bindingErr) {
+				if isUniqueConstraint(bindingErr) {
 					return &PortConflictError{GatewayID: assignment.GatewayID, Protocol: binding.Protocol, Bind: binding.Bind, Port: binding.Port}
 				}
 				return bindingErr
@@ -315,7 +315,7 @@ func replaceAssignmentServicesTx(ctx context.Context, tx *sql.Tx, assignment dom
 	}
 	for _, serviceID := range assignment.ServiceIDs {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO assignment_services(assignment_id,service_id) VALUES(?,?)`, assignment.ID, serviceID); err != nil {
-			if isSQLiteUniqueConstraint(err) {
+			if isUniqueConstraint(err) {
 				return &domain.ApplyError{Code: "resource_conflict", Path: "service_ids", Message: fmt.Sprintf("service %q is already assigned", serviceID)}
 			}
 			return err

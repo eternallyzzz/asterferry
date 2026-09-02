@@ -20,16 +20,19 @@ import (
 )
 
 type InitOptions struct {
-	Dir            string
-	HTTPListen     string
-	GRPCListen     string
-	GRPCAdvertise  string
-	ReleaseBaseURL string
-	ReleaseVersion string
-	Username       string
-	Password       string
-	Force          bool
-	Now            func() time.Time
+	Dir                  string
+	HTTPListen           string
+	GRPCListen           string
+	GRPCAdvertise        string
+	ReleaseBaseURL       string
+	ReleaseVersion       string
+	DatabaseDriver       string
+	DatabaseURL          string
+	DatabaseMaxOpenConns int
+	Username             string
+	Password             string
+	Force                bool
+	Now                  func() time.Time
 }
 
 type InitResult struct {
@@ -74,6 +77,18 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if options.ReleaseVersion != "" {
 		config.ReleaseVersion = options.ReleaseVersion
 	}
+	if strings.TrimSpace(options.DatabaseDriver) != "" {
+		config.DatabaseDriver = normalizeDatabaseDriver(options.DatabaseDriver)
+	}
+	if strings.TrimSpace(options.DatabaseURL) != "" {
+		config.DatabaseURL = strings.TrimSpace(options.DatabaseURL)
+	}
+	if normalizeDatabaseDriver(config.DatabaseDriver) == DatabaseDriverPostgres {
+		config.DatabasePath = ""
+	}
+	if options.DatabaseMaxOpenConns != 0 {
+		config.DatabaseMaxOpenConns = options.DatabaseMaxOpenConns
+	}
 	if err := config.Validate(); err != nil {
 		return InitResult{}, err
 	}
@@ -95,6 +110,26 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return InitResult{}, err
 	}
+	if normalizeDatabaseDriver(config.DatabaseDriver) == DatabaseDriverPostgres {
+		// SQLite initialization always creates a fresh staged database. Apply
+		// the same safety rule to an external PostgreSQL target instead of
+		// silently adding a second Admin to an existing Controller database.
+		database, backend, err := openConfiguredDatabase(ctx, config)
+		if err != nil {
+			return InitResult{}, fmt.Errorf("open PostgreSQL initialization target: %w", err)
+		}
+		compatible, empty, inspectErr := inspectDatabase(ctx, database, backend)
+		closeErr := database.Close()
+		if inspectErr != nil {
+			return InitResult{}, fmt.Errorf("inspect PostgreSQL initialization target: %w", inspectErr)
+		}
+		if closeErr != nil {
+			return InitResult{}, fmt.Errorf("close PostgreSQL initialization target: %w", closeErr)
+		}
+		if backend != databaseBackendPostgres || compatible || !empty {
+			return InitResult{}, errors.New("PostgreSQL initialization target must be an empty schema")
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return InitResult{}, err
 	}
@@ -114,6 +149,9 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	stagedConfig.GRPCAdvertise = config.GRPCAdvertise
 	stagedConfig.ReleaseBaseURL = config.ReleaseBaseURL
 	stagedConfig.ReleaseVersion = config.ReleaseVersion
+	stagedConfig.DatabaseDriver = config.DatabaseDriver
+	stagedConfig.DatabaseURL = config.DatabaseURL
+	stagedConfig.DatabaseMaxOpenConns = config.DatabaseMaxOpenConns
 	stagedConfig.DashboardEnable = config.DashboardEnable
 	stagedConfig.LogLevel = config.LogLevel
 	for _, path := range []string{staging, filepath.Dir(stagedConfig.CAKeyPath), filepath.Dir(stagedConfig.CACertPath), filepath.Dir(stagedConfig.TLSKeyPath), filepath.Dir(stagedConfig.TLSCertPath)} {
@@ -131,7 +169,7 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if err != nil {
 		return InitResult{}, err
 	}
-	store, err := OpenStore(stagedConfig.DatabasePath, masterKey)
+	store, err := OpenStoreWithConfig(stagedConfig, masterKey)
 	if err != nil {
 		return InitResult{}, err
 	}

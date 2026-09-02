@@ -109,7 +109,7 @@ func (s *Store) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error
 }
 
 // BuildDesiredSnapshot materializes the complete node-scoped desired state
-// from the authoritative resources in SQLite.  The result is pure data: it
+// from the authoritative resources in the configured database.  The result is pure data: it
 // can be checksummed, sent over the control stream, or encrypted in the node
 // cache without giving a node access to the Controller repository.
 func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {

@@ -42,6 +42,6 @@ func storageFailure(op string, err error) error {
 	}
 	// Preserve both the stable classification and the underlying driver error.
 	// Callers can map ErrStorageFailure to a 503 while logs and diagnostics can
-	// still inspect the concrete SQLite error with errors.Is/As.
+	// still inspect the concrete database-driver error with errors.Is/As.
 	return fmt.Errorf("%w: %s: %w", ErrStorageFailure, op, err)
 }

@@ -86,6 +86,19 @@ curl -X POST https://controller.example/api/v1/nodes/gateway-b/runtime/actions \
 返回值只表示请求已接受/排队，或已投递到当前控制流；不保证 Node 执行时连接
 仍然存在。应结合运行时事件流和 Node“观测”页面确认结果。
 
+## Controller 数据库运维
+
+小规模、单副本 Controller 默认使用 SQLite。随着 Node 数量或运行时事件量
+增加，建议使用带有有界连接池的 PostgreSQL。初始化时通过
+`--database-driver postgres --database-url 'postgres://...'` 选择它。
+
+迁移已有安装时使用 `controller migrate`：先停止 Controller，针对空的
+PostgreSQL 数据库执行 `--dry-run`，确认无误后用 `--output-config` 执行应用
+迁移，再使用新配置启动 Controller。复制过程不会修改源 SQLite 目录，应该
+保留它用于回滚。PostgreSQL 备份/恢复要求执行 CLI 的机器安装
+`pg_dump` 和 `pg_restore`；备份还包含 Controller 配置、master key、CA 和
+TLS 身份。
+
 ## 故障排查
 
 - 没有连接行：确认 Node 证书 active、控制流已认证，并检查 Node 日志中是否

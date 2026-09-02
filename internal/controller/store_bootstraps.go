@@ -320,7 +320,7 @@ func (s *Store) DeletePendingNodeBootstrap(ctx context.Context, nodeID string, o
 	return tx.Commit()
 }
 
-const pendingBootstrapSelect = `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,CASE WHEN spec_json IS NOT NULL THEN json_extract(spec_json,'$.kind') ELSE '' END FROM node_bootstraps`
+const pendingBootstrapSelect = `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,spec_json FROM node_bootstraps`
 
 func loadPendingBootstrapTx(ctx context.Context, tx *sql.Tx, nodeID string) (pendingNodeBootstrap, error) {
 	return scanPendingBootstrapWithSpec(tx.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE node_id=?`, nodeID))
@@ -332,10 +332,10 @@ func (s *Store) pendingBootstrapForToken(ctx context.Context, tokenHash string) 
 
 func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 	var pending PendingNodeBootstrap
-	var labels []byte
+	var labels, specJSON []byte
 	var enabled int
 	var expires, created string
-	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.SpecKind); err != nil {
+	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &specJSON); err != nil {
 		return PendingNodeBootstrap{}, err
 	}
 	if len(labels) > 0 {
@@ -344,6 +344,12 @@ func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 		}
 	}
 	pending.Enabled = enabled != 0
+	if len(specJSON) > 0 {
+		var spec domain.NodeSpec
+		if err := json.Unmarshal(specJSON, &spec); err == nil {
+			pending.SpecKind = string(spec.Kind)
+		}
+	}
 	var err error
 	pending.ExpiresAt, err = parseStoredTime("node_bootstrap.expires_at", expires)
 	if err != nil {
