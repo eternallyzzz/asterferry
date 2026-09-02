@@ -221,7 +221,11 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 		return err
 	}
 	if hadPrevious {
-		_, err = tx.ExecContext(ctx, `UPDATE assignments SET gateway_id=?,agent_id=?,document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, assignment.GatewayID, assignment.AgentID, b, assignment.Generation, revision, nowTime.Format(time.RFC3339Nano), assignment.ID, revision-1)
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, `UPDATE assignments SET gateway_id=?,agent_id=?,document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, assignment.GatewayID, assignment.AgentID, b, assignment.Generation, revision, nowTime.Format(time.RFC3339Nano), assignment.ID, revision-1)
+		if err == nil {
+			err = requireRevisionWrite(ctx, tx, result, "assignment", revision-1, `SELECT revision FROM assignments WHERE id=?`, assignment.ID)
+		}
 	} else {
 		_, err = tx.ExecContext(ctx, `INSERT INTO assignments(id,gateway_id,agent_id,document_json,generation,revision,updated_at) VALUES(?,?,?,?,?,?,?)`, assignment.ID, assignment.GatewayID, assignment.AgentID, b, assignment.Generation, revision, nowTime.Format(time.RFC3339Nano))
 	}
@@ -448,7 +452,11 @@ func (s *Store) DeleteAssignment(ctx context.Context, id string, options WriteOp
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM assignments WHERE id=? AND revision=?`, id, revision); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM assignments WHERE id=? AND revision=?`, id, revision)
+	if err != nil {
+		return err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, id); err != nil {
 		return err
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "delete", "assignment", id, revision, nil); err != nil {
@@ -525,7 +533,11 @@ func (s *Store) UpdateAssignmentState(ctx context.Context, id, state string, opt
 	if err != nil {
 		return domain.Assignment{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, document, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), id, revision); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, document, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), id, revision)
+	if err != nil {
+		return domain.Assignment{}, err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, id); err != nil {
 		return domain.Assignment{}, err
 	}
 	if state == domain.AssignmentDegraded || state == domain.AssignmentDraining {
@@ -582,24 +594,49 @@ func (s *Store) applyNodeResultWithError(ctx context.Context, nodeID string, gen
 		return nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,gateway_id,agent_id,document_json,revision,generation FROM assignments WHERE gateway_id=? OR agent_id=? ORDER BY id`, nodeID, nodeID)
+	// The assignment row is the serialization point for the two participant
+	// ACKs. PostgreSQL transactions otherwise can both count the other ACK as
+	// absent under READ COMMITTED and commit the assignment in pending state.
+	// SQLite gets the empty suffix because its single writer already provides
+	// the equivalent serialization.
+	rows, err := tx.QueryContext(ctx, `SELECT id,gateway_id,agent_id,document_json,revision,generation FROM assignments WHERE gateway_id=? OR agent_id=? ORDER BY id`+s.selectForUpdateClause(), nodeID, nodeID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	changed := make([]domain.Assignment, 0)
-	now := time.Now().UTC()
+	type assignmentResultRow struct {
+		assignment        domain.Assignment
+		revision          int64
+		indexedGeneration uint64
+	}
+	assignmentRows := make([]assignmentResultRow, 0)
 	for rows.Next() {
 		var assignment domain.Assignment
 		var document []byte
 		var revision int64
 		var assignmentGeneration uint64
 		if err := rows.Scan(&assignment.ID, &assignment.GatewayID, &assignment.AgentID, &document, &revision, &assignmentGeneration); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		if err := json.Unmarshal(document, &assignment); err != nil {
+			_ = rows.Close()
 			return nil, fmt.Errorf("decode assignment %q: %w", assignment.ID, err)
 		}
+		assignmentRows = append(assignmentRows, assignmentResultRow{assignment: assignment, revision: revision, indexedGeneration: assignmentGeneration})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	changed := make([]domain.Assignment, 0)
+	now := time.Now().UTC()
+	for _, row := range assignmentRows {
+		assignment := row.assignment
+		revision := row.revision
+		assignmentGeneration := row.indexedGeneration
 		// The indexed generation is authoritative for this comparison; the
 		// document is checked as well so a corrupted row cannot be advanced by a
 		// control result that happens to name the same assignment.
@@ -656,16 +693,17 @@ func (s *Store) applyNodeResultWithError(ctx context.Context, nodeID string, gen
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Revision, now.Format(time.RFC3339Nano), assignment.ID, revision); err != nil {
+		result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Revision, now.Format(time.RFC3339Nano), assignment.ID, revision)
+		if err != nil {
+			return nil, err
+		}
+		if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, assignment.ID); err != nil {
 			return nil, err
 		}
 		if err := insertAudit(ctx, tx, actor, "state", "assignment", assignment.ID, assignment.Revision, map[string]string{"state": targetState, "node_id": nodeID, "generation": fmt.Sprint(generation)}); err != nil {
 			return nil, err
 		}
 		changed = append(changed, assignment)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	changedNodes := make([]string, 0, len(changed)*2)
 	for _, assignment := range changed {

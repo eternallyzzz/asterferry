@@ -301,22 +301,42 @@ func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.Ga
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	endpointSet := make(map[string]struct{}, len(spec.PublicEndpoints))
-	for _, endpoint := range spec.PublicEndpoints {
-		endpointSet[endpoint] = struct{}{}
+	type assignmentEndpointRow struct {
+		assignment        domain.Assignment
+		revision          int64
+		indexedGeneration uint64
 	}
+	assignmentRows := make([]assignmentEndpointRow, 0)
 	for rows.Next() {
 		var assignment domain.Assignment
 		var document []byte
 		var revision int64
 		var indexedGeneration uint64
 		if err := rows.Scan(&assignment.ID, &assignment.AgentID, &document, &revision, &indexedGeneration); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if err := json.Unmarshal(document, &assignment); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("decode assignment %q: %w", assignment.ID, err)
 		}
+		assignmentRows = append(assignmentRows, assignmentEndpointRow{assignment: assignment, revision: revision, indexedGeneration: indexedGeneration})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	endpointSet := make(map[string]struct{}, len(spec.PublicEndpoints))
+	for _, endpoint := range spec.PublicEndpoints {
+		endpointSet[endpoint] = struct{}{}
+	}
+	for _, row := range assignmentRows {
+		assignment := row.assignment
+		revision := row.revision
+		indexedGeneration := row.indexedGeneration
 		if assignment.Generation != indexedGeneration {
 			return fmt.Errorf("assignment %q generation index is inconsistent", assignment.ID)
 		}
@@ -356,7 +376,11 @@ func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.Ga
 		if marshalErr != nil {
 			return marshalErr
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Generation, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), assignment.ID, revision); err != nil {
+		result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Generation, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), assignment.ID, revision)
+		if err != nil {
+			return err
+		}
+		if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, assignment.ID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_acks WHERE assignment_id=?`, assignment.ID); err != nil {
@@ -378,7 +402,7 @@ func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.Ga
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 // validateGatewaySpecTx checks constraints that involve the existing
@@ -416,12 +440,28 @@ func validateAgentSpecTx(ctx context.Context, tx *sql.Tx, spec domain.AgentSpec)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type assignmentReference struct {
+		assignmentID string
+		gatewayID    string
+	}
+	assignments := make([]assignmentReference, 0)
 	for rows.Next() {
-		var assignmentID, gatewayID string
-		if err := rows.Scan(&assignmentID, &gatewayID); err != nil {
+		var reference assignmentReference
+		if err := rows.Scan(&reference.assignmentID, &reference.gatewayID); err != nil {
+			_ = rows.Close()
 			return err
 		}
+		assignments = append(assignments, reference)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, reference := range assignments {
+		assignmentID, gatewayID := reference.assignmentID, reference.gatewayID
 		var labelsJSON []byte
 		if err := tx.QueryRowContext(ctx, `SELECT labels_json FROM nodes WHERE id=?`, gatewayID).Scan(&labelsJSON); err != nil {
 			return err
@@ -436,7 +476,7 @@ func validateAgentSpecTx(ctx context.Context, tx *sql.Tx, spec domain.AgentSpec)
 			return &domain.ApplyError{Code: "selector_mismatch", Path: "gateway_selector", Message: fmt.Sprintf("agent spec selector no longer matches gateway %q for assignment %q", gatewayID, assignmentID)}
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, options WriteOptions) error {
@@ -533,7 +573,11 @@ func (s *Store) putServiceDocument(ctx context.Context, service domain.Service, 
 		if marshalErr != nil {
 			return marshalErr
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE services SET agent_id=?,document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, service.AgentID, b, revision, now, service.ID, revision-1)
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, `UPDATE services SET agent_id=?,document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, service.AgentID, b, revision, now, service.ID, revision-1)
+		if err == nil {
+			err = requireRevisionWrite(ctx, tx, result, "service", revision-1, `SELECT revision FROM services WHERE id=?`, service.ID)
+		}
 	}
 	if err != nil {
 		return err
@@ -662,7 +706,11 @@ func bumpAssignmentsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID stri
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Generation, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), id, revision); err != nil {
+		result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Generation, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), id, revision)
+		if err != nil {
+			return err
+		}
+		if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, id); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_acks WHERE assignment_id=?`, id); err != nil {

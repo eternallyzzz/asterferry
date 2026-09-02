@@ -14,6 +14,27 @@ import (
 	"asterferry/internal/domain"
 )
 
+// requireRevisionWrite turns the affected-row count on an optimistic write
+// into the same conflict error used by the preflight revision checks. SQLite
+// serializes writers in this application, but PostgreSQL can let two
+// transactions read the same revision before one of their conditional writes
+// loses the race. Callers must stop the transaction before recording audit,
+// idempotency, or derived-row side effects when that happens.
+func requireRevisionWrite(ctx context.Context, tx *sql.Tx, result sql.Result, resource string, expected int64, revisionQuery string, revisionArgs ...any) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s revision write rows affected: %w", resource, err)
+	}
+	if affected == 1 {
+		return nil
+	}
+	actual := int64(0)
+	if err := tx.QueryRowContext(ctx, revisionQuery, revisionArgs...).Scan(&actual); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read %s revision after conditional write: %w", resource, err)
+	}
+	return &RevisionConflictError{Resource: resource, Expected: expected, Actual: actual}
+}
+
 // RecordEvent persists a node-originated event in the same audit stream used
 // by API writes. Event payloads are intentionally bounded and stored as
 // attributes rather than allowing arbitrary SQL-visible columns.

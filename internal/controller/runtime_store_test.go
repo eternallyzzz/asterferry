@@ -118,3 +118,57 @@ func TestRuntimeStoreSettingsAndSubscription(t *testing.T) {
 		t.Fatalf("advanced operations = %v, %v", enabled, err)
 	}
 }
+
+func TestRuntimeTrafficRollupRefreshesPlacementIdentity(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "runtime-rollup.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateNode(ctx, domain.Node{ID: "node-a", Name: "Node A", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Minute)
+	connection := domain.RuntimeConnection{
+		NodeID:       "node-a",
+		GatewayID:    "gateway-old",
+		AgentID:      "agent-a",
+		AssignmentID: "assignment-a",
+		ServiceID:    "service-a",
+		Protocol:     domain.ProtocolTCP,
+		BytesIn:      10,
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertRuntimeRollupTx(ctx, tx, connection, now, 1, 0, 0, 0, 1); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	connection.GatewayID = "gateway-new"
+	connection.BytesIn = 20
+	if err := upsertRuntimeRollupTx(ctx, tx, connection, now.Add(30*time.Second), 0, 1, 0, 0, 2); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	rollups, err := store.ListRuntimeTraffic(ctx, "node-a", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rollups) != 1 {
+		t.Fatalf("rollups = %#v, want one bucket", rollups)
+	}
+	if rollups[0].GatewayID != "gateway-new" || rollups[0].AgentID != "agent-a" {
+		t.Fatalf("rollup placement identity = %#v, want latest gateway and agent", rollups[0])
+	}
+	if rollups[0].BytesIn != 30 || rollups[0].Opened != 1 || rollups[0].Closed != 1 || rollups[0].ActiveMax != 2 {
+		t.Fatalf("rollup counters = %#v, want accumulated counters", rollups[0])
+	}
+}

@@ -30,6 +30,17 @@ const (
 	databaseBackendPostgres databaseBackend = DatabaseDriverPostgres
 )
 
+// selectForUpdateClause is deliberately backend-specific. SQLite uses the
+// controller's single-writer connection and does not support PostgreSQL's
+// row-lock syntax; PostgreSQL needs it for read/modify/write barriers such as
+// the two-sided assignment acknowledgement.
+func (s *Store) selectForUpdateClause() string {
+	if s != nil && s.backend == databaseBackendPostgres {
+		return " FOR UPDATE"
+	}
+	return ""
+}
+
 func openConfiguredDatabase(ctx context.Context, config Config) (*sql.DB, databaseBackend, error) {
 	backend, err := validateDatabaseConfig(config)
 	if err != nil {

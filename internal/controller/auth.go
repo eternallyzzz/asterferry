@@ -236,7 +236,11 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 		user.PasswordChangedAt = passwordChangedAt
 	}
 	newRevision := user.Revision + 1
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET username=?,password_hash=?,password_changed_at=?,role=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, user.Username, hash, user.PasswordChangedAt.Format(time.RFC3339Nano), user.Role, boolInt(user.Enabled), newRevision, now.Format(time.RFC3339Nano), id, user.Revision); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,password_hash=?,password_changed_at=?,role=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, user.Username, hash, user.PasswordChangedAt.Format(time.RFC3339Nano), user.Role, boolInt(user.Enabled), newRevision, now.Format(time.RFC3339Nano), id, user.Revision)
+	if err != nil {
+		return User{}, err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "user", user.Revision, `SELECT revision FROM users WHERE id=?`, id); err != nil {
 		return User{}, err
 	}
 	if update.Password != nil {
@@ -290,7 +294,11 @@ func (s *Store) DeleteUser(ctx context.Context, id string, options WriteOptions)
 			return errors.New("cannot delete the last enabled admin")
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id=? AND revision=?`, id, revision); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id=? AND revision=?`, id, revision)
+	if err != nil {
+		return err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "user", revision, `SELECT revision FROM users WHERE id=?`, id); err != nil {
 		return err
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "delete", "user", id, revision, nil); err != nil {

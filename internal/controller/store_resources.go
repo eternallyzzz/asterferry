@@ -205,8 +205,11 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 	}
 	affectedNodes = append(affectedNodes, node.ID)
 	node.Revision = current + 1
-	_, err = tx.ExecContext(ctx, `UPDATE nodes SET name=?, labels_json=?, enabled=?, certificate_state=?, certificate_serial=?, revision=?, updated_at=? WHERE id=? AND revision=?`, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET name=?, labels_json=?, enabled=?, certificate_state=?, certificate_serial=?, revision=?, updated_at=? WHERE id=? AND revision=?`, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
 	if err != nil {
+		return err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "node", current, `SELECT revision FROM nodes WHERE id=?`, node.ID); err != nil {
 		return err
 	}
 	// A disabled or non-active identity must not retain an applied placement.
@@ -252,16 +255,34 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	now := time.Now().UTC()
+	type assignmentQuarantineRow struct {
+		id                string
+		gatewayID         string
+		agentID           string
+		document          []byte
+		revision          int64
+		indexedGeneration uint64
+	}
+	assignmentRows := make([]assignmentQuarantineRow, 0)
 	for rows.Next() {
-		var id, gatewayID, agentID string
-		var document []byte
-		var revision int64
-		var indexedGeneration uint64
-		if err := rows.Scan(&id, &gatewayID, &agentID, &document, &revision, &indexedGeneration); err != nil {
+		var row assignmentQuarantineRow
+		if err := rows.Scan(&row.id, &row.gatewayID, &row.agentID, &row.document, &row.revision, &row.indexedGeneration); err != nil {
+			_ = rows.Close()
 			return err
 		}
+		assignmentRows = append(assignmentRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, row := range assignmentRows {
+		id, gatewayID, agentID := row.id, row.gatewayID, row.agentID
+		document, revision, indexedGeneration := row.document, row.revision, row.indexedGeneration
 		var assignment domain.Assignment
 		if err := json.Unmarshal(document, &assignment); err != nil {
 			return fmt.Errorf("decode assignment %q: %w", id, err)
@@ -293,7 +314,11 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Revision, now.Format(time.RFC3339Nano), id, revision); err != nil {
+		result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Revision, now.Format(time.RFC3339Nano), id, revision)
+		if err != nil {
+			return err
+		}
+		if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, id); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_acks WHERE assignment_id=?`, id); err != nil {
@@ -306,7 +331,7 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions) error {
@@ -346,7 +371,11 @@ func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions)
 	if dependents > 0 {
 		return &domain.ApplyError{Code: "resource_conflict", Path: "node", Message: "node has dependent services or assignments"}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=? AND revision=?`, id, revision); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=? AND revision=?`, id, revision)
+	if err != nil {
+		return err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "node", revision, `SELECT revision FROM nodes WHERE id=?`, id); err != nil {
 		return err
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "delete", "node", id, revision, nil); err != nil {
@@ -508,7 +537,11 @@ func (s *Store) DeleteService(ctx context.Context, id string, options WriteOptio
 	} else if assigned {
 		return &domain.ApplyError{Code: "resource_conflict", Path: "service", Message: "assigned service cannot be deleted"}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM services WHERE id=? AND revision=?`, id, revision); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM services WHERE id=? AND revision=?`, id, revision)
+	if err != nil {
+		return err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "service", revision, `SELECT revision FROM services WHERE id=?`, id); err != nil {
 		return err
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "delete", "service", id, revision, nil); err != nil {

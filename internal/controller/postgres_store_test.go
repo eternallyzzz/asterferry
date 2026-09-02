@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,6 +70,195 @@ func TestPostgresStoreSchemaAndRuntimeEvent(t *testing.T) {
 	if err != nil || !enabled {
 		t.Fatalf("advanced operations enabled = %v, err=%v", enabled, err)
 	}
+}
+
+func TestPostgresConcurrentRevisionWriteReturnsConflict(t *testing.T) {
+	storeA, storeB := openTwoPostgresTestStores(t)
+	ctx := context.Background()
+	if err := storeA.CreateNode(ctx, domain.Node{ID: "concurrent-node", Name: "initial", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := storeA.GetNode(ctx, "concurrent-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold each UPDATE long enough for the other transaction to complete its
+	// preflight SELECT against the same committed revision. Without checking
+	// RowsAffected, the second transaction would then commit as a false
+	// success after its conditional UPDATE affected zero rows.
+	if _, err := storeA.db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION test_delay_node_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeA.db.ExecContext(ctx, `CREATE TRIGGER test_delay_node_update_trigger BEFORE UPDATE ON nodes FOR EACH ROW EXECUTE FUNCTION test_delay_node_update()`); err != nil {
+		t.Fatal(err)
+	}
+
+	left := current
+	left.Name = "left"
+	right := current
+	right.Name = "right"
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+	go func() {
+		defer waitGroup.Done()
+		<-start
+		results <- storeA.UpdateNode(ctx, left, WriteOptions{IfMatch: current.Revision, Actor: "left"})
+	}()
+	go func() {
+		defer waitGroup.Done()
+		<-start
+		results <- storeB.UpdateNode(ctx, right, WriteOptions{IfMatch: current.Revision, Actor: "right"})
+	}()
+	close(start)
+	waitGroup.Wait()
+
+	successes := 0
+	conflicts := 0
+	for index := 0; index < 2; index++ {
+		writeErr := <-results
+		switch {
+		case writeErr == nil:
+			successes++
+		case IsRevisionConflict(writeErr):
+			conflicts++
+		default:
+			t.Fatalf("concurrent revision write error = %v", writeErr)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent revision writes: successes=%d conflicts=%d", successes, conflicts)
+	}
+	updated, err := storeA.GetNode(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != current.Revision+1 || (updated.Name != left.Name && updated.Name != right.Name) {
+		t.Fatalf("updated node = %#v, want exactly one committed revision", updated)
+	}
+	var updateAuditCount int
+	if err := storeA.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events WHERE action=? AND resource=? AND resource_id=?`, "update", "node", current.ID).Scan(&updateAuditCount); err != nil {
+		t.Fatal(err)
+	}
+	if updateAuditCount != 1 {
+		t.Fatalf("node update audit count = %d, want one", updateAuditCount)
+	}
+}
+
+func TestPostgresAssignmentAcknowledgementsSerializeByAssignment(t *testing.T) {
+	storeA, storeB := openTwoPostgresTestStores(t)
+	ctx := context.Background()
+	for _, node := range []domain.Node{
+		{ID: "ack-gateway", Name: "Gateway", Enabled: true},
+		{ID: "ack-agent", Name: "Agent", Enabled: true},
+	} {
+		if err := storeA.CreateNode(ctx, node, WriteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := storeA.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "ack-gateway", PublicEndpoints: []string{"gateway.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeA.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "ack-agent"}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeA.PutService(ctx, domain.Service{ID: "ack-service", AgentID: "ack-agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", PublicPort: 18080, Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	assignment := domain.Assignment{
+		ID:         "ack-assignment",
+		GatewayID:  "ack-gateway",
+		AgentID:    "ack-agent",
+		ServiceIDs: []string{"ack-service"},
+		Bindings:   []domain.Binding{{ServiceID: "ack-service", Protocol: domain.ProtocolTCP, Bind: "0.0.0.0", Port: 18080}},
+		Generation: 1,
+		State:      domain.AssignmentPending,
+	}
+	if err := storeA.PutAssignment(ctx, assignment, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// This transaction represents the Gateway's ACK while it is still
+	// uncommitted. The Agent result must lock the assignment row and wait; if
+	// it only reads the row, it can miss this ACK and leave the barrier pending.
+	lockTx, err := storeA.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lockedID string
+	if err := lockTx.QueryRowContext(ctx, `SELECT id FROM assignments WHERE id=? FOR UPDATE`, assignment.ID).Scan(&lockedID); err != nil {
+		_ = lockTx.Rollback()
+		t.Fatal(err)
+	}
+	ackTime := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := lockTx.ExecContext(ctx, `INSERT INTO assignment_acks(assignment_id,node_id,generation,status,error_code,updated_at) VALUES(?,?,?,?,?,?)`, assignment.ID, assignment.GatewayID, assignment.Generation, "applied", "", ackTime); err != nil {
+		_ = lockTx.Rollback()
+		t.Fatal(err)
+	}
+
+	type result struct {
+		changed []domain.Assignment
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		changed, applyErr := storeB.applyNodeResult(ctx, assignment.AgentID, assignment.Generation, true, "agent")
+		done <- result{changed: changed, err: applyErr}
+	}()
+	select {
+	case early := <-done:
+		_ = lockTx.Rollback()
+		t.Fatalf("agent acknowledgement completed before the gateway transaction committed: changed=%#v err=%v", early.changed, early.err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	if err := lockTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case applied := <-done:
+		if applied.err != nil {
+			t.Fatal(applied.err)
+		}
+		if len(applied.changed) != 1 || applied.changed[0].State != domain.AssignmentApplied {
+			t.Fatalf("agent acknowledgement result = %#v, want applied assignment", applied)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent acknowledgement remained blocked after gateway commit")
+	}
+
+	current, err := storeA.GetAssignment(ctx, assignment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != domain.AssignmentApplied {
+		t.Fatalf("assignment state = %q, want applied", current.State)
+	}
+}
+
+func openTwoPostgresTestStores(t *testing.T) (*Store, *Store) {
+	t.Helper()
+	baseURL := strings.TrimSpace(os.Getenv("ASTERFERRY_TEST_POSTGRES_URL"))
+	if baseURL == "" {
+		t.Skip("ASTERFERRY_TEST_POSTGRES_URL is not set")
+	}
+	_, databaseURL := createPostgresTestSchema(t, baseURL)
+	config := Config{DatabaseDriver: DatabaseDriverPostgres, DatabaseURL: databaseURL, DatabaseMaxOpenConns: 4}
+	first, err := OpenStoreWithConfig(config, testMasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenStoreWithConfig(config, testMasterKey)
+	if err != nil {
+		_ = first.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = second.Close()
+		_ = first.Close()
+	})
+	return first, second
 }
 
 func TestSQLiteToPostgresMigration(t *testing.T) {

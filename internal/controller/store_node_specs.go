@@ -154,7 +154,11 @@ func (s *Store) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, o
 	if isInsert {
 		_, err = tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, spec.NodeID, string(spec.Kind), document, revision, now)
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE node_specs SET kind=?,document_json=?,revision=?,updated_at=? WHERE node_id=? AND revision=?`, string(spec.Kind), document, revision, now, spec.NodeID, revision-1)
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, `UPDATE node_specs SET kind=?,document_json=?,revision=?,updated_at=? WHERE node_id=? AND revision=?`, string(spec.Kind), document, revision, now, spec.NodeID, revision-1)
+		if err == nil {
+			err = requireRevisionWrite(ctx, tx, result, "node_spec", revision-1, `SELECT revision FROM node_specs WHERE node_id=?`, spec.NodeID)
+		}
 	}
 	if err != nil {
 		return err
@@ -220,7 +224,11 @@ func (s *Store) DeleteNodeSpec(ctx context.Context, nodeID string, options Write
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM node_specs WHERE node_id=? AND revision=?`, nodeID, revision); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM node_specs WHERE node_id=? AND revision=?`, nodeID, revision)
+	if err != nil {
+		return err
+	}
+	if err := requireRevisionWrite(ctx, tx, result, "node_spec", revision, `SELECT revision FROM node_specs WHERE node_id=?`, nodeID); err != nil {
 		return err
 	}
 	if err := clearDesiredSnapshotTx(ctx, tx, nodeID); err != nil {
