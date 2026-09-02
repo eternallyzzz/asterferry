@@ -410,10 +410,12 @@ asterferry controller backup \
   --output ./backups
 ```
 
-This pre-1.0 generation uses a fresh schema v8. It intentionally has no
-in-place migration command: `OpenStore` rejects v3/v4/v5/v6/v7 databases.
-Export any needed configuration, keep the complete backup for rollback, and
-initialize a new Controller directory during the maintenance window.
+This pre-1.0 generation uses SQLite schema v9. A v8 database receives the
+additive runtime-observability migration on startup; older or unknown database
+generations remain incompatible. Back up the complete Controller directory,
+keep the backup for rollback, and perform the upgrade during a maintenance
+window. See [the operations guide](operations.en.md) for runtime visibility and
+the advanced-operation switch.
 
 When the Controller is temporarily unavailable, nodes continue using their encrypted last-known-good snapshot. New configuration, scheduling and certificate operations require the Controller to recover. Do not delete `controller/`; it contains the database, CA, TLS identity and master key.
 

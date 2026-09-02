@@ -93,7 +93,7 @@ func (s *Store) PublishAction(ctx context.Context, nodeID, name, payload string)
 }
 
 func validateRuntimeAction(name string) error {
-	if name != "drain" && name != "reconnect" && name != "resync" {
+	if name != "drain" && name != "reconnect" && name != "resync" && name != "runtime_connection" && name != "clear_runtime_controls" {
 		return errors.New("runtime action name is unsupported")
 	}
 	return nil

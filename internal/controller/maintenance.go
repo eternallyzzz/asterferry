@@ -35,5 +35,8 @@ func (s *Store) PruneHistory(ctx context.Context, now time.Time, idempotencyTTL,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM node_bootstraps WHERE expires_at <= ?`, now.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.PruneRuntimeHistory(ctx, now)
 }

@@ -89,6 +89,10 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if len(parts) >= 2 && parts[1] == "runtime" {
+		s.nodeRuntimeAction(w, r, nodeID, parts[2:])
+		return
+	}
 	if len(parts) == 2 && r.Method == http.MethodGet && (parts[1] == "observed" || parts[1] == "snapshot" || parts[1] == "desired") {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return

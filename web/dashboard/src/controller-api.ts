@@ -312,6 +312,94 @@ export interface ProxySpec {
   enabled: boolean;
 }
 
+export interface RuntimeRateLimit {
+  direction: "in" | "out" | "both";
+  bytes_per_second: number;
+  burst_bytes: number;
+  expires_at: string;
+}
+
+export interface RuntimeConnection {
+  id: string;
+  type: "session" | "tcp" | "udp_flow" | "egress" | string;
+  node_id: string;
+  peer_node_id?: string;
+  gateway_id?: string;
+  agent_id?: string;
+  assignment_id?: string;
+  service_id?: string;
+  protocol: string;
+  source_ip?: string;
+  source_port?: number;
+  target?: string;
+  parent_session_id?: string;
+  started_at: string;
+  last_activity_at: string;
+  ended_at?: string;
+  state: "active" | "closed" | "unknown" | string;
+  close_reason?: string;
+  bytes_in: number;
+  bytes_out: number;
+  rate_in_bps: number;
+  rate_out_bps: number;
+  limit?: RuntimeRateLimit;
+}
+
+export interface RuntimeTrafficRollup {
+  bucket_start: string;
+  node_id: string;
+  gateway_id?: string;
+  agent_id?: string;
+  assignment_id?: string;
+  service_id?: string;
+  protocol: string;
+  bytes_in: number;
+  bytes_out: number;
+  opened: number;
+  closed: number;
+  rejected: number;
+  rate_limited: number;
+  active_max: number;
+}
+
+export interface RuntimeEventRecord {
+  id: number;
+  event_id: string;
+  node_id: string;
+  connection_id?: string;
+  type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RuntimeSettings {
+  advanced_operations_enabled: boolean;
+  runtime_retention_days: number;
+}
+
+export function listRuntimeConnections(nodeID?: string, query = "", token?: string): Promise<{ items: RuntimeConnection[] }> {
+  const params = new URLSearchParams(query);
+  if (nodeID) params.set("node_id", nodeID);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<{ items: RuntimeConnection[] }>(`/runtime/connections${suffix}`, {}, token);
+}
+export function getNodeRuntimeConnections(nodeID: string, token?: string): Promise<{ items: RuntimeConnection[] }> { return listRuntimeConnections(nodeID, "limit=500", token); }
+export function listRuntimeTraffic(nodeID?: string, token?: string): Promise<{ items: RuntimeTrafficRollup[] }> { return request(`/runtime/traffic${nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : ""}`, {}, token); }
+export function listRuntimeEvents(nodeID?: string, token?: string, limit = 100): Promise<{ items: RuntimeEventRecord[] }> { const params = new URLSearchParams({ limit: String(limit) }); if (nodeID) params.set("node_id", nodeID); return request(`/runtime/events?${params.toString()}`, {}, token); }
+export function getRuntimeSettings(token?: string): Promise<RuntimeSettings> { return request<RuntimeSettings>("/runtime/settings", {}, token); }
+export function setRuntimeSettings(enabled: boolean, token?: string, idempotencyKey?: string): Promise<RuntimeSettings> { return request<RuntimeSettings>("/runtime/settings", { method: "PUT", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify({ advanced_operations_enabled: enabled }) }, token); }
+export interface RuntimeActionInput {
+  action: "disconnect" | "rate_limit" | "clear_limit";
+  selector?: { connection_id?: string; source_ip?: string; peer_node_id?: string; assignment_id?: string; service_id?: string; protocol?: string };
+  direction?: "in" | "out" | "both";
+  bytes_per_second?: number;
+  burst_bytes?: number;
+  ttl_seconds?: number;
+}
+export function runtimeAction(nodeID: string, input: RuntimeActionInput, token?: string, idempotencyKey?: string): Promise<{ node_id: string; action: string; state: string }> { return request(`/nodes/${encodeURIComponent(nodeID)}/runtime/actions`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
+export function runtimeConnectionAction(nodeID: string, connectionID: string, input: Omit<RuntimeActionInput, "selector">, token?: string, idempotencyKey?: string): Promise<{ node_id: string; action: string; state: string }> { return request(`/nodes/${encodeURIComponent(nodeID)}/runtime/connections/${encodeURIComponent(connectionID)}/actions`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
+export function runtimeStreamURL(nodeID?: string): string { return `/api/v1/runtime/stream${nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : ""}`; }
+
 export interface RouteRule {
   name: string;
   cidrs?: string[];

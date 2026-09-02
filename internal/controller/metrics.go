@@ -18,35 +18,43 @@ import (
 // ControllerMetrics contains only bounded-label metrics. Resource IDs and
 // arbitrary observed map keys are intentionally never used as labels.
 type ControllerMetrics struct {
-	registry       *prometheus.Registry
-	up             prometheus.Gauge
-	sqliteUp       prometheus.Gauge
-	httpReq        *prometheus.CounterVec
-	httpTime       *prometheus.HistogramVec
-	grpcReq        *prometheus.CounterVec
-	streams        prometheus.Gauge
-	schedRun       *prometheus.CounterVec
-	schedTime      prometheus.Histogram
-	observedNodes  *prometheus.GaugeVec
-	snapshotGen    *prometheus.GaugeVec
-	activeStreams  *prometheus.GaugeVec
-	activeSessions *prometheus.GaugeVec
-	activeEgress   *prometheus.GaugeVec
-	listeners      *prometheus.GaugeVec
-	geoipUp        *prometheus.GaugeVec
-	mu             sync.Mutex
-	nodes          map[string]observedMetric
+	registry          *prometheus.Registry
+	up                prometheus.Gauge
+	sqliteUp          prometheus.Gauge
+	httpReq           *prometheus.CounterVec
+	httpTime          *prometheus.HistogramVec
+	grpcReq           *prometheus.CounterVec
+	streams           prometheus.Gauge
+	schedRun          *prometheus.CounterVec
+	schedTime         prometheus.Histogram
+	observedNodes     *prometheus.GaugeVec
+	snapshotGen       *prometheus.GaugeVec
+	activeStreams     *prometheus.GaugeVec
+	activeSessions    *prometheus.GaugeVec
+	activeEgress      *prometheus.GaugeVec
+	activeConnections *prometheus.GaugeVec
+	activeFlows       *prometheus.GaugeVec
+	bytesIn           *prometheus.GaugeVec
+	bytesOut          *prometheus.GaugeVec
+	listeners         *prometheus.GaugeVec
+	geoipUp           *prometheus.GaugeVec
+	mu                sync.Mutex
+	nodes             map[string]observedMetric
 }
 
 type observedMetric struct {
-	kind       string
-	healthy    bool
-	generation uint64
-	streams    float64
-	sessions   float64
-	egress     float64
-	geoipUp    bool
-	listeners  map[string]int
+	kind        string
+	healthy     bool
+	generation  uint64
+	streams     float64
+	sessions    float64
+	egress      float64
+	connections float64
+	flows       float64
+	bytesIn     float64
+	bytesOut    float64
+	geoipUp     bool
+	listeners   map[string]int
 }
 
 func newControllerMetrics() *ControllerMetrics {
@@ -64,9 +72,13 @@ func newControllerMetrics() *ControllerMetrics {
 	m.activeStreams = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_streams", Help: "Observed active data streams by node kind."}, []string{"kind"})
 	m.activeSessions = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_sessions", Help: "Observed active sessions by node kind."}, []string{"kind"})
 	m.activeEgress = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_egress", Help: "Observed active egress connections by node kind."}, []string{"kind"})
+	m.activeConnections = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_connections", Help: "Observed active runtime connections by node kind."}, []string{"kind"})
+	m.activeFlows = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_flows", Help: "Observed active runtime flows by node kind."}, []string{"kind"})
+	m.bytesIn = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_bytes_in_total", Help: "Observed runtime bytes received by node kind."}, []string{"kind"})
+	m.bytesOut = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_bytes_out_total", Help: "Observed runtime bytes sent by node kind."}, []string{"kind"})
 	m.listeners = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_listeners", Help: "Observed listeners by protocol."}, []string{"protocol"})
 	m.geoipUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Number of observed nodes with an available optional GeoIP database, by node kind."}, []string{"kind"})
-	for _, collector := range []prometheus.Collector{m.up, m.sqliteUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.listeners, m.geoipUp} {
+	for _, collector := range []prometheus.Collector{m.up, m.sqliteUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.activeConnections, m.activeFlows, m.bytesIn, m.bytesOut, m.listeners, m.geoipUp} {
 		m.registry.MustRegister(collector)
 	}
 	m.up.Set(1)
@@ -132,7 +144,7 @@ func (m *ControllerMetrics) observeNode(nodeID, kind string, observed domain.Obs
 	if m == nil {
 		return
 	}
-	current := observedMetric{kind: kind, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], geoipUp: observed.Metrics["geoip_up"] >= 0.5, listeners: make(map[string]int)}
+	current := observedMetric{kind: kind, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], connections: observed.Metrics["active_connections"], flows: observed.Metrics["active_flows"], bytesIn: observed.Metrics["runtime_bytes_in_total"], bytesOut: observed.Metrics["runtime_bytes_out_total"], geoipUp: observed.Metrics["geoip_up"] >= 0.5, listeners: make(map[string]int)}
 	for _, listener := range observed.Listeners {
 		current.listeners[listener.Protocol]++
 	}
@@ -153,7 +165,7 @@ func (m *ControllerMetrics) removeNode(nodeID string) {
 }
 
 func (m *ControllerMetrics) recomputeLocked() {
-	byKind := make(map[string]struct{ healthy, degraded, streams, sessions, egress, generation, geoipUp float64 })
+	byKind := make(map[string]struct{ healthy, degraded, streams, sessions, egress, connections, flows, bytesIn, bytesOut, generation, geoipUp float64 })
 	listenerTotals := make(map[string]float64)
 	for _, value := range m.nodes {
 		aggregate := byKind[value.kind]
@@ -165,6 +177,10 @@ func (m *ControllerMetrics) recomputeLocked() {
 		aggregate.streams += value.streams
 		aggregate.sessions += value.sessions
 		aggregate.egress += value.egress
+		aggregate.connections += value.connections
+		aggregate.flows += value.flows
+		aggregate.bytesIn += value.bytesIn
+		aggregate.bytesOut += value.bytesOut
 		if value.geoipUp {
 			aggregate.geoipUp++
 		}
@@ -182,6 +198,10 @@ func (m *ControllerMetrics) recomputeLocked() {
 		m.activeStreams.WithLabelValues(kind).Set(aggregate.streams)
 		m.activeSessions.WithLabelValues(kind).Set(aggregate.sessions)
 		m.activeEgress.WithLabelValues(kind).Set(aggregate.egress)
+		m.activeConnections.WithLabelValues(kind).Set(aggregate.connections)
+		m.activeFlows.WithLabelValues(kind).Set(aggregate.flows)
+		m.bytesIn.WithLabelValues(kind).Set(aggregate.bytesIn)
+		m.bytesOut.WithLabelValues(kind).Set(aggregate.bytesOut)
 		m.snapshotGen.WithLabelValues(kind).Set(aggregate.generation)
 		m.geoipUp.WithLabelValues(kind).Set(aggregate.geoipUp)
 	}
@@ -215,7 +235,7 @@ func routeLabel(path string) string {
 		return path
 	}
 	if len(path) >= len("/api/v1/") && path[:len("/api/v1/")] == "/api/v1/" {
-		for _, prefix := range []string{"auth/login", "auth/logout", "me", "nodes", "node-installations", "services", "assignments", "enrollment-tokens", "audit", "events", "users"} {
+		for _, prefix := range []string{"auth/login", "auth/logout", "me", "nodes", "node-installations", "services", "assignments", "enrollment-tokens", "audit", "events", "runtime", "users"} {
 			base := "/api/v1/" + prefix
 			if path == base || (len(path) > len(base) && path[:len(base)+1] == base+"/") {
 				return base

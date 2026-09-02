@@ -11,6 +11,7 @@ tags:
   - name: resources
   - name: operations
   - name: audit
+  - name: runtime
 paths:
   /healthz:
     get:
@@ -398,6 +399,84 @@ paths:
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Revoked } }
+  /runtime/settings:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Runtime operation settings } }
+    put:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [advanced_operations_enabled], properties: { advanced_operations_enabled: { type: boolean } } } } }
+      responses: { '200': { description: Runtime operation settings updated } }
+  /runtime/connections:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { name: node_id, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: source_ip, in: query, schema: { type: string, description: IPv4 or IPv6 address } }
+        - { name: assignment_id, in: query, schema: { type: string } }
+        - { name: service_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses: { '200': { description: Current and recently closed connection metadata } }
+  /runtime/events:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: node_id, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }]
+      responses: { '200': { description: Runtime lifecycle events retained for 30 days } }
+  /runtime/traffic:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: node_id, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 2000 } }]
+      responses: { '200': { description: Per-minute traffic rollups } }
+  /runtime/stream:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: node_id, in: query, schema: { type: string } }]
+      responses: { '200': { description: Server-sent runtime metadata change notifications, content: { text/event-stream: {} } } }
+  /nodes/{nodeId}/runtime/actions:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    post:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeAction' } } }
+      responses: { '202': { description: Runtime action queued }, '403': { description: Advanced operations are disabled } }
+  /nodes/{nodeId}/runtime/connections:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { name: state, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: source_ip, in: query, schema: { type: string, description: IPv4 or IPv6 address } }
+        - { name: peer_node_id, in: query, schema: { type: string } }
+        - { name: assignment_id, in: query, schema: { type: string } }
+        - { name: service_id, in: query, schema: { type: string } }
+        - { name: protocol, in: query, schema: { type: string, enum: [tcp, udp, quic] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses: { '200': { description: Current and recently closed connection metadata for one Node } }
+  /nodes/{nodeId}/runtime/connections/{connectionId}/actions:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeAction' } } }
+      responses: { '202': { description: Runtime action queued }, '403': { description: Advanced operations are disabled } }
   /audit:
     get:
       tags: [audit]
@@ -513,6 +592,17 @@ components:
     Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
     EnrollmentTokenRequest: { type: object, properties: { ttl_seconds: { type: integer, minimum: 1, maximum: 900 } } }
     APITokenRequest: { type: object, required: [name], properties: { name: { type: string }, expires_at: { type: string, format: date-time } } }
+    RuntimeAction:
+      type: object
+      required: [action]
+      description: A selector is required for a node-level action. The connection action path supplies connection_id from the URL.
+      properties:
+        action: { type: string, enum: [disconnect, rate_limit, clear_limit] }
+        selector: { type: object, properties: { connection_id: { type: string }, source_ip: { type: string }, peer_node_id: { type: string }, assignment_id: { type: string }, service_id: { type: string }, protocol: { type: string } } }
+        direction: { type: string, enum: [in, out, both] }
+        bytes_per_second: { type: integer, format: int64, minimum: 1 }
+        burst_bytes: { type: integer, format: int64, minimum: 1 }
+        ttl_seconds: { type: integer, minimum: 60, maximum: 86400 }
     SecretAlreadyCreated:
       type: object
       required: [error, token_recoverable]

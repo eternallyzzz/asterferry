@@ -17,6 +17,8 @@ import {
   listUsers,
   revokeEnrollmentToken,
   updateUser,
+  getRuntimeSettings,
+  setRuntimeSettings,
   type ControllerUser,
   type EnrollmentTokenMeta,
 } from "../controller-api";
@@ -28,6 +30,8 @@ const notify = useNotify();
 const loading = ref(true);
 const users = ref<ControllerUser[]>([]);
 const tokens = ref<EnrollmentTokenMeta[]>([]);
+const advancedOperationsEnabled = ref(false);
+const savingRuntimeSettings = ref(false);
 
 const userFormOpen = ref(false);
 const userForm = ref({ username: "", password: "", role: "viewer" as ControllerUser["role"] });
@@ -45,9 +49,10 @@ const revoking = ref(false);
 
 async function load() {
   try {
-    const [userResult, tokenResult] = await Promise.all([listUsers(), listEnrollmentTokens()]);
+    const [userResult, tokenResult, runtimeSettings] = await Promise.all([listUsers(), listEnrollmentTokens(), getRuntimeSettings()]);
     users.value = userResult.items;
     tokens.value = tokenResult.items;
+    advancedOperationsEnabled.value = runtimeSettings.advanced_operations_enabled;
   } catch (caught) {
     notify.error(describeError(caught));
   } finally {
@@ -56,6 +61,20 @@ async function load() {
 }
 
 const { refresh } = usePolling(load);
+
+async function toggleAdvancedOperations() {
+  savingRuntimeSettings.value = true;
+  const next = !advancedOperationsEnabled.value;
+  try {
+    const result = await setRuntimeSettings(next, undefined, newIdempotencyKey());
+    advancedOperationsEnabled.value = result.advanced_operations_enabled;
+    notify.success(next ? "高级运行时操作已开启。" : "高级运行时操作已关闭，在线节点的限速策略已请求清除。" );
+  } catch (caught) {
+    notify.error(describeError(caught));
+  } finally {
+    savingRuntimeSettings.value = false;
+  }
+}
 
 function isExpired(item: EnrollmentTokenMeta): boolean {
   return new Date(item.expires_at).getTime() < Date.now();
@@ -175,6 +194,17 @@ async function confirmRevoke() {
           <EmptyState title="暂无用户" />
         </template>
       </DataTable>
+    </PanelCard>
+
+    <PanelCard title="高级运行时运维">
+      <div class="runtime-setting">
+        <div>
+          <strong>连接级操作</strong>
+          <p class="form-note">开启后，Operator 才能在节点详情中断开单条连接、按来源/业务选择连接并动态限速。基础连接 IP、协议、带宽与状态展示始终可见；不采集业务载荷。</p>
+        </div>
+        <button type="button" :class="['af-button', advancedOperationsEnabled ? 'danger' : 'primary']" :disabled="savingRuntimeSettings" @click="toggleAdvancedOperations">{{ savingRuntimeSettings ? "保存中…" : advancedOperationsEnabled ? "关闭高级操作" : "开启高级操作" }}</button>
+      </div>
+      <p class="form-note">运行时事件与分钟流量汇总默认保留 30 天。</p>
     </PanelCard>
 
     <div class="enroll-grid">
@@ -332,6 +362,15 @@ async function confirmRevoke() {
   margin: 0;
   color: var(--af-muted);
   line-height: 1.7;
+}
+.runtime-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+@media (max-width: 700px) {
+  .runtime-setting { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 900px) {
   .enroll-grid { grid-template-columns: 1fr; }

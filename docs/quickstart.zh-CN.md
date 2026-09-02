@@ -378,9 +378,10 @@ asterferry controller backup \
   --output ./backups
 ```
 
-当前 pre-1.0 版本使用全新的 schema v8，故意不提供原地迁移命令；
-`OpenStore` 会拒绝 v3/v4/v5/v6/v7 数据库。升级时先导出需要保留的业务配置，
-保留完整备份用于回滚，然后在维护窗口重新初始化 Controller 目录。
+当前 pre-1.0 版本使用 SQLite schema v9。v8 数据库启动时会执行一次附加式
+运行时观测迁移；更早或未知代际仍会被 `OpenStore` 拒绝。升级前备份完整
+Controller 目录并保留回滚副本，在维护窗口执行升级。运行时观测和高级
+操作开关见[运维指南](operations.zh-CN.md)。
 
 Controller 暂时不可用时，节点会继续使用加密的 last-known-good 快照；但新的配置、调度和证书操作需要 Controller 恢复后才能完成。不要删除 `controller/`，其中包含数据库、CA、TLS 身份和 master key。
 

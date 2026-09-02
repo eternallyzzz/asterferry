@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"asterferry/internal/atomicfile"
@@ -479,7 +480,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	}
 	state := r.observedState()
 	appliedChecksum := r.reconciler.AppliedChecksum()
-	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.SchemaVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5"}}}}); err != nil {
+	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.SchemaVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5", "runtime-telemetry-v1", "runtime-control-v1"}}}}); err != nil {
 		return err
 	}
 	r.reconciler.MarkConnected(time.Now().UTC())
@@ -498,6 +499,13 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	}
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(connectionCtx)
 	defer cancelHeartbeat()
+	var runtimeTelemetryStarted atomic.Bool
+	startRuntimeTelemetry := func() {
+		if runtimeTelemetryStarted.Swap(true) {
+			return
+		}
+		go r.runtimeTelemetryLoop(connectionCtx, send)
+	}
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -534,6 +542,23 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				// reconnect/revocation drain before that acknowledgement.
 				if engine := r.Engine(); engine != nil {
 					engine.EndDrain()
+				}
+				if runtimeActionAllows(action, "runtime-telemetry-v1") {
+					startRuntimeTelemetry()
+				}
+			case "runtime_connection", "clear_runtime_controls":
+				dataPlane := r.DataPlane()
+				var affected int
+				var actionErr error
+				if dataPlane == nil {
+					actionErr = errors.New("data-plane runtime is not configured")
+				} else if !runtimeTelemetryStarted.Load() && action.GetName() == "runtime_connection" {
+					actionErr = errors.New("runtime control capability was not negotiated")
+				} else {
+					affected, actionErr = dataPlane.ApplyRuntimeAction(ctx, action.GetName(), action.GetPayloadJson())
+				}
+				if err := r.sendRuntimeActionResult(send, action.GetId(), action.GetName(), affected, actionErr); err != nil {
+					return err
 				}
 			case "drain":
 				if engine := r.Engine(); engine != nil {

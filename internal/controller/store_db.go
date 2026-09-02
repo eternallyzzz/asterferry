@@ -13,15 +13,14 @@ import (
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 8
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v8"
+	currentDBSchema     = 9
+	dbSchemaFingerprint = "asterferry-controller-sqlite-v9"
 	maxSnapshotDocument = 16 << 20
 )
 
-// ErrIncompatibleDatabase is returned deliberately instead of attempting an
-// in-place migration. Controller state is a new generation: an operator must
-// create a fresh database with `controller init` (or restore a backup made by
-// this generation) when the marker is absent or different.
+// ErrIncompatibleDatabase is returned for unknown database generations. The
+// immediately previous v8 generation has a small additive migration path for
+// the runtime operations tables; older or unmarked files remain fail-closed.
 var ErrIncompatibleDatabase = errors.New("controller database belongs to an incompatible generation")
 
 func OpenStore(path string, masterKey []byte) (*Store, error) {
@@ -59,6 +58,14 @@ func OpenStore(path string, masterKey []byte) (*Store, error) {
 	if err := store.initializeSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// A process restart invalidates the Controller's view of live Node
+	// connections. The next Node snapshot will restore active rows; until then
+	// keep the read-only operations view fail-safe instead of showing stale
+	// connections as live.
+	if err := store.markRuntimeConnectionsUnknownOnStartup(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("reset runtime connection liveness: %w", err)
 	}
 	return store, nil
 }
@@ -99,7 +106,19 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 		return err
 	}
 	if !empty && !compatible {
-		return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, dbSchemaFingerprint)
+		migrated, migrateErr := migrateV8ToV9(ctx, s.db)
+		if migrateErr != nil {
+			return migrateErr
+		}
+		if migrated {
+			compatible, empty, err = inspectDatabase(ctx, s.db)
+			if err != nil {
+				return err
+			}
+		}
+		if !empty && !compatible {
+			return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, dbSchemaFingerprint)
+		}
 	}
 	if compatible {
 		if err := validateRequiredTables(ctx, s.db); err != nil {
@@ -162,6 +181,7 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 		`CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at)`,
 		`CREATE INDEX idx_node_bootstraps_expires ON node_bootstraps(expires_at)`,
 	}
+	statements = append(statements, runtimeSchemaStatements()...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -176,7 +196,7 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 		_ = tx.Rollback()
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=8`); err != nil {
+	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=9`); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -219,22 +239,26 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 	// file. Validate the columns that are read by the store before accepting
 	// the marker, especially the v5 password invalidation marker.
 	requiredColumns := map[string][]string{
-		"schema_meta":         {"key", "value"},
-		"users":               {"id", "username", "password_hash", "password_changed_at", "role", "enabled", "revision", "created_at", "updated_at"},
-		"api_tokens":          {"id", "user_id", "token_hash", "name", "expires_at", "revoked_at", "created_at"},
-		"nodes":               {"id", "name", "labels_json", "enabled", "certificate_state", "certificate_serial", "revision", "created_at", "updated_at"},
-		"node_specs":          {"node_id", "kind", "document_json", "revision", "updated_at"},
-		"services":            {"id", "agent_id", "document_json", "revision", "updated_at"},
-		"service_bindings":    {"service_id", "gateway_id", "protocol", "bind", "port"},
-		"assignments":         {"id", "gateway_id", "agent_id", "document_json", "generation", "revision", "updated_at"},
-		"assignment_services": {"assignment_id", "service_id"},
-		"assignment_acks":     {"assignment_id", "node_id", "generation", "status", "error_code", "updated_at"},
-		"desired_snapshots":   {"node_id", "generation", "checksum", "document_json", "created_at"},
-		"observed_states":     {"node_id", "generation", "document_json", "updated_at"},
-		"audit_events":        {"id", "actor", "action", "resource", "resource_id", "revision", "attributes_json", "created_at"},
-		"idempotency_keys":    {"key", "request_hash", "response_json", "created_at"},
-		"enrollment_tokens":   {"id", "token_hash", "expires_at", "used_at", "created_at"},
-		"node_bootstraps":     {"node_id", "name", "labels_json", "enabled", "platform", "arch", "spec_json", "token_hash", "expires_at", "created_at"},
+		"schema_meta":             {"key", "value"},
+		"users":                   {"id", "username", "password_hash", "password_changed_at", "role", "enabled", "revision", "created_at", "updated_at"},
+		"api_tokens":              {"id", "user_id", "token_hash", "name", "expires_at", "revoked_at", "created_at"},
+		"nodes":                   {"id", "name", "labels_json", "enabled", "certificate_state", "certificate_serial", "revision", "created_at", "updated_at"},
+		"node_specs":              {"node_id", "kind", "document_json", "revision", "updated_at"},
+		"services":                {"id", "agent_id", "document_json", "revision", "updated_at"},
+		"service_bindings":        {"service_id", "gateway_id", "protocol", "bind", "port"},
+		"assignments":             {"id", "gateway_id", "agent_id", "document_json", "generation", "revision", "updated_at"},
+		"assignment_services":     {"assignment_id", "service_id"},
+		"assignment_acks":         {"assignment_id", "node_id", "generation", "status", "error_code", "updated_at"},
+		"desired_snapshots":       {"node_id", "generation", "checksum", "document_json", "created_at"},
+		"observed_states":         {"node_id", "generation", "document_json", "updated_at"},
+		"audit_events":            {"id", "actor", "action", "resource", "resource_id", "revision", "attributes_json", "created_at"},
+		"idempotency_keys":        {"key", "request_hash", "response_json", "created_at"},
+		"enrollment_tokens":       {"id", "token_hash", "expires_at", "used_at", "created_at"},
+		"node_bootstraps":         {"node_id", "name", "labels_json", "enabled", "platform", "arch", "spec_json", "token_hash", "expires_at", "created_at"},
+		"runtime_connections":     {"node_id", "id", "type", "state", "peer_node_id", "gateway_id", "agent_id", "assignment_id", "service_id", "protocol", "source_ip", "source_port", "target", "parent_session_id", "started_at", "last_activity_at", "ended_at", "close_reason", "bytes_in", "bytes_out", "rate_in", "rate_out", "limit_json", "updated_at"},
+		"runtime_events":          {"id", "event_id", "node_id", "connection_id", "event_type", "payload_json", "created_at"},
+		"runtime_traffic_rollups": {"bucket_start", "node_id", "gateway_id", "agent_id", "assignment_id", "service_id", "protocol", "bytes_in", "bytes_out", "opened", "closed", "rejected", "rate_limited", "active_max"},
+		"runtime_settings":        {"key", "value", "updated_at"},
 	}
 	for table, columns := range requiredColumns {
 		for _, column := range columns {
@@ -248,7 +272,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB) error {
 			}
 		}
 	}
-	for _, index := range []string{"idx_node_specs_kind", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"} {
+	for _, index := range append([]string{"idx_node_specs_kind", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"}, runtimeSchemaIndexes()...) {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil {
 			return err
@@ -266,6 +290,7 @@ func currentSchemaTables() []string {
 		"service_bindings", "assignments", "assignment_services", "assignment_acks",
 		"desired_snapshots", "observed_states", "audit_events", "idempotency_keys",
 		"enrollment_tokens", "node_bootstraps",
+		"runtime_connections", "runtime_events", "runtime_traffic_rollups", "runtime_settings",
 	}
 }
 
@@ -295,6 +320,12 @@ func (s *Store) Close() error {
 			delete(s.changeSubs, id)
 		}
 		s.changeMu.Unlock()
+		s.runtimeMu.Lock()
+		for id, subscription := range s.runtimeSubs {
+			close(subscription.ch)
+			delete(s.runtimeSubs, id)
+		}
+		s.runtimeMu.Unlock()
 		s.err = s.db.Close()
 	})
 	return s.err

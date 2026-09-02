@@ -9,7 +9,7 @@ import (
 // state remains in SQLite; consumers only use these node IDs to limit the
 // next reconciliation pass.
 type ResourceChange struct {
-	NodeIDs         []string
+	NodeIDs []string
 	// PendingServices asks the reconciliation loop to retry services that do
 	// not currently have an assignment. It is intentionally separate from
 	// NodeIDs because that pass scans every Agent.

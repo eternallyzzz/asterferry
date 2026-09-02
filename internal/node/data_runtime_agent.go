@@ -67,9 +67,25 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 					_ = session.Close()
 					_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP session limit reached")
 				} else {
-					state.setAgentSession(assignment.ID, session)
+					sourceIP, sourcePort := runtimeAddr(connection.RemoteAddr())
+					runtimeSession := state.openRuntime(domain.RuntimeConnection{
+						Type:         domain.RuntimeConnectionSession,
+						NodeID:       d.engine.NodeID(),
+						PeerNodeID:   assignment.GatewayID,
+						GatewayID:    assignment.GatewayID,
+						AgentID:      assignment.AgentID,
+						AssignmentID: assignment.ID,
+						Protocol:     "quic",
+						SourceIP:     sourceIP,
+						SourcePort:   sourcePort,
+						StartedAt:    time.Now().UTC(),
+					}, func() { _ = session.Close() })
+					state.setAgentSessionWithRuntimeID(assignment.ID, session, runtimeSession.id())
 					d.serveAgentSession(state, session)
 					state.clearAgentSession(assignment.ID, session)
+					if runtimeSession != nil {
+						runtimeSession.close(domain.RuntimeCloseSession)
+					}
 					d.engine.ReleaseSession()
 					_ = session.Close()
 				}
@@ -163,8 +179,17 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 			}
 			flowMu.Unlock()
 			flow.lastUnixNano.Store(time.Now().UnixNano())
+			if flow.runtime != nil {
+				if limiter := flow.runtime.limiter("in"); limiter != nil {
+					if waitErr := limiter.wait(len(payload)); waitErr != nil {
+						continue
+					}
+				}
+			}
 			if _, writeErr := flow.conn.Write(payload); writeErr != nil {
 				d.logger.Warn("data-plane Agent UDP target write failed", "flow_id", header.FlowID, "error", writeErr)
+			} else if flow.runtime != nil {
+				flow.runtime.touch(uint64(len(payload)), 0)
 			}
 		}
 	}()
@@ -244,6 +269,19 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 				session.ReleaseStream()
 				flow := &agentUDPFlow{conn: conn, stream: stream, lease: lease, release: releaseEgress}
 				flow.lastUnixNano.Store(time.Now().UnixNano())
+				flow.runtime = state.openRuntime(domain.RuntimeConnection{
+					Type:            domain.RuntimeConnectionUDP,
+					NodeID:          d.engine.NodeID(),
+					PeerNodeID:      assignmentGatewayID(state, assignmentID),
+					GatewayID:       assignmentGatewayID(state, assignmentID),
+					AgentID:         d.engine.NodeID(),
+					AssignmentID:    assignmentID,
+					ServiceID:       metadata.ServiceID,
+					Protocol:        domain.ProtocolUDP,
+					Target:          target,
+					ParentSessionID: state.agentSessionRuntimeID(assignmentID),
+					StartedAt:       time.Now().UTC(),
+				}, func() { _ = conn.Close() })
 				flowMu.Lock()
 				old := flows[metadata.FlowID]
 				if old == nil && len(flows) >= dataPlaneFlowLimit {
@@ -264,9 +302,19 @@ func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afd
 				}
 				for _, datagram := range queued {
 					flow.lastUnixNano.Store(time.Now().UnixNano())
+					if flow.runtime != nil {
+						if limiter := flow.runtime.limiter("in"); limiter != nil {
+							if waitErr := limiter.wait(len(datagram.payload)); waitErr != nil {
+								break
+							}
+						}
+					}
 					if _, writeErr := flow.conn.Write(datagram.payload); writeErr != nil {
 						d.logger.Warn("data-plane Agent UDP target write failed", "flow_id", metadata.FlowID, "error", writeErr)
 						break
+					}
+					if flow.runtime != nil {
+						flow.runtime.touch(uint64(len(datagram.payload)), 0)
 					}
 				}
 				go d.readAgentUDP(state, session, metadata.FlowID, flow, &flowMu, flows)
@@ -316,7 +364,27 @@ func (d *DataPlaneRuntime) handleAgentTCP(state *dataGeneration, session *afdp.S
 		return
 	}
 	defer local.Close()
-	copyDataDuplexLimited(local, stream, d.engine.MaxBufferBytes())
+	runtimeConn := state.openRuntime(domain.RuntimeConnection{
+		Type:            domain.RuntimeConnectionTCP,
+		NodeID:          d.engine.NodeID(),
+		PeerNodeID:      assignmentGatewayID(state, session.Assignment().ID),
+		GatewayID:       assignmentGatewayID(state, session.Assignment().ID),
+		AgentID:         d.engine.NodeID(),
+		AssignmentID:    session.Assignment().ID,
+		ServiceID:       metadata.ServiceID,
+		Protocol:        domain.ProtocolTCP,
+		Target:          metadata.Target,
+		ParentSessionID: state.agentSessionRuntimeID(session.Assignment().ID),
+		StartedAt:       time.Now().UTC(),
+	}, func() { _ = local.Close(); _ = stream.Close() })
+	defer func() {
+		if runtimeConn != nil {
+			runtimeConn.close(domain.RuntimeClosePeer)
+		}
+	}()
+	trackedLocal := newRuntimeTrackedRWC(local, func(n int) { runtimeConn.touch(0, uint64(n)) }, func(n int) { runtimeConn.touch(uint64(n), 0) }, func() *runtimeLimiter { return runtimeConn.limiter("in") })
+	trackedStream := newRuntimeTrackedRWC(stream, nil, nil, func() *runtimeLimiter { return runtimeConn.limiter("out") })
+	copyDataDuplexLimited(trackedLocal, trackedStream, d.engine.MaxBufferBytes())
 }
 
 func (d *DataPlaneRuntime) readAgentUDP(state *dataGeneration, session *afdp.Session, flowID uint64, flow *agentUDPFlow, flowMu *sync.RWMutex, flows map[uint64]*agentUDPFlow) {
@@ -352,9 +420,18 @@ func (d *DataPlaneRuntime) readAgentUDP(state *dataGeneration, session *afdp.Ses
 		}
 		flow.lastUnixNano.Store(time.Now().UnixNano())
 		sequence := flow.sequence.Add(1) - 1
+		if flow.runtime != nil {
+			if limiter := flow.runtime.limiter("out"); limiter != nil {
+				if waitErr := limiter.wait(n); waitErr != nil {
+					return
+				}
+			}
+		}
 		if err := session.SendDatagram(flowID, sequence, buffer[:n], dataPlaneDatagramMTU); err != nil {
 			d.logger.Warn("data-plane Agent UDP response send failed", "flow_id", flowID, "error", err)
 			return
+		} else if flow.runtime != nil {
+			flow.runtime.touch(0, uint64(n))
 		}
 	}
 }
@@ -371,6 +448,9 @@ func closeAgentUDPFlow(flow *agentUDPFlow) {
 	}
 	if flow.release != nil {
 		flow.release()
+	}
+	if flow.runtime != nil {
+		flow.runtime.close(domain.RuntimeClosePeer)
 	}
 }
 

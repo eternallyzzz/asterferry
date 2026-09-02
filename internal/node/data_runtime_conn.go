@@ -27,9 +27,12 @@ type dataGeneration struct {
 	udpListeners  map[string]*net.UDPConn
 	proxies       map[string]net.Listener
 
-	sessionMu       sync.RWMutex
-	gatewaySessions map[string]*afdp.Session
-	agentSessions   map[string]*afdp.Session
+	sessionMu         sync.RWMutex
+	gatewaySessions   map[string]*afdp.Session
+	agentSessions     map[string]*afdp.Session
+	gatewaySessionIDs map[string]string
+	agentSessionIDs   map[string]string
+	telemetry         *runtimeTelemetry
 
 	udpMu    sync.Mutex
 	udpFlows map[uint64]*dataUDPFlow
@@ -50,6 +53,7 @@ type dataUDPFlow struct {
 	lease        *dataplane.OpenLease
 	sequence     atomic.Uint32
 	lastUnixNano atomic.Int64
+	runtime      *runtimeConnection
 }
 
 type agentUDPFlow struct {
@@ -59,6 +63,7 @@ type agentUDPFlow struct {
 	release      func()
 	sequence     atomic.Uint32
 	lastUnixNano atomic.Int64
+	runtime      *runtimeConnection
 }
 
 type pendingAgentDatagram struct {
@@ -198,6 +203,7 @@ func (g *dataGeneration) close() {
 		return
 	}
 	g.cancel()
+	g.closeRuntimeConnections(domain.RuntimeCloseGeneration)
 	// Tear down authenticated sessions before closing the QUIC transport. A
 	// peer can otherwise complete a handshake while the listener is draining,
 	// keeping the caller-owned UDP socket busy during a same-address rebuild.
@@ -242,6 +248,20 @@ func (g *dataGeneration) close() {
 	}
 }
 
+func (g *dataGeneration) openRuntime(meta domain.RuntimeConnection, closer func()) *runtimeConnection {
+	if g == nil || g.telemetry == nil {
+		return nil
+	}
+	return g.telemetry.open(g.ctx, g, meta, closer)
+}
+
+func (g *dataGeneration) closeRuntimeConnections(reason string) {
+	if g == nil || g.telemetry == nil {
+		return
+	}
+	g.telemetry.closeOwner(g, reason)
+}
+
 // closeSessions is deliberately independent from close: an explicit
 // reconnect must invalidate peer sessions while retaining reverse/proxy
 // listeners, whereas a generation swap also closes every listener.
@@ -253,6 +273,7 @@ func (g *dataGeneration) closeSessions() {
 	gateway := make([]*afdp.Session, 0, len(g.gatewaySessions))
 	for id, session := range g.gatewaySessions {
 		delete(g.gatewaySessions, id)
+		delete(g.gatewaySessionIDs, id)
 		if session != nil {
 			gateway = append(gateway, session)
 		}
@@ -260,6 +281,7 @@ func (g *dataGeneration) closeSessions() {
 	agent := make([]*afdp.Session, 0, len(g.agentSessions))
 	for id, session := range g.agentSessions {
 		delete(g.agentSessions, id)
+		delete(g.agentSessionIDs, id)
 		if session != nil {
 			agent = append(agent, session)
 		}
@@ -296,10 +318,13 @@ func (g *dataGeneration) closeSessions() {
 	}
 }
 
-func (g *dataGeneration) setGatewaySession(id string, session *afdp.Session) {
+func (g *dataGeneration) setGatewaySessionWithRuntimeID(id string, session *afdp.Session, runtimeID string) {
 	g.sessionMu.Lock()
 	old := g.gatewaySessions[id]
 	g.gatewaySessions[id] = session
+	if runtimeID != "" {
+		g.gatewaySessionIDs[id] = runtimeID
+	}
 	g.sessionMu.Unlock()
 	if old != nil && old != session {
 		_ = old.Close()
@@ -310,8 +335,15 @@ func (g *dataGeneration) clearGatewaySession(id string, session *afdp.Session) {
 	g.sessionMu.Lock()
 	if g.gatewaySessions[id] == session {
 		delete(g.gatewaySessions, id)
+		delete(g.gatewaySessionIDs, id)
 	}
 	g.sessionMu.Unlock()
+}
+
+func (g *dataGeneration) gatewaySessionRuntimeID(id string) string {
+	g.sessionMu.RLock()
+	defer g.sessionMu.RUnlock()
+	return g.gatewaySessionIDs[id]
 }
 
 func (g *dataGeneration) gatewaySession(id string) *afdp.Session {
@@ -320,10 +352,13 @@ func (g *dataGeneration) gatewaySession(id string) *afdp.Session {
 	return g.gatewaySessions[id]
 }
 
-func (g *dataGeneration) setAgentSession(id string, session *afdp.Session) {
+func (g *dataGeneration) setAgentSessionWithRuntimeID(id string, session *afdp.Session, runtimeID string) {
 	g.sessionMu.Lock()
 	old := g.agentSessions[id]
 	g.agentSessions[id] = session
+	if runtimeID != "" {
+		g.agentSessionIDs[id] = runtimeID
+	}
 	g.sessionMu.Unlock()
 	if old != nil && old != session {
 		_ = old.Close()
@@ -334,8 +369,15 @@ func (g *dataGeneration) clearAgentSession(id string, session *afdp.Session) {
 	g.sessionMu.Lock()
 	if g.agentSessions[id] == session {
 		delete(g.agentSessions, id)
+		delete(g.agentSessionIDs, id)
 	}
 	g.sessionMu.Unlock()
+}
+
+func (g *dataGeneration) agentSessionRuntimeID(id string) string {
+	g.sessionMu.RLock()
+	defer g.sessionMu.RUnlock()
+	return g.agentSessionIDs[id]
 }
 
 func (g *dataGeneration) agentSession(id string) *afdp.Session {
@@ -382,6 +424,9 @@ func (g *dataGeneration) removeUDPFlow(flow *dataUDPFlow) {
 	delete(g.udpFlows, flow.id)
 	delete(g.udpByKey, flow.key)
 	g.udpMu.Unlock()
+	if flow.runtime != nil {
+		flow.runtime.close(domain.RuntimeClosePeer)
+	}
 	if flow.stream != nil {
 		_ = flow.stream.Close()
 		flow.session.ReleaseStream()
@@ -403,6 +448,9 @@ func (g *dataGeneration) removeUDPFlowsForSession(session *afdp.Session) {
 	}
 	g.udpMu.Unlock()
 	for _, flow := range flows {
+		if flow.runtime != nil {
+			flow.runtime.close(domain.RuntimeCloseSession)
+		}
 		if flow.stream != nil {
 			_ = flow.stream.Close()
 			flow.session.ReleaseStream()
@@ -426,6 +474,9 @@ func (g *dataGeneration) expireUDPFlows(socket *net.UDPConn, now time.Time) {
 	}
 	g.udpMu.Unlock()
 	for _, flow := range flows {
+		if flow.runtime != nil {
+			flow.runtime.close(domain.RuntimeCloseIdle)
+		}
 		if flow.stream != nil {
 			_ = flow.stream.Close()
 			flow.session.ReleaseStream()

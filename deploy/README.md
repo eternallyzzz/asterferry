@@ -28,10 +28,10 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-This pre-1.0 generation uses a fresh schema v8 and intentionally has no
-in-place migration command. `OpenStore` rejects older databases instead of
-rewriting them. Export any needed resources, retain a complete backup, and
-initialize a new Controller directory during the maintenance window.
+This pre-1.0 generation uses SQLite schema v9. A v8 database receives the
+additive runtime-observability migration on startup; older or unknown
+generations remain incompatible. Export any needed resources, retain a
+complete backup, and upgrade during a maintenance window.
 
 `deploy/asterferry-controller.service` is a single-replica systemd unit; the
 Controller is not advertised as highly available. Nodes retain their encrypted
@@ -110,6 +110,13 @@ The REST API is rooted at `/api/v1`; `/healthz` is anonymous while readiness,
 metrics and resource operations require a Viewer, Operator or Admin role.
 Mutating requests use `If-Match` revisions and may include an `Idempotency-Key`.
 Use the Dashboard only as a Controller client.
+
+Runtime connection metadata is read-only by default and never includes payloads.
+Admin can enable advanced runtime operations in Dashboard → Admin. Operators can
+then disconnect or temporarily rate-limit active Node connections; controls are
+ephemeral, audited and bounded by TTL. See the bilingual
+[runtime operations guide](../docs/operations.en.md) and
+[中文运维指南](../docs/operations.zh-CN.md).
 
 ```sh
 go test ./...

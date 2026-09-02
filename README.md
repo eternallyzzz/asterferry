@@ -25,6 +25,8 @@ the copy-and-run guides:
 
 - [End-to-end quick start in English](docs/quickstart.en.md)
 - [中文端到端快速开始](docs/quickstart.zh-CN.md)
+- [Operations and runtime visibility (English)](docs/operations.en.md)
+- [运行时观测与运维（中文）](docs/operations.zh-CN.md)
 
 Initialize the Controller. `--grpc-advertise` is required and must be the
 host:port that Gateway and Agent hosts can reach; it is not the local bind
@@ -118,11 +120,10 @@ monotonic generation, schema version and SHA-256 checksum.
 
 ### Controller database lifecycle
 
-This pre-1.0 generation uses a fresh SQLite schema (v8) and intentionally has no
-in-place migration command. A database from an older generation is rejected by
-`OpenStore`; export any required business configuration, take a complete backup,
-then initialize a new Controller directory during the upgrade window. Never
-point a new binary at an old database and expect it to rewrite it silently.
+This pre-1.0 generation uses SQLite schema v9. A v8 database is upgraded once on
+startup with the additive runtime-observability migration; unknown or older
+generations are still rejected by `OpenStore`. Back up the complete Controller
+directory before upgrading and keep the backup for rollback.
 
 ## Node behavior
 
@@ -138,6 +139,23 @@ component application or encrypted-cache publication leaves the previous
 generation active. While the Controller is unavailable, the node continues
 using its encrypted last-known-good snapshot and reports degraded state after
 the configured offline grace period.
+
+### Runtime visibility and operations
+
+Nodes continuously report payload-free runtime metadata after an authenticated
+control stream is ready: AFDP sessions, TCP connections, UDP flows and egress
+streams include source IP/port, peer, assignment/service, target, protocol,
+state, byte counters and rates. The Controller keeps current state, lifecycle
+events and per-minute traffic rollups for 30 days. No application payload is
+captured or sent to the Controller.
+
+The Dashboard shows this information read-only by default in each Node's
+Observed view. Admin can enable **Advanced runtime operations** in the Admin
+page; only then can Operators disconnect or apply a temporary byte-rate limit
+to a selected connection. Controls live in the Node process, have a bounded
+TTL, are audited, and are cleared when the feature is disabled. See the
+[operations guide](docs/operations.en.md) for selectors, API paths and failure
+semantics.
 
 ## AFDP/2 data plane
 

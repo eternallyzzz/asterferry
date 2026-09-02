@@ -15,11 +15,15 @@ architecture.
   host completes enrollment.
 - Ships REST/OpenAPI and a Dashboard with Controller resource CRUD, assignment
   visibility, runtime actions and audit history.
+- Adds payload-free runtime connection metadata, lifecycle events, per-minute
+  traffic rollups, node-scoped selectors and an Admin-gated advanced operations
+  switch for disconnect/rate-limit controls. Runtime history is retained for
+  30 days; schema v8 receives an additive v9 migration.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
   protocol. Existing node configurations must be initialized again. The
-  Controller store is now schema v8 and intentionally requires a fresh
-  initialization; `OpenStore` rejects older generations instead of rewriting
-  them in place.
+  Controller store is now schema v9; `OpenStore` upgrades the immediately
+  previous v8 generation for the additive runtime tables and rejects older
+  generations instead of rewriting their business data.
 - The `node_bootstraps` table stores pending installation intents and
   `node_specs` stores the behavior envelope without pre-creating node
   identities. Back up/export the old Controller before creating the new

@@ -22,6 +22,8 @@ type Store struct {
 	snapshotSubs map[string]map[uint64]*snapshotSubscription
 	changeMu     sync.Mutex
 	changeSubs   map[uint64]*resourceChangeSubscription
+	runtimeMu    sync.Mutex
+	runtimeSubs  map[uint64]*runtimeChangeSubscription
 	// Snapshot materialization reads a previous generation and then writes a
 	// replacement. Serialize that check-and-write pair so concurrent control
 	// streams cannot publish the same generation with different content.

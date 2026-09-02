@@ -71,6 +71,7 @@ type DataPlaneRuntime struct {
 	state             *dataGeneration
 	pending           *domain.DesiredSnapshot
 	oversizeDatagrams atomic.Uint64
+	telemetry         *runtimeTelemetry
 }
 
 // NewDataPlaneRuntime validates the mTLS material once, before any network
@@ -96,6 +97,7 @@ func NewDataPlaneRuntime(options DataPlaneOptions) (*DataPlaneRuntime, error) {
 		logger:        options.Logger,
 		listenAddress: strings.TrimSpace(options.ListenAddress),
 		quicOptions:   options.QUICOptions,
+		telemetry:     newRuntimeTelemetry(),
 		serverTLS:     afdp.ServerTLSConfigFromPEM(certificate, pool),
 		clientTLS:     afdp.ClientTLSConfigFromPEM(certificate, pool, ""),
 	}, nil
@@ -131,6 +133,23 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 			"geoip_up":           boolMetric(dataplane.GeoIPAvailable()),
 		},
 	}
+	runtimeSnapshot := d.telemetry.snapshot(observed.NodeID)
+	for key, value := range runtimeSnapshot.Metrics {
+		observed.Metrics[key] = value
+	}
+	observed.Metrics["active_connections"] = float64(len(runtimeSnapshot.Connections))
+	activeFlows := 0
+	var bytesIn, bytesOut uint64
+	for _, connection := range runtimeSnapshot.Connections {
+		bytesIn += connection.BytesIn
+		bytesOut += connection.BytesOut
+		if connection.Type == domain.RuntimeConnectionTCP || connection.Type == domain.RuntimeConnectionUDP || connection.Type == domain.RuntimeConnectionEgress {
+			activeFlows++
+		}
+	}
+	observed.Metrics["active_flows"] = float64(activeFlows)
+	observed.Metrics["runtime_bytes_in_total"] = float64(bytesIn)
+	observed.Metrics["runtime_bytes_out_total"] = float64(bytesOut)
 	state.sessionMu.RLock()
 	for assignmentID, session := range state.gatewaySessions {
 		if session == nil {
@@ -407,6 +426,7 @@ func (d *DataPlaneRuntime) CloseSessions() {
 	state := d.state
 	d.mu.Unlock()
 	if state != nil {
+		state.closeRuntimeConnections(domain.RuntimeCloseSession)
 		state.closeSessions()
 	}
 }
@@ -452,17 +472,20 @@ func (d *DataPlaneRuntime) buildGeneration(parent context.Context, snapshot doma
 	}
 	ctx, cancel := context.WithCancel(parent)
 	state := &dataGeneration{
-		ctx:             ctx,
-		cancel:          cancel,
-		engine:          d.engine,
-		snap:            snapshot.Clone(),
-		tcpListeners:    make(map[string]net.Listener),
-		udpListeners:    make(map[string]*net.UDPConn),
-		proxies:         make(map[string]net.Listener),
-		gatewaySessions: make(map[string]*afdp.Session),
-		agentSessions:   make(map[string]*afdp.Session),
-		udpFlows:        make(map[uint64]*dataUDPFlow),
-		udpByKey:        make(map[string]*dataUDPFlow),
+		ctx:               ctx,
+		cancel:            cancel,
+		engine:            d.engine,
+		snap:              snapshot.Clone(),
+		tcpListeners:      make(map[string]net.Listener),
+		udpListeners:      make(map[string]*net.UDPConn),
+		proxies:           make(map[string]net.Listener),
+		gatewaySessions:   make(map[string]*afdp.Session),
+		agentSessions:     make(map[string]*afdp.Session),
+		gatewaySessionIDs: make(map[string]string),
+		agentSessionIDs:   make(map[string]string),
+		udpFlows:          make(map[uint64]*dataUDPFlow),
+		udpByKey:          make(map[string]*dataUDPFlow),
+		telemetry:         d.telemetry,
 	}
 	var err error
 	if d.engine.Kind() == domain.NodeSpecGateway {
@@ -483,6 +506,50 @@ func (d *DataPlaneRuntime) buildGeneration(parent context.Context, snapshot doma
 		return nil, err
 	}
 	return state, nil
+}
+
+// RuntimeSnapshot is the read-only metadata snapshot sent over the optional
+// runtime-telemetry capability.  It intentionally does not expose payloads or
+// packet contents.
+func (d *DataPlaneRuntime) RuntimeSnapshot() (domain.RuntimeSnapshot, bool) {
+	if d == nil || d.engine == nil || d.telemetry == nil {
+		return domain.RuntimeSnapshot{}, false
+	}
+	d.mu.Lock()
+	started := d.started
+	d.mu.Unlock()
+	if !started {
+		return domain.RuntimeSnapshot{}, false
+	}
+	return d.telemetry.snapshot(d.engine.NodeID()), true
+}
+
+func (d *DataPlaneRuntime) DrainRuntimeEvents(max int) []domain.RuntimeEvent {
+	if d == nil || d.telemetry == nil {
+		return nil
+	}
+	return d.telemetry.drainEvents(max)
+}
+
+func (d *DataPlaneRuntime) PeekRuntimeEvents(max int) []domain.RuntimeEvent {
+	if d == nil || d.telemetry == nil {
+		return nil
+	}
+	return d.telemetry.peekEvents(max)
+}
+
+func (d *DataPlaneRuntime) AckRuntimeEvents(events []domain.RuntimeEvent) {
+	if d == nil || d.telemetry == nil {
+		return
+	}
+	d.telemetry.ackEvents(events)
+}
+
+func (d *DataPlaneRuntime) ApplyRuntimeAction(ctx context.Context, name string, payload []byte) (int, error) {
+	if d == nil || d.telemetry == nil {
+		return 0, errors.New("data-plane runtime is not initialized")
+	}
+	return d.telemetry.applyAction(ctx, name, payload)
 }
 
 func (a dataPlaneAddr) String() string { return string(a) }

@@ -149,9 +149,25 @@ func (d *DataPlaneRuntime) handleGatewayConnection(state *dataGeneration, connec
 	}
 	defer d.engine.ReleaseSession()
 	assignmentID := assignment.ID
-	state.setGatewaySession(assignmentID, session)
+	sourceIP, sourcePort := runtimeAddr(connection.RemoteAddr())
+	runtimeSession := state.openRuntime(domain.RuntimeConnection{
+		Type:         domain.RuntimeConnectionSession,
+		NodeID:       d.engine.NodeID(),
+		PeerNodeID:   assignment.AgentID,
+		GatewayID:    d.engine.NodeID(),
+		AgentID:      assignment.AgentID,
+		AssignmentID: assignment.ID,
+		Protocol:     "quic",
+		SourceIP:     sourceIP,
+		SourcePort:   sourcePort,
+		StartedAt:    time.Now().UTC(),
+	}, func() { _ = session.Close() })
+	state.setGatewaySessionWithRuntimeID(assignmentID, session, runtimeSession.id())
 	defer func() {
 		state.clearGatewaySession(assignmentID, session)
+		if runtimeSession != nil {
+			runtimeSession.close(domain.RuntimeCloseSession)
+		}
 		_ = session.Close()
 	}()
 	go d.receiveGatewayDatagrams(state, session)
@@ -172,11 +188,13 @@ func (d *DataPlaneRuntime) serveGatewayTCP(state *dataGeneration, listener net.L
 			defer local.Close()
 			session := state.gatewaySession(assignmentID)
 			if session == nil {
+				d.telemetry.recordRejected(d.engine.NodeID(), "", "no authenticated Agent session")
 				return
 			}
 			metadata := afdp.OpenMetadata{Protocol: domain.ProtocolTCP, ServiceID: service.ID, Target: service.LocalTarget}
 			lease, err := d.engine.ReserveOpen(assignmentID, metadata)
 			if err != nil {
+				d.telemetry.recordRejected(d.engine.NodeID(), "", err.Error())
 				return
 			}
 			defer lease.Release()
@@ -185,8 +203,36 @@ func (d *DataPlaneRuntime) serveGatewayTCP(state *dataGeneration, listener net.L
 				d.logger.Warn("data-plane reverse TCP stream open failed", "assignment_id", assignmentID, "service_id", service.ID, "error", err)
 				return
 			}
-			defer func() { _ = stream.Close(); session.ReleaseStream() }()
-			copyDataDuplexLimited(local, stream, d.engine.MaxBufferBytes())
+			sourceIP, sourcePort := runtimeAddr(local.RemoteAddr())
+			runtimeConn := state.openRuntime(domain.RuntimeConnection{
+				Type:            domain.RuntimeConnectionTCP,
+				NodeID:          d.engine.NodeID(),
+				PeerNodeID:      assignmentAgentID(state, assignmentID),
+				GatewayID:       d.engine.NodeID(),
+				AgentID:         assignmentAgentID(state, assignmentID),
+				AssignmentID:    assignmentID,
+				ServiceID:       service.ID,
+				Protocol:        domain.ProtocolTCP,
+				SourceIP:        sourceIP,
+				SourcePort:      sourcePort,
+				Target:          service.LocalTarget,
+				ParentSessionID: state.gatewaySessionRuntimeID(assignmentID),
+				StartedAt:       time.Now().UTC(),
+			}, func() { _ = local.Close(); _ = stream.Close() })
+			defer func() {
+				if runtimeConn != nil {
+					runtimeConn.close(domain.RuntimeClosePeer)
+				}
+				_ = stream.Close()
+				session.ReleaseStream()
+			}()
+			// The local accepted socket is the public source side: reads from it
+			// are bytes entering the Gateway, and writes back to it are bytes
+			// leaving the Gateway. The AFDP stream has the opposite write-side
+			// direction, so limits are applied at the destination of each copy.
+			trackedLocal := newRuntimeTrackedRWC(local, func(n int) { runtimeConn.touch(uint64(n), 0) }, func(n int) { runtimeConn.touch(0, uint64(n)) }, func() *runtimeLimiter { return runtimeConn.limiter("out") })
+			trackedStream := newRuntimeTrackedRWC(stream, nil, nil, func() *runtimeLimiter { return runtimeConn.limiter("in") })
+			copyDataDuplexLimited(trackedLocal, trackedStream, d.engine.MaxBufferBytes())
 		}(connection)
 	}
 }
@@ -239,8 +285,27 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 			}
 			candidate := &dataUDPFlow{id: flowID, key: flowKey, assignmentID: assignmentID, serviceID: service.ID, socket: socket, remote: remote, session: session, stream: stream, lease: lease}
 			candidate.lastUnixNano.Store(time.Now().UnixNano())
+			sourceIP, sourcePort := runtimeAddr(remote)
+			candidate.runtime = state.openRuntime(domain.RuntimeConnection{
+				Type:            domain.RuntimeConnectionUDP,
+				NodeID:          d.engine.NodeID(),
+				PeerNodeID:      assignmentAgentID(state, assignmentID),
+				GatewayID:       d.engine.NodeID(),
+				AgentID:         assignmentAgentID(state, assignmentID),
+				AssignmentID:    assignmentID,
+				ServiceID:       service.ID,
+				Protocol:        domain.ProtocolUDP,
+				SourceIP:        sourceIP,
+				SourcePort:      sourcePort,
+				Target:          service.LocalTarget,
+				ParentSessionID: state.gatewaySessionRuntimeID(assignmentID),
+				StartedAt:       time.Now().UTC(),
+			}, func() { state.removeUDPFlow(candidate) })
 			existing, added := state.addUDPFlow(candidate)
 			if !added {
+				if candidate.runtime != nil {
+					candidate.runtime.close(domain.RuntimeClosePeer)
+				}
 				_ = stream.Close()
 				session.ReleaseStream()
 				lease.Release()
@@ -253,10 +318,20 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 			}
 		}
 		flow.lastUnixNano.Store(time.Now().UnixNano())
+		if flow.runtime != nil {
+			if limiter := flow.runtime.limiter("in"); limiter != nil {
+				if err := limiter.wait(n); err != nil {
+					state.removeUDPFlow(flow)
+					continue
+				}
+			}
+		}
 		sequence := flow.sequence.Add(1) - 1
 		if err := flow.session.SendDatagram(flow.id, sequence, buffer[:n], dataPlaneDatagramMTU); err != nil {
 			d.logger.Warn("data-plane Gateway UDP datagram send failed", "flow_id", flow.id, "sequence", sequence, "error", err)
 			state.removeUDPFlow(flow)
+		} else if flow.runtime != nil {
+			flow.runtime.touch(uint64(n), 0)
 		}
 	}
 }
@@ -287,8 +362,18 @@ func (d *DataPlaneRuntime) receiveGatewayDatagrams(state *dataGeneration, sessio
 			continue
 		}
 		flow.lastUnixNano.Store(time.Now().UnixNano())
+		if flow.runtime != nil {
+			if limiter := flow.runtime.limiter("out"); limiter != nil {
+				if err := limiter.wait(len(payload)); err != nil {
+					state.removeUDPFlow(flow)
+					continue
+				}
+			}
+		}
 		if _, writeErr := flow.socket.WriteToUDP(payload, flow.remote); writeErr != nil {
 			d.logger.Warn("data-plane Gateway UDP response write failed", "flow_id", header.FlowID, "error", writeErr)
+		} else if flow.runtime != nil {
+			flow.runtime.touch(0, uint64(len(payload)))
 		}
 	}
 }
@@ -341,9 +426,55 @@ func (d *DataPlaneRuntime) serveGatewayEgress(state *dataGeneration, session *af
 				return
 			}
 			defer local.Close()
-			copyDataDuplexLimited(local, stream, d.engine.MaxBufferBytes())
+			runtimeConn := state.openRuntime(domain.RuntimeConnection{
+				Type:            domain.RuntimeConnectionEgress,
+				NodeID:          d.engine.NodeID(),
+				PeerNodeID:      session.Assignment().AgentID,
+				GatewayID:       d.engine.NodeID(),
+				AgentID:         session.Assignment().AgentID,
+				AssignmentID:    assignmentID,
+				Protocol:        domain.ProtocolTCP,
+				Target:          target,
+				ParentSessionID: state.gatewaySessionRuntimeID(assignmentID),
+				StartedAt:       time.Now().UTC(),
+			}, func() { _ = local.Close(); _ = stream.Close() })
+			defer func() {
+				if runtimeConn != nil {
+					runtimeConn.close(domain.RuntimeClosePeer)
+				}
+			}()
+			// For an egress proxy, the AFDP stream carries the source request:
+			// writes to the external socket are inbound, while replies written to
+			// the AFDP stream are outbound back to the Agent.
+			trackedLocal := newRuntimeTrackedRWC(local, func(n int) { runtimeConn.touch(0, uint64(n)) }, func(n int) { runtimeConn.touch(uint64(n), 0) }, func() *runtimeLimiter { return runtimeConn.limiter("in") })
+			trackedStream := newRuntimeTrackedRWC(stream, nil, nil, func() *runtimeLimiter { return runtimeConn.limiter("out") })
+			copyDataDuplexLimited(trackedLocal, trackedStream, d.engine.MaxBufferBytes())
 		}(stream, metadata, lease)
 	}
+}
+
+func assignmentAgentID(state *dataGeneration, assignmentID string) string {
+	if state == nil {
+		return ""
+	}
+	for _, assignment := range state.snap.Assignments {
+		if assignment.ID == assignmentID {
+			return assignment.AgentID
+		}
+	}
+	return ""
+}
+
+func assignmentGatewayID(state *dataGeneration, assignmentID string) string {
+	if state == nil {
+		return ""
+	}
+	for _, assignment := range state.snap.Assignments {
+		if assignment.ID == assignmentID {
+			return assignment.GatewayID
+		}
+	}
+	return ""
 }
 
 func (d *DataPlaneRuntime) quicOptionsForGateway(spec domain.GatewaySpec) afdp.QUICOptions {

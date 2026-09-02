@@ -52,6 +52,15 @@ type controlStream struct {
 	send func(*v1.ControllerMessage) error
 }
 
+func hasCapability(capabilities []string, wanted string) bool {
+	for _, capability := range capabilities {
+		if capability == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func NewControlServer(config Config, store *Store) (*ControlServer, error) {
 	if store == nil {
 		return nil, errors.New("controller store is required")
@@ -241,14 +250,23 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		defer s.metrics.streams.Dec()
 	}
 	defer func() {
+		wasCurrent := false
 		s.streamMu.Lock()
 		// Do not remove a newer stream that replaced this one while it was
 		// unwinding after cancellation.
 		if current := s.streams[hello.GetNodeId()]; current == entry {
 			delete(s.streams, hello.GetNodeId())
+			wasCurrent = true
 		}
 		s.streamMu.Unlock()
 		cancel()
+		if wasCurrent {
+			markCtx, markCancel := context.WithTimeout(context.Background(), time.Second)
+			if err := s.store.MarkRuntimeConnectionsUnknown(markCtx, hello.GetNodeId(), time.Now().UTC()); err != nil {
+				slog.Default().Warn("failed to mark runtime connections unknown", "node_id", hello.GetNodeId(), "error", err)
+			}
+			markCancel()
+		}
 	}()
 	actionCh, unsubscribeActions := s.store.SubscribeActions(hello.GetNodeId())
 	defer unsubscribeActions()
@@ -256,8 +274,28 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	// bidirectional RPC.  Send an explicit readiness marker only after all
 	// certificate, behavior and current-serial checks above have succeeded; the
 	// node uses it to lift a reconnect/revocation drain safely.
-	if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "session_ready"}}}); err != nil {
+	readyPayload := []byte(nil)
+	if hasCapability(hello.GetCapabilities(), "runtime-telemetry-v1") {
+		readyPayload, _ = json.Marshal(map[string]any{"capabilities": []string{"runtime-telemetry-v1", "runtime-control-v1"}})
+	}
+	if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "session_ready", PayloadJson: readyPayload}}}); err != nil {
 		return err
+	}
+	// Runtime controls are intentionally process-local and are never replayed
+	// from desired state. If an Admin disabled the feature while this Node was
+	// offline, clear any limit that survived in the Node process before it can
+	// serve a newly authenticated control session.
+	if hasCapability(hello.GetCapabilities(), "runtime-control-v1") {
+		enabled, settingsErr := s.store.AdvancedOperationsEnabled(connectionCtx)
+		if settingsErr != nil {
+			slog.Default().Error("runtime operation setting lookup failed", "node_id", hello.GetNodeId(), "error", settingsErr)
+			return status.Error(codes.Internal, "load runtime operation settings failed")
+		}
+		if !enabled {
+			if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "clear_runtime_controls"}}}); err != nil {
+				return err
+			}
+		}
 	}
 	go func() {
 		for {
@@ -490,8 +528,29 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 					return status.Error(codes.InvalidArgument, "event fields are invalid")
 				}
 				attributes := map[string]string{}
-				if len(event.GetAttributesJson()) > 128<<10 {
+				maxAttributes := 128 << 10
+				if event.GetType() == "runtime_snapshot" || event.GetType() == "runtime_connection" || event.GetType() == "runtime_action_result" {
+					maxAttributes = 4 << 20
+				}
+				if len(event.GetAttributesJson()) > maxAttributes {
 					return status.Error(codes.InvalidArgument, "event attributes are too large")
+				}
+				if strings.HasPrefix(event.GetType(), "runtime_") {
+					if len(event.GetAttributesJson()) == 0 {
+						return status.Error(codes.InvalidArgument, "runtime event attributes are required")
+					}
+					createdAt := time.Now().UTC()
+					if event.GetCreatedAt() != nil {
+						if err := event.GetCreatedAt().CheckValid(); err != nil {
+							return status.Error(codes.InvalidArgument, "runtime event timestamp is invalid")
+						}
+						createdAt = event.GetCreatedAt().AsTime().UTC()
+					}
+					if err := s.store.RecordRuntimeEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetAttributesJson(), createdAt); err != nil {
+						slog.Default().Error("failed to record runtime event", "node_id", hello.GetNodeId(), "event_type", event.GetType(), "error", err)
+						return status.Error(codes.Internal, "record runtime event failed")
+					}
+					continue
 				}
 				if len(event.GetAttributesJson()) > 0 {
 					if err := json.Unmarshal(event.GetAttributesJson(), &attributes); err != nil {

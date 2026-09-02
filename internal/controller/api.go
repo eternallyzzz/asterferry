@@ -43,7 +43,10 @@ func NewServer(config Config, store *Store) (*Server, error) {
 	}
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
 	server := &Server{store: store, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: store.metrics}
-	server.http = &http.Server{Addr: config.HTTPListen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second}
+	// Runtime SSE is intentionally long-lived.  Per-request handlers retain
+	// their own bounded read/decode limits; the write deadline must not cut off
+	// a healthy event stream after an absolute 30-second wall clock interval.
+	server.http = &http.Server{Addr: config.HTTPListen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 90 * time.Second}
 	go server.runSessionReaper()
 	return server, nil
 }
@@ -74,6 +77,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/enrollment-tokens/", s.enrollmentTokenAction)
 	mux.HandleFunc("/api/v1/audit", s.audit)
 	mux.HandleFunc("/api/v1/events", s.audit)
+	mux.HandleFunc("/api/v1/runtime/settings", s.runtimeSettings)
+	mux.HandleFunc("/api/v1/runtime/connections", s.runtimeConnections)
+	mux.HandleFunc("/api/v1/runtime/events", s.runtimeEvents)
+	mux.HandleFunc("/api/v1/runtime/traffic", s.runtimeTraffic)
+	mux.HandleFunc("/api/v1/runtime/stream", s.runtimeStream)
 	mux.HandleFunc("/api/v1/users", s.users)
 	mux.HandleFunc("/api/v1/users/", s.userAction)
 	if s.config.DashboardEnable {
