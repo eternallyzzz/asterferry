@@ -4,7 +4,7 @@ go 1.26.7
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/oschwald/geoip2-golang v1.11.0
+	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/quic-go/quic-go v0.61.0
 	github.com/spf13/cobra v1.10.2
