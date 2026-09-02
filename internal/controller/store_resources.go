@@ -48,7 +48,7 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 	if hit {
 		return nil
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO nodes(id, role, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.Role, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, node.CreatedAt.Format(time.RFC3339Nano), node.UpdatedAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO nodes(id, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, node.CreatedAt.Format(time.RFC3339Nano), node.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)
 	}
@@ -62,7 +62,7 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 }
 
 func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, role, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at FROM nodes WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at FROM nodes WHERE id = ?`, id)
 	node, err := scanNode(row)
 	if err != nil {
 		return domain.Node{}, err
@@ -74,14 +74,11 @@ func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
 }
 
 func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
-	// node_specs is the public source of behavior. Keep the role fallback for
-	// databases carrying a legacy typed row that has not been backfilled yet;
-	// generic identities with no spec remain visible in the unfiltered list.
 	kind = strings.TrimSpace(kind)
-	query := `SELECT n.id, n.role, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at FROM nodes n`
+	query := `SELECT n.id, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at FROM nodes n`
 	args := []any{}
 	if kind != "" {
-		query += ` LEFT JOIN node_specs ns ON ns.node_id=n.id WHERE COALESCE(ns.kind,n.role) = ?`
+		query += ` INNER JOIN node_specs ns ON ns.node_id=n.id WHERE ns.kind = ?`
 		args = append(args, kind)
 	}
 	query += ` ORDER BY n.id`
@@ -111,9 +108,7 @@ func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, erro
 	return result, nil
 }
 
-// GatewayView and AgentView are one-query list projections used by the REST
-// list endpoints. Keeping the optional spec in the projection avoids an N+1
-// Get*Spec query for every node while preserving the existing JSON response.
+// GatewayView and AgentView are projections for internal callers.
 type GatewayView struct {
 	Node domain.Node
 	Spec *domain.GatewaySpec
@@ -125,111 +120,45 @@ type AgentView struct {
 }
 
 func (s *Store) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.role,n.name,n.labels_json,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,g.document_json,g.revision FROM nodes n LEFT JOIN gateway_specs g ON g.node_id=n.id WHERE n.role=? ORDER BY n.id`, domain.RoleGateway)
+	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecGateway))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := make([]GatewayView, 0)
-	for rows.Next() {
-		var node domain.Node
-		var labels, document []byte
-		var enabled int
-		var created, updated string
-		var specRevision sql.NullInt64
-		if err := rows.Scan(&node.ID, &node.Role, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated, &document, &specRevision); err != nil {
-			return nil, err
+	result := make([]GatewayView, 0, len(nodes))
+	for _, node := range nodes {
+		spec, specErr := s.GetNodeSpec(ctx, node.ID)
+		if specErr != nil {
+			return nil, specErr
 		}
-		if len(labels) > 0 {
-			if err := json.Unmarshal(labels, &node.Labels); err != nil {
-				return nil, err
-			}
+		if spec.Gateway == nil {
+			continue
 		}
-		node.Enabled = enabled != 0
-		var parseErr error
-		node.CreatedAt, parseErr = parseStoredTime("node.created_at", created)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		node.UpdatedAt, parseErr = parseStoredTime("node.updated_at", updated)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		if err := node.Validate(); err != nil {
-			return nil, fmt.Errorf("stored gateway node is invalid: %w", err)
-		}
-		view := GatewayView{Node: node}
-		if len(document) > 0 && specRevision.Valid {
-			var spec domain.GatewaySpec
-			if err := json.Unmarshal(document, &spec); err != nil {
-				return nil, err
-			}
-			if spec.NodeID != node.ID {
-				return nil, &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "gateway.node_id", Message: "stored gateway spec node id does not match its row"}
-			}
-			spec.Revision = specRevision.Int64
-			if err := spec.Validate(); err != nil {
-				return nil, fmt.Errorf("stored gateway spec is invalid: %w", err)
-			}
-			view.Spec = &spec
-		}
-		result = append(result, view)
+		value := *spec.Gateway
+		value.Revision = spec.Revision
+		result = append(result, GatewayView{Node: node, Spec: &value})
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) ListAgentViews(ctx context.Context) ([]AgentView, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.role,n.name,n.labels_json,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,a.document_json,a.revision FROM nodes n LEFT JOIN agent_specs a ON a.node_id=n.id WHERE n.role=? ORDER BY n.id`, domain.RoleAgent)
+	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecAgent))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := make([]AgentView, 0)
-	for rows.Next() {
-		var node domain.Node
-		var labels, document []byte
-		var enabled int
-		var created, updated string
-		var specRevision sql.NullInt64
-		if err := rows.Scan(&node.ID, &node.Role, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated, &document, &specRevision); err != nil {
-			return nil, err
+	result := make([]AgentView, 0, len(nodes))
+	for _, node := range nodes {
+		spec, specErr := s.GetNodeSpec(ctx, node.ID)
+		if specErr != nil {
+			return nil, specErr
 		}
-		if len(labels) > 0 {
-			if err := json.Unmarshal(labels, &node.Labels); err != nil {
-				return nil, err
-			}
+		if spec.Agent == nil {
+			continue
 		}
-		node.Enabled = enabled != 0
-		var parseErr error
-		node.CreatedAt, parseErr = parseStoredTime("node.created_at", created)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		node.UpdatedAt, parseErr = parseStoredTime("node.updated_at", updated)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		if err := node.Validate(); err != nil {
-			return nil, fmt.Errorf("stored agent node is invalid: %w", err)
-		}
-		view := AgentView{Node: node}
-		if len(document) > 0 && specRevision.Valid {
-			var spec domain.AgentSpec
-			if err := json.Unmarshal(document, &spec); err != nil {
-				return nil, err
-			}
-			if spec.NodeID != node.ID {
-				return nil, &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "agent.node_id", Message: "stored agent spec node id does not match its row"}
-			}
-			spec.Revision = specRevision.Int64
-			if err := spec.Validate(); err != nil {
-				return nil, fmt.Errorf("stored agent spec is invalid: %w", err)
-			}
-			view.Spec = &spec
-		}
-		result = append(result, view)
+		value := *spec.Agent
+		value.Revision = spec.Revision
+		result = append(result, AgentView{Node: node, Spec: &value})
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
@@ -262,16 +191,13 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 		return nil
 	}
 	var current int64
-	var currentRole, currentCertificateState string
+	var currentCertificateState string
 	var currentEnabled int
-	if err := tx.QueryRowContext(ctx, `SELECT revision,role,enabled,certificate_state FROM nodes WHERE id = ?`, node.ID).Scan(&current, &currentRole, &currentEnabled, &currentCertificateState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT revision,enabled,certificate_state FROM nodes WHERE id = ?`, node.ID).Scan(&current, &currentEnabled, &currentCertificateState); err != nil {
 		return err
 	}
 	if current != options.IfMatch {
 		return &RevisionConflictError{Resource: "node", Expected: options.IfMatch, Actual: current}
-	}
-	if currentRole != node.Role {
-		return &domain.ApplyError{Code: "immutable_field", Path: "role", Message: "node role cannot be changed"}
 	}
 	affectedNodes, err := assignmentParticipantIDsTx(ctx, tx, node.ID)
 	if err != nil {
@@ -279,7 +205,7 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 	}
 	affectedNodes = append(affectedNodes, node.ID)
 	node.Revision = current + 1
-	_, err = tx.ExecContext(ctx, `UPDATE nodes SET role=?, name=?, labels_json=?, enabled=?, certificate_state=?, certificate_serial=?, revision=?, updated_at=? WHERE id=? AND revision=?`, node.Role, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
+	_, err = tx.ExecContext(ctx, `UPDATE nodes SET name=?, labels_json=?, enabled=?, certificate_state=?, certificate_serial=?, revision=?, updated_at=? WHERE id=? AND revision=?`, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
 	if err != nil {
 		return err
 	}
@@ -439,94 +365,57 @@ func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions)
 }
 
 func (s *Store) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, options WriteOptions) error {
-	if err := spec.Validate(); err != nil {
-		return err
-	}
-	node, err := s.GetNode(ctx, spec.NodeID)
-	if err != nil {
-		return err
-	}
-	if node.Role != "" && node.Role != domain.RoleGateway {
-		return errors.New("gateway spec node has the wrong role")
-	}
-	if err := s.protectObfuscationPolicy(&spec.Obfuscation); err != nil {
-		return err
-	}
-	return s.putDocument(ctx, "gateway_specs", spec.NodeID, spec, options)
+	return s.PutNodeSpec(ctx, domain.NewGatewayNodeSpec(spec), options)
 }
 
 func (s *Store) DeleteGatewaySpec(ctx context.Context, nodeID string, options WriteOptions) error {
-	return s.deleteDocument(ctx, "gateway_specs", nodeID, options)
+	return s.DeleteNodeSpec(ctx, nodeID, options)
 }
 
 func (s *Store) GetGatewaySpec(ctx context.Context, nodeID string) (domain.GatewaySpec, error) {
-	var data []byte
-	var revision int64
-	if err := s.db.QueryRowContext(ctx, `SELECT document_json,revision FROM gateway_specs WHERE node_id=?`, nodeID).Scan(&data, &revision); err != nil {
+	spec, err := s.GetNodeSpec(ctx, nodeID)
+	if err != nil {
 		return domain.GatewaySpec{}, err
 	}
-	var spec domain.GatewaySpec
-	if err := json.Unmarshal(data, &spec); err != nil {
-		return domain.GatewaySpec{}, err
+	if spec.Kind != domain.NodeSpecGateway || spec.Gateway == nil {
+		return domain.GatewaySpec{}, sql.ErrNoRows
 	}
-	if spec.NodeID != nodeID {
-		return domain.GatewaySpec{}, &domain.ApplyError{Code: "node_mismatch", Path: "gateway.node_id", Message: "stored gateway spec node id does not match its row"}
-	}
-	spec.Revision = revision
-	if err := spec.Validate(); err != nil {
-		return domain.GatewaySpec{}, fmt.Errorf("stored gateway spec is invalid: %w", err)
-	}
-	return spec, nil
+	value := *spec.Gateway
+	value.Revision = spec.Revision
+	return value, nil
 }
 
 func (s *Store) PutAgentSpec(ctx context.Context, spec domain.AgentSpec, options WriteOptions) error {
-	if err := spec.Validate(); err != nil {
-		return err
-	}
-	node, err := s.GetNode(ctx, spec.NodeID)
-	if err != nil {
-		return err
-	}
-	if node.Role != "" && node.Role != domain.RoleAgent {
-		return errors.New("agent spec node has the wrong role")
-	}
-	return s.putDocument(ctx, "agent_specs", spec.NodeID, spec, options)
+	return s.PutNodeSpec(ctx, domain.NewAgentNodeSpec(spec), options)
 }
 
 func (s *Store) DeleteAgentSpec(ctx context.Context, nodeID string, options WriteOptions) error {
-	return s.deleteDocument(ctx, "agent_specs", nodeID, options)
+	return s.DeleteNodeSpec(ctx, nodeID, options)
 }
 
 func (s *Store) GetAgentSpec(ctx context.Context, nodeID string) (domain.AgentSpec, error) {
-	var data []byte
-	var revision int64
-	if err := s.db.QueryRowContext(ctx, `SELECT document_json,revision FROM agent_specs WHERE node_id=?`, nodeID).Scan(&data, &revision); err != nil {
+	spec, err := s.GetNodeSpec(ctx, nodeID)
+	if err != nil {
 		return domain.AgentSpec{}, err
 	}
-	var spec domain.AgentSpec
-	if err := json.Unmarshal(data, &spec); err != nil {
-		return domain.AgentSpec{}, err
+	if spec.Kind != domain.NodeSpecAgent || spec.Agent == nil {
+		return domain.AgentSpec{}, sql.ErrNoRows
 	}
-	if spec.NodeID != nodeID {
-		return domain.AgentSpec{}, &domain.ApplyError{Code: "node_mismatch", Path: "agent.node_id", Message: "stored agent spec node id does not match its row"}
-	}
-	spec.Revision = revision
-	if err := spec.Validate(); err != nil {
-		return domain.AgentSpec{}, fmt.Errorf("stored agent spec is invalid: %w", err)
-	}
-	return spec, nil
+	value := *spec.Agent
+	value.Revision = spec.Revision
+	return value, nil
 }
 
 func (s *Store) PutService(ctx context.Context, service domain.Service, options WriteOptions) error {
 	if err := service.Validate(); err != nil {
 		return err
 	}
-	node, err := s.GetNode(ctx, service.AgentID)
-	if err != nil {
-		return err
+	spec, specErr := s.GetNodeSpec(ctx, service.AgentID)
+	if specErr != nil {
+		return specErr
 	}
-	if node.Role != domain.RoleAgent {
-		return errors.New("service agent has the wrong role")
+	if spec.Kind != domain.NodeSpecAgent {
+		return errors.New("service agent has the wrong node kind")
 	}
 	return s.putServiceDocument(ctx, service, options)
 }

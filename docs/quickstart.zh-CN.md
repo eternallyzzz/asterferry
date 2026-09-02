@@ -19,7 +19,7 @@
  客户端 ───────────────> B:28080 ── AFDP/2 ──> A:18080
 ```
 
-## 1. 角色和端口
+## 1. 节点行为和端口
 
 | 节点 | 作用 | 必须连通的地址 |
 | --- | --- | --- |
@@ -203,7 +203,7 @@ Token 默认 15 分钟有效，只能用于创建它对应的 Node ID。命令�
 
 ### 4.3 旧版/高级手工 enrollment
 
-仍可使用 `enroll-token create`、`node enroll`、`node run` 和 systemd/Windows 服务模板完成手工部署，适合离线镜像、私有发布源或自定义服务账户。旧的 `gateway`/`agent` 命令继续兼容已有 bootstrap 文件。
+仍可使用 `enroll-token create`、`node enroll`、`node run` 和 systemd/Windows 服务模板完成手工部署，适合离线镜像、私有发布源或自定义服务账户。所有部署都使用统一的 `node` 命令，行为只由 Controller 中的 Node 规格决定。
 
 ## 5. 创建第一个 TCP 服务
 
@@ -378,12 +378,9 @@ asterferry controller backup \
   --output ./backups
 ```
 
-v3/v4/v5/v6 数据库升级必须停止 Controller，先 dry-run 再发布到当前 schema v7：
-
-```sh
-asterferry controller migrate --config ./controller/controller.json --dry-run
-asterferry controller migrate --config ./controller/controller.json
-```
+当前 pre-1.0 版本使用全新的 schema v8，故意不提供原地迁移命令；
+`OpenStore` 会拒绝 v3/v4/v5/v6/v7 数据库。升级时先导出需要保留的业务配置，
+保留完整备份用于回滚，然后在维护窗口重新初始化 Controller 目录。
 
 Controller 暂时不可用时，节点会继续使用加密的 last-known-good 快照；但新的配置、调度和证书操作需要 Controller 恢复后才能完成。不要删除 `controller/`，其中包含数据库、CA、TLS 身份和 master key。
 
@@ -392,7 +389,7 @@ Controller 暂时不可用时，节点会继续使用加密的 last-known-good �
 ## 10. 完成清单
 
 - [ ] C 的 `8443/tcp` 和 `9443/tcp` 已监听并可达。
-- [ ] Dashboard 可以登录，Gateway 和 Agent 已完成安装并注册。
+- [ ] Dashboard 可以登录，两个统一 Node 已完成安装并注册。
 - [ ] Gateway 行为的 `public_endpoints` 使用 B 的可达 `4433/udp` 地址。
 - [ ] Agent selector 与 Gateway 标签匹配。
 - [ ] A、B 已完成 Node 一次性 token enrollment，并分别保存了 Agent/Gateway 行为规格。

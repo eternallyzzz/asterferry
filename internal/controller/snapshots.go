@@ -245,7 +245,7 @@ func (s *Store) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (Snaps
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// A deleted NodeSpec leaves an explicit empty snapshot behind so the
-			// connected Node can retire its previous role. A stale non-empty row
+			// connected Node can retire its previous behavior. A stale non-empty row
 			// from an older binary is fail-closed here as well.
 			if existing, loadErr := s.LoadSnapshot(ctx, nodeID); loadErr == nil {
 				var current domain.DesiredSnapshot
@@ -321,8 +321,8 @@ func clearDesiredSnapshotTx(ctx context.Context, tx *sql.Tx, nodeID string) erro
 }
 
 // RebuildDesiredSnapshots refreshes every node that has a complete spec.  A
-// node without a spec is skipped so an operator can create the Node first and
-// publish its role-specific spec in a later transaction.
+// node without a spec is skipped so an operator can enroll the identity first
+// and publish its behavior document in a later transaction.
 func (s *Store) RebuildDesiredSnapshots(ctx context.Context) error {
 	nodes, err := s.ListNodes(ctx, "")
 	if err != nil {

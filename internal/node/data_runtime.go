@@ -465,7 +465,7 @@ func (d *DataPlaneRuntime) buildGeneration(parent context.Context, snapshot doma
 		udpByKey:        make(map[string]*dataUDPFlow),
 	}
 	var err error
-	if d.engine.Role() == domain.RoleGateway {
+	if d.engine.Kind() == domain.NodeSpecGateway {
 		if snapshot.Gateway == nil {
 			err = errors.New("gateway data-plane snapshot is required")
 		} else {

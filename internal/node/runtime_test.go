@@ -12,7 +12,7 @@ func TestApplySnapshotFailureRestoresEngineDrainState(t *testing.T) {
 	for _, initiallyDraining := range []bool{false, true} {
 		t.Run(map[bool]string{false: "not-draining", true: "already-draining"}[initiallyDraining], func(t *testing.T) {
 			engine, previous := newRuntimeDrainTestFixture(t, initiallyDraining)
-			runtime := &Runtime{engine: engine, runtimeKind: domain.RoleAgent}
+			runtime := &Runtime{engine: engine, runtimeKind: domain.NodeSpecAgent}
 			failed := previous.Clone()
 			failed.Generation++
 			failed.Checksum = ""
@@ -32,7 +32,7 @@ func TestApplySnapshotFailureRestoresEngineDrainState(t *testing.T) {
 
 func newRuntimeDrainTestFixture(t *testing.T, initiallyDraining bool) (*dataplane.Engine, domain.DesiredSnapshot) {
 	t.Helper()
-	engine, err := dataplane.New(dataplane.Options{Role: domain.RoleAgent, NodeID: "agent-runtime-test"})
+	engine, err := dataplane.New(dataplane.Options{Kind: domain.NodeSpecAgent, NodeID: "agent-runtime-test"})
 	if err != nil {
 		t.Fatal(err)
 	}

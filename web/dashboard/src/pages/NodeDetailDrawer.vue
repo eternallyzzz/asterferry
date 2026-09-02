@@ -416,7 +416,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
           <p v-if="installError" class="section-error">{{ installError }}</p>
         </template>
         <template v-else>
-          <p class="form-note">Node daemon{{ installResult.role ? ` · 兼容角色 ${installResult.role.toUpperCase()}` : "" }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
+          <p class="form-note">Node daemon · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
           <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。</p>
           <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
           <p class="form-note">请在对应机器的管理员 PowerShell 或 root shell 中执行。</p>

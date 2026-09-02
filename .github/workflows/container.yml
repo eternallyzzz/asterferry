@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   test:
-    name: Go and Helm checks
+    name: Go and Helm checks (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -62,13 +62,30 @@ jobs:
           npm --prefix web/dashboard run build
           npm --prefix web/dashboard audit --registry=https://registry.npmjs.org --omit=dev --audit-level=high
           git diff --exit-code -- internal/dashboard/dist
+          cmp -s api/openapi.yaml internal/controller/openapi.yaml
       - name: Check patch whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD
       - name: Verify Go modules
         run: go mod verify
       - name: Run tests
-        run: go test ./...
+        run: go test -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Publish coverage summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          go tool cover -func=coverage.out | tee coverage.txt
+          {
+            echo "### Go coverage"
+            echo '```'
+            tail -n 1 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: go-coverage-linux
+          path: coverage.out
       - name: Run race tests
         run: go test -race ./...
       - name: Run vet
@@ -94,12 +111,9 @@ jobs:
       - name: Lint Helm chart
         run: |
           helm lint deploy/helm/asterferry-controller
-          helm lint deploy/helm/asterferry-node --set role=gateway
-          helm lint deploy/helm/asterferry-node --set role=agent
-      - name: Render Gateway chart
-        run: helm template gateway deploy/helm/asterferry-node --set role=gateway
-      - name: Render Agent chart
-        run: helm template agent deploy/helm/asterferry-node --set role=agent
+          helm lint deploy/helm/asterferry-node
+      - name: Render Node chart
+        run: helm template node deploy/helm/asterferry-node
       - name: Render Controller chart
         run: helm template controller deploy/helm/asterferry-controller
       - name: Package Helm chart
@@ -108,6 +122,29 @@ jobs:
           mkdir -p tmp/ci-chart
           helm package deploy/helm/asterferry-controller --destination tmp/ci-chart
           helm package deploy/helm/asterferry-node --destination tmp/ci-chart
+
+  windows:
+    name: Go checks (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.7"
+          cache: true
+      - name: Verify Go modules
+        run: go mod verify
+      - name: Run tests
+        run: go test ./...
+      - name: Run race tests
+        run: go test -race ./...
+      - name: Run vet
+        run: go vet ./...
+      - name: Build binary
+        run: go build ./cmd/asterferry
 
   e2e:
     name: Go QUIC end-to-end

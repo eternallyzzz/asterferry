@@ -14,7 +14,7 @@ func TestControllerMetricsExposeRuntimeSignalsWithoutResourceLabels(t *testing.T
 	metrics := newControllerMetrics()
 	metrics.observeHTTP(http.MethodGet, "/api/v1/nodes", http.StatusOK, time.Millisecond)
 	metrics.observeGRPC("Connect", "OK")
-	metrics.observeNode("node-secret", domain.RoleGateway, domain.ObservedState{
+	metrics.observeNode("node-secret", string(domain.NodeSpecGateway), domain.ObservedState{
 		SchemaVersion:     domain.SchemaVersion,
 		NodeID:            "node-secret",
 		AppliedGeneration: 7,
@@ -46,37 +46,37 @@ func TestControllerMetricsExposeRuntimeSignalsWithoutResourceLabels(t *testing.T
 	}
 }
 
-func TestControllerMetricsAggregateGeoIPByRole(t *testing.T) {
+func TestControllerMetricsAggregateGeoIPByKind(t *testing.T) {
 	metrics := newControllerMetrics()
 	observed := domain.ObservedState{
 		SchemaVersion: domain.SchemaVersion,
 		Healthy:       true,
 		Metrics:       map[string]float64{"geoip_up": 1},
 	}
-	metrics.observeNode("gateway-up", domain.RoleGateway, observed)
+	metrics.observeNode("gateway-up", string(domain.NodeSpecGateway), observed)
 
 	observed.Metrics["geoip_up"] = 0
-	metrics.observeNode("gateway-down", domain.RoleGateway, observed)
+	metrics.observeNode("gateway-down", string(domain.NodeSpecGateway), observed)
 	observed.Metrics["geoip_up"] = 1
-	metrics.observeNode("agent-up", domain.RoleAgent, observed)
+	metrics.observeNode("agent-up", string(domain.NodeSpecAgent), observed)
 
 	recorder := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := recorder.Body.String()
-	if !strings.Contains(body, `asterferry_controller_geoip_up{role="gateway"} 1`) {
+	if !strings.Contains(body, `asterferry_controller_geoip_up{kind="gateway"} 1`) {
 		t.Fatalf("gateway GeoIP availability count missing or incorrect:\n%s", body)
 	}
-	if !strings.Contains(body, `asterferry_controller_geoip_up{role="agent"} 1`) {
+	if !strings.Contains(body, `asterferry_controller_geoip_up{kind="agent"} 1`) {
 		t.Fatalf("agent GeoIP availability count missing or incorrect:\n%s", body)
 	}
 
 	// A later observation without geoip_up must clear the previous node's
 	// availability instead of leaving a stale value in the aggregate.
 	observed.Metrics = map[string]float64{}
-	metrics.observeNode("gateway-up", domain.RoleGateway, observed)
+	metrics.observeNode("gateway-up", string(domain.NodeSpecGateway), observed)
 	recorder = httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(recorder.Body.String(), `asterferry_controller_geoip_up{role="gateway"} 0`) {
+	if !strings.Contains(recorder.Body.String(), `asterferry_controller_geoip_up{kind="gateway"} 0`) {
 		t.Fatalf("gateway GeoIP availability did not clear after missing observation:\n%s", recorder.Body.String())
 	}
 }

@@ -19,7 +19,7 @@ This is a copy-and-run deployment guide. The example uses three servers:
  Client ───────────────> B:28080 ── AFDP/2 ──> A:18080
 ```
 
-## 1. Roles and ports
+## 1. Node behaviors and ports
 
 | Node | Responsibility | Required connectivity |
 | --- | --- | --- |
@@ -230,12 +230,12 @@ If it expires or is lost, reissue it from the Dashboard's pending installation
 list. B and A do not need a manually copied CA, edited bootstrap JSON or second
 start command.
 
-### 4.3 Legacy/manual enrollment
+### 4.3 Manual enrollment
 
 The `enroll-token create`, `node enroll`, `node run` and system-service
 templates remain available for offline images, private release mirrors and
-custom service accounts. The legacy `gateway`/`agent` commands remain compatible
-with existing role-bound bootstrap files.
+custom service accounts. The same generic `node` command is used in every
+deployment; behavior is selected only by the Node Spec.
 
 ## 5. Create the first TCP service
 
@@ -410,12 +410,10 @@ asterferry controller backup \
   --output ./backups
 ```
 
-For a v3/v4/v5/v6 database upgrade, stop the Controller, run a dry-run, then publish the migration to the current schema v7:
-
-```sh
-asterferry controller migrate --config ./controller/controller.json --dry-run
-asterferry controller migrate --config ./controller/controller.json
-```
+This pre-1.0 generation uses a fresh schema v8. It intentionally has no
+in-place migration command: `OpenStore` rejects v3/v4/v5/v6/v7 databases.
+Export any needed configuration, keep the complete backup for rollback, and
+initialize a new Controller directory during the maintenance window.
 
 When the Controller is temporarily unavailable, nodes continue using their encrypted last-known-good snapshot. New configuration, scheduling and certificate operations require the Controller to recover. Do not delete `controller/`; it contains the database, CA, TLS identity and master key.
 
@@ -424,7 +422,7 @@ See [`deploy/README.md`](../deploy/README.md) for systemd, Docker Compose and Ku
 ## 10. Completion checklist
 
 - [ ] C's `8443/tcp` and `9443/tcp` are listening and reachable.
-- [ ] The Dashboard accepts login and both nodes have completed installation and enrollment.
+- [ ] The Dashboard accepts login and both generic Nodes have completed installation and enrollment.
 - [ ] The Gateway `public_endpoints` value is a reachable B address on UDP `4433`.
 - [ ] The Agent selector matches the Gateway labels.
 - [ ] A and B completed Node enrollment with one-time tokens and each has the intended behavior spec.

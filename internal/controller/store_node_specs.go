@@ -6,29 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"asterferry/internal/domain"
 )
 
-// GetNodeSpec returns the behavior document for a node. A missing row is
-// intentional: freshly enrolled nodes are valid identities and wait here
-// until an operator configures their first behavior.
+// GetNodeSpec returns the node's one authoritative behavior document. A
+// missing row is intentional: enrollment creates an identity, and the
+// operator may choose its behavior later.
 func (s *Store) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec, error) {
 	var data []byte
 	var kind string
 	var revision int64
 	var updated string
 	err := s.db.QueryRowContext(ctx, `SELECT kind,document_json,revision,updated_at FROM node_specs WHERE node_id=?`, nodeID).Scan(&kind, &data, &revision, &updated)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Read old rows while a v7 deployment is still carrying the compatibility
-		// tables. This also makes an interrupted/manual migration fail safe.
-		if spec, legacyErr := s.getLegacyNodeSpec(ctx, nodeID); legacyErr == nil {
-			return spec, nil
-		} else if !errors.Is(legacyErr, sql.ErrNoRows) {
-			return domain.NodeSpec{}, legacyErr
-		}
-		return domain.NodeSpec{}, err
-	}
 	if err != nil {
 		return domain.NodeSpec{}, err
 	}
@@ -53,84 +44,218 @@ func (s *Store) decorateNodeSpecKind(ctx context.Context, node *domain.Node) err
 		return nil
 	}
 	var kind string
-	err := s.db.QueryRowContext(ctx, `SELECT kind FROM node_specs WHERE node_id=?`, node.ID).Scan(&kind)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Compatibility databases may have only the old typed table populated.
-		if node.Role == domain.RoleGateway {
-			node.SpecKind = domain.NodeSpecGateway
-		} else if node.Role == domain.RoleAgent {
-			node.SpecKind = domain.NodeSpecAgent
+	if err := s.db.QueryRowContext(ctx, `SELECT kind FROM node_specs WHERE node_id=?`, node.ID).Scan(&kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
 		}
-		return nil
-	}
-	if err != nil {
 		return err
 	}
 	node.SpecKind = domain.NodeSpecKind(kind)
 	return nil
 }
 
-func (s *Store) getLegacyNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec, error) {
-	if spec, err := s.GetGatewaySpec(ctx, nodeID); err == nil {
-		return domain.NewGatewayNodeSpec(spec), nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return domain.NodeSpec{}, err
-	}
-	spec, err := s.GetAgentSpec(ctx, nodeID)
-	if err != nil {
-		return domain.NodeSpec{}, err
-	}
-	return domain.NewAgentNodeSpec(spec), nil
-}
-
-// PutNodeSpec is the only new public write path for node behavior. The
-// compatibility role column is updated in the same logical operation so the
-// existing scheduler and data-plane code keep working while the database
-// rolls forward. Switching kinds is deliberately refused once the node owns
-// services, assignments, or gateway bindings.
+// PutNodeSpec is the sole behavior write path. Storage and wire lifecycle
+// conversions happen around this envelope; no parallel typed spec table is
+// maintained.
 func (s *Store) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	node, err := s.GetNode(ctx, spec.NodeID)
+	if spec.Kind == domain.NodeSpecGateway {
+		if err := s.protectObfuscationPolicy(&spec.Gateway.Obfuscation); err != nil {
+			return err
+		}
+	}
+	return s.putNodeSpecDocument(ctx, spec, options)
+}
+
+func (s *Store) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
+	requestSpec := spec
+	if spec.Gateway != nil {
+		gateway := *spec.Gateway
+		requestSpec.Gateway = &gateway
+	}
+	if spec.Agent != nil {
+		agent := *spec.Agent
+		requestSpec.Agent = &agent
+	}
+	requestSpec.Revision = 0
+	requestSpec.UpdatedAt = time.Time{}
+	if requestSpec.Gateway != nil {
+		requestSpec.Gateway.Obfuscation = obfuscationRequestPolicy(requestSpec.Gateway.Obfuscation)
+	}
+	idempotentRequest := struct {
+		Spec    domain.NodeSpec `json:"spec"`
+		IfMatch int64           `json:"if_match"`
+	}{Spec: requestSpec, IfMatch: options.IfMatch}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if node.Role != "" && node.Role != spec.RuntimeKind() {
-		var dependents int
-		if err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM assignments WHERE gateway_id=? OR agent_id=?) + (SELECT COUNT(*) FROM services WHERE agent_id=?) + (SELECT COUNT(*) FROM service_bindings WHERE gateway_id=?)`, spec.NodeID, spec.NodeID, spec.NodeID, spec.NodeID).Scan(&dependents); err != nil {
-			return err
-		}
-		if dependents > 0 {
-			return &domain.ApplyError{Code: "resource_conflict", Path: "kind", Message: "node behavior cannot be changed while it has dependent services, assignments, or bindings"}
-		}
+	defer tx.Rollback()
+	if hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, idempotentRequest); err != nil {
+		return err
+	} else if hit {
+		return nil
 	}
-	// The typed writer owns validation, revision allocation, assignment
-	// derivation, audit, idempotency, and the compatibility role update. In
-	// particular, do not update nodes.role before entering that transaction:
-	// an invalid spec must not leave a generic identity looking configured.
-	// Behavior changes are an explicit delete-then-create operation for now;
-	// this keeps the old typed tables and the unified envelope atomic without
-	// inventing a second, subtly different write path.
-	if node.Role != "" && node.Role != spec.RuntimeKind() {
-		return &domain.ApplyError{Code: "resource_conflict", Path: "kind", Message: "delete the existing node behavior before switching its kind"}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id=?`, spec.NodeID).Scan(&exists); err != nil {
+		return err
 	}
 	if spec.Kind == domain.NodeSpecGateway {
-		return s.PutGatewaySpec(ctx, *spec.Gateway, options)
+		if err := validateGatewaySpecTx(ctx, tx, *spec.Gateway); err != nil {
+			return err
+		}
+	} else if err := validateAgentSpecTx(ctx, tx, *spec.Agent); err != nil {
+		return err
 	}
-	return s.PutAgentSpec(ctx, *spec.Agent, options)
+	var revision int64
+	var currentKind string
+	err = tx.QueryRowContext(ctx, `SELECT revision FROM node_specs WHERE node_id=?`, spec.NodeID).Scan(&revision)
+	isInsert := errors.Is(err, sql.ErrNoRows)
+	if isInsert {
+		revision = 1
+		if options.IfMatch > 0 {
+			return &RevisionConflictError{Resource: "node_spec", Expected: options.IfMatch, Actual: 0}
+		}
+	} else if err == nil {
+		if err := tx.QueryRowContext(ctx, `SELECT kind FROM node_specs WHERE node_id=?`, spec.NodeID).Scan(&currentKind); err != nil {
+			return err
+		}
+		if currentKind != string(spec.Kind) {
+			dependents, err := nodeSpecDependentsTx(ctx, tx, spec.NodeID, currentKind)
+			if err != nil {
+				return err
+			}
+			if dependents > 0 {
+				return &domain.ApplyError{Code: "resource_conflict", Path: "kind", Message: "node behavior cannot change while services or assignments depend on it"}
+			}
+		}
+		if options.IfMatch <= 0 || options.IfMatch != revision {
+			return &RevisionConflictError{Resource: "node_spec", Expected: options.IfMatch, Actual: revision}
+		}
+		revision++
+	} else {
+		return err
+	}
+	spec.Revision = revision
+	spec.UpdatedAt = time.Now().UTC()
+	if spec.Gateway != nil {
+		spec.Gateway.Revision = revision
+	}
+	if spec.Agent != nil {
+		spec.Agent.Revision = revision
+	}
+	document, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	now := spec.UpdatedAt.Format(time.RFC3339Nano)
+	if isInsert {
+		_, err = tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, spec.NodeID, string(spec.Kind), document, revision, now)
+	} else {
+		_, err = tx.ExecContext(ctx, `UPDATE node_specs SET kind=?,document_json=?,revision=?,updated_at=? WHERE node_id=? AND revision=?`, string(spec.Kind), document, revision, now, spec.NodeID, revision-1)
+	}
+	if err != nil {
+		return err
+	}
+	affectedNodes := []string{spec.NodeID}
+	if spec.Kind == domain.NodeSpecGateway {
+		participants, err := assignmentParticipantIDsTx(ctx, tx, spec.NodeID)
+		if err != nil {
+			return err
+		}
+		affectedNodes = append(affectedNodes, participants...)
+		if err := updateAssignmentEndpointsTx(ctx, tx, *spec.Gateway); err != nil {
+			return err
+		}
+	}
+	if err := insertAudit(ctx, tx, options.Actor, "upsert", "node_spec", spec.NodeID, revision, map[string]string{"kind": string(spec.Kind)}); err != nil {
+		return err
+	}
+	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"node_id": spec.NodeID, "revision": revision}); err != nil {
+		return err
+	}
+	if spec.Kind == domain.NodeSpecGateway {
+		return s.commitAndNotifyPendingServices(tx, affectedNodes...)
+	}
+	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
 func (s *Store) DeleteNodeSpec(ctx context.Context, nodeID string, options WriteOptions) error {
-	spec, err := s.GetNodeSpec(ctx, nodeID)
+	// Deleting a behavior publishes an empty desired snapshot. Serialize the
+	// read/clear/write sequence with EnsureDesiredSnapshot so a reconnect cannot
+	// materialize the retired behavior after this transaction commits.
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if spec.Kind == domain.NodeSpecGateway {
-		return s.DeleteGatewaySpec(ctx, nodeID, options)
-	} else {
-		return s.DeleteAgentSpec(ctx, nodeID, options)
+	defer tx.Rollback()
+	request := struct {
+		NodeID string `json:"node_id"`
+	}{NodeID: nodeID}
+	if hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request); err != nil {
+		return err
+	} else if hit {
+		return tx.Commit()
 	}
+	var revision int64
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind,revision FROM node_specs WHERE node_id=?`, nodeID).Scan(&kind, &revision); err != nil {
+		return err
+	}
+	if options.IfMatch <= 0 || options.IfMatch != revision {
+		return &RevisionConflictError{Resource: "node_spec", Expected: options.IfMatch, Actual: revision}
+	}
+	dependents, err := nodeSpecDependentsTx(ctx, tx, nodeID, kind)
+	if err != nil {
+		return err
+	}
+	if dependents > 0 {
+		return &domain.ApplyError{Code: "resource_conflict", Path: "node_spec", Message: "node behavior has dependent services or assignments"}
+	}
+	participants, err := assignmentParticipantIDsTx(ctx, tx, nodeID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_specs WHERE node_id=? AND revision=?`, nodeID, revision); err != nil {
+		return err
+	}
+	if err := clearDesiredSnapshotTx(ctx, tx, nodeID); err != nil {
+		return err
+	}
+	if err := insertAudit(ctx, tx, options.Actor, "delete", "node_spec", nodeID, revision, map[string]string{"kind": kind}); err != nil {
+		return err
+	}
+	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
+		return err
+	}
+	return s.commitAndNotifyResources(tx, append(participants, nodeID)...)
+}
+
+// nodeSpecDependentsTx is the storage invariant behind behavior replacement
+// and deletion. A Node can be reconfigured only after its old behavior has no
+// live business resources; otherwise the same identity could silently change
+// from a Gateway to an Agent while assignments/services still point at it.
+func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) (int, error) {
+	var dependents int
+	switch domain.NodeSpecKind(kind) {
+	case domain.NodeSpecGateway:
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignments WHERE gateway_id=?`, nodeID).Scan(&dependents); err != nil {
+			return 0, err
+		}
+	case domain.NodeSpecAgent:
+		if err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM services WHERE agent_id=?) +
+			(SELECT COUNT(*) FROM assignments WHERE agent_id=?)`, nodeID, nodeID).Scan(&dependents); err != nil {
+			return 0, err
+		}
+	default:
+		return 0, &domain.ApplyError{Code: "invalid_spec_kind", Path: "node_spec.kind", Message: "stored node spec kind is invalid"}
+	}
+	return dependents, nil
 }
 
 func (s *Store) ListNodeSpecs(ctx context.Context) ([]domain.NodeSpec, error) {
@@ -151,9 +276,7 @@ func (s *Store) ListNodeSpecs(ctx context.Context) ([]domain.NodeSpec, error) {
 		if err := json.Unmarshal(data, &spec); err != nil {
 			return nil, err
 		}
-		spec.NodeID = nodeID
-		spec.Kind = domain.NodeSpecKind(kind)
-		spec.Revision = revision
+		spec.NodeID, spec.Kind, spec.Revision = nodeID, domain.NodeSpecKind(kind), revision
 		spec.UpdatedAt, err = parseStoredTime("node_spec.updated_at", updated)
 		if err != nil {
 			return nil, err

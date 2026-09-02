@@ -30,7 +30,7 @@ func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 	if err := os.WriteFile(config.CACertPath, caPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	node := domain.Node{ID: "gw-public", Role: domain.RoleGateway}
+	node := domain.Node{ID: "gw-public", Name: "Public gateway", Enabled: true}
 
 	linux, err := buildNodeInstallCommand(config, node, "linux", "amd64", "afn_token", caPEM)
 	if err != nil {
@@ -38,7 +38,6 @@ func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 	}
 	for _, want := range []string{
 		"https://mirror.example.com/asterferry/releases/download/v1.2.3/install-node.sh",
-		"--role 'gateway'",
 		"--node-id 'gw-public'",
 		"--controller 'controller.example.com:9443'",
 		"--token 'afn_token'",
@@ -59,7 +58,6 @@ func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 	}
 	for _, want := range []string{
 		"install-node.ps1",
-		"-Role 'gateway'",
 		"-NodeId 'gw-public'",
 		"-Controller 'controller.example.com:9443'",
 		"-Token 'afn_token'",
@@ -113,14 +111,14 @@ func TestNodeEnrollmentTokenIsBoundToNode(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "agent-a", Role: domain.RoleAgent, Name: "agent-a", Enabled: true},
-		{ID: "agent-b", Role: domain.RoleAgent, Name: "agent-b", Enabled: true},
+		{ID: "agent-a", Name: "agent-a", Enabled: true},
+		{ID: "agent-b", Name: "agent-b", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	plain, _, err := store.CreateNodeEnrollmentToken(ctx, "agent-a", domain.RoleAgent, EnrollmentTTL)
+	plain, _, err := store.CreateNodeEnrollmentToken(ctx, "agent-a", EnrollmentTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +126,7 @@ func TestNodeEnrollmentTokenIsBoundToNode(t *testing.T) {
 	if err != nil || !bound || boundNode != "agent-a" {
 		t.Fatalf("parsed node binding = %q, %v, %v", boundNode, bound, err)
 	}
-	if _, err := store.IssueNodeCertificate(ctx, Config{}, plain, domain.RoleAgent, "agent-b", nil); !errors.Is(err, ErrEnrollmentNodeMismatch) {
+	if _, err := store.IssueNodeCertificate(ctx, Config{}, plain, "agent-b", nil); !errors.Is(err, ErrEnrollmentNodeMismatch) {
 		t.Fatalf("cross-node enrollment error = %v, want ErrEnrollmentNodeMismatch", err)
 	}
 }
@@ -150,7 +148,7 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Role: domain.RoleGateway, Name: "Gateway", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Name: "Gateway", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := store.CreateUser(ctx, "bootstrap-admin", "a-very-long-password", RoleAdmin)
@@ -170,10 +168,13 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	body, err := json.Marshal(NodeBootstrapRequest{
 		Platform: "linux",
 		Arch:     "amd64",
-		GatewaySpec: &domain.GatewaySpec{
-			NodeID:          "gw",
-			PublicEndpoints: []string{"gateway.example.com:4433"},
-			PortPool:        domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}},
+		Spec: &domain.NodeSpec{
+			NodeID: "gw", Kind: domain.NodeSpecGateway,
+			Gateway: &domain.GatewaySpec{
+				NodeID:          "gw",
+				PublicEndpoints: []string{"gateway.example.com:4433"},
+				PortPool:        domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}},
+			},
 		},
 	})
 	if err != nil {
@@ -192,7 +193,7 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.NodeID != "gw" || result.Role != domain.RoleGateway || result.Command == "" || result.ExpiresAt == "" {
+	if result.NodeID != "gw" || result.Command == "" || result.ExpiresAt == "" {
 		t.Fatalf("bootstrap response = %#v", result)
 	}
 	if _, err := store.GetGatewaySpec(ctx, "gw"); err != nil {
@@ -239,9 +240,9 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	defer server.Close()
 
 	body, err := json.Marshal(NodeInstallationRequest{
-		NodeID: "gw-install", Role: domain.RoleGateway, Name: "Gateway install", Labels: map[string]string{"site": "east"},
+		NodeID: "gw-install", Name: "Gateway install", Labels: map[string]string{"site": "east"},
 		Platform: "linux", Arch: "amd64",
-		GatewaySpec: &domain.GatewaySpec{NodeID: "gw-install", PublicEndpoints: []string{"gateway.example.com:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}}},
+		Spec: &domain.NodeSpec{NodeID: "gw-install", Kind: domain.NodeSpecGateway, Gateway: &domain.GatewaySpec{NodeID: "gw-install", PublicEndpoints: []string{"gateway.example.com:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -327,11 +328,11 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	if token == originalToken {
 		t.Fatal("reissued installation reused the previous one-time token")
 	}
-	csr, _, err := nodepkg.GenerateCSR("gw-install", domain.RoleGateway)
+	csr, _, err := nodepkg.GenerateCSR("gw-install")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.IssueNodeCertificate(context.Background(), initResult.Config, token, domain.RoleGateway, "gw-install", csr); err != nil {
+	if _, err := store.IssueNodeCertificate(context.Background(), initResult.Config, token, "gw-install", csr); err != nil {
 		t.Fatalf("enroll pending node: %v", err)
 	}
 	node, err := store.GetNode(context.Background(), "gw-install")
@@ -370,7 +371,7 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	if err := json.Unmarshal(genericResponse.Body.Bytes(), &genericResult); err != nil {
 		t.Fatal(err)
 	}
-	if genericResult.Role != "" || strings.Contains(genericResult.Command, "--role") || strings.Contains(genericResult.Command, "-Role") {
+	if strings.Contains(genericResult.Command, "--role") || strings.Contains(genericResult.Command, "-Role") {
 		t.Fatalf("generic installation command selected a behavior: %#v", genericResult)
 	}
 	if _, err := store.GetNode(context.Background(), "generic-install"); !errors.Is(err, sql.ErrNoRows) {
@@ -385,7 +386,7 @@ func TestDeleteNodeAllowsUnusedOwnedSpec(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "unused-gateway", Role: domain.RoleGateway, Name: "unused", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "unused-gateway", Name: "unused", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "unused-gateway", PublicEndpoints: []string{"gateway.example.com:4433"}}, WriteOptions{}); err != nil {
@@ -407,8 +408,8 @@ func TestReconcileAssignmentsForAgentsSchedulesNewServicesWithoutStaleIdempotenc
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)

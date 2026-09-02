@@ -15,8 +15,7 @@ func (s *Server) enrollmentTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost {
 		var input struct {
-			Role       string `json:"role"`
-			TTLSeconds int    `json:"ttl_seconds"`
+			TTLSeconds int `json:"ttl_seconds"`
 		}
 		if err := decodeJSON(r, &input, 16<<10); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -26,7 +25,7 @@ func (s *Server) enrollmentTokens(w http.ResponseWriter, r *http.Request) {
 		if input.TTLSeconds > 0 {
 			ttl = time.Duration(input.TTLSeconds) * time.Second
 		}
-		plain, token, err := s.store.CreateEnrollmentTokenWithOptions(r.Context(), input.Role, ttl, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		plain, token, err := s.store.CreateEnrollmentTokenWithOptions(r.Context(), ttl, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
 			if errors.Is(err, ErrSecretAlreadyCreated) {
 				writeAlreadyCreatedSecret(w, "token_metadata", token)

@@ -18,17 +18,14 @@ import (
 // pending intent, enrollment token, node identity and initial spec are all
 // committed together, so a failed or racing enrollment cannot leave a node
 // that has no certificate, or a certificate for a node that has no spec.
-func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, token, role, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
-	if pending.Role != "" && pending.Role != role {
-		return Certificate{}, ErrEnrollmentRoleMismatch
-	}
+func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
 	if pending.NodeID != nodeID {
 		return Certificate{}, ErrEnrollmentNodeMismatch
 	}
 	if !time.Now().UTC().Before(pending.ExpiresAt) {
 		return Certificate{}, ErrEnrollmentTokenExpired
 	}
-	request, err := parseEnrollmentCSR(csrDER, nodeID, role)
+	request, err := parseEnrollmentCSR(csrDER, nodeID)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -56,9 +53,6 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 	if current.TokenHash != HashToken(token) {
 		return Certificate{}, ErrInvalidEnrollmentToken
 	}
-	if current.Role != "" && current.Role != role {
-		return Certificate{}, ErrEnrollmentRoleMismatch
-	}
 	if !time.Now().UTC().Before(current.ExpiresAt) {
 		return Certificate{}, ErrEnrollmentTokenExpired
 	}
@@ -78,7 +72,7 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 		return Certificate{}, ErrEnrollmentTokenUsed
 	}
 
-	certificate, err := signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, role, request.PublicKey)
+	certificate, err := signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, request.PublicKey)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -87,59 +81,29 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 	if err != nil {
 		return Certificate{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id,role,name,labels_json,enabled,certificate_state,certificate_serial,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, nodeID, role, current.Name, labels, boolInt(current.Enabled), domain.CertificateActive, certificate.Serial, 1, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id,name,labels_json,enabled,certificate_state,certificate_serial,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, nodeID, current.Name, labels, boolInt(current.Enabled), domain.CertificateActive, certificate.Serial, 1, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return Certificate{}, storageFailure("create enrolled node", err)
 	}
-	if len(current.GatewaySpecJSON) > 0 {
-		var spec domain.GatewaySpec
-		if err := json.Unmarshal(current.GatewaySpecJSON, &spec); err != nil {
-			return Certificate{}, storageFailure("decode pending gateway spec", err)
+	if len(current.SpecJSON) > 0 {
+		var spec domain.NodeSpec
+		if err := json.Unmarshal(current.SpecJSON, &spec); err != nil {
+			return Certificate{}, storageFailure("decode pending node spec", err)
 		}
 		spec.NodeID = nodeID
 		spec.Revision = 1
-		if err := validateGatewaySpecTx(ctx, tx, spec); err != nil {
+		spec.UpdatedAt = now
+		if err := spec.Validate(); err != nil {
 			return Certificate{}, err
 		}
-		document, err := json.Marshal(spec)
+		envelope, err := json.Marshal(spec)
 		if err != nil {
 			return Certificate{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO gateway_specs(node_id,document_json,revision,updated_at) VALUES(?,?,?,?)`, nodeID, document, 1, now.Format(time.RFC3339Nano)); err != nil {
-			return Certificate{}, storageFailure("create enrolled gateway spec", err)
-		}
-		envelope, err := json.Marshal(domain.NodeSpec{NodeID: nodeID, Kind: domain.NodeSpecGateway, Gateway: &spec, Revision: 1, UpdatedAt: now})
-		if err != nil {
-			return Certificate{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, nodeID, string(domain.NodeSpecGateway), envelope, 1, now.Format(time.RFC3339Nano)); err != nil {
-			return Certificate{}, storageFailure("create enrolled gateway node spec", err)
-		}
-	} else if len(current.AgentSpecJSON) > 0 {
-		var spec domain.AgentSpec
-		if err := json.Unmarshal(current.AgentSpecJSON, &spec); err != nil {
-			return Certificate{}, storageFailure("decode pending agent spec", err)
-		}
-		spec.NodeID = nodeID
-		spec.Revision = 1
-		if err := validateAgentSpecTx(ctx, tx, spec); err != nil {
-			return Certificate{}, err
-		}
-		document, err := json.Marshal(spec)
-		if err != nil {
-			return Certificate{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_specs(node_id,document_json,revision,updated_at) VALUES(?,?,?,?)`, nodeID, document, 1, now.Format(time.RFC3339Nano)); err != nil {
-			return Certificate{}, storageFailure("create enrolled agent spec", err)
-		}
-		envelope, err := json.Marshal(domain.NodeSpec{NodeID: nodeID, Kind: domain.NodeSpecAgent, Agent: &spec, Revision: 1, UpdatedAt: now})
-		if err != nil {
-			return Certificate{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, nodeID, string(domain.NodeSpecAgent), envelope, 1, now.Format(time.RFC3339Nano)); err != nil {
-			return Certificate{}, storageFailure("create enrolled agent node spec", err)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, nodeID, string(spec.Kind), envelope, 1, now.Format(time.RFC3339Nano)); err != nil {
+			return Certificate{}, storageFailure("create enrolled node spec", err)
 		}
 	}
-	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial, "role": role}); err != nil {
+	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial}); err != nil {
 		return Certificate{}, storageFailure("record pending node enrollment", err)
 	}
 	if err := s.commitAndNotifyResources(tx, nodeID); err != nil {
@@ -148,7 +112,7 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 	return certificate, nil
 }
 
-func parseEnrollmentCSR(csrDER []byte, nodeID, role string) (*x509.CertificateRequest, error) {
+func parseEnrollmentCSR(csrDER []byte, nodeID string) (*x509.CertificateRequest, error) {
 	request, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
 		return nil, fmt.Errorf("%w: parse enrollment CSR: %w", ErrInvalidEnrollmentRequest, err)
@@ -159,7 +123,7 @@ func parseEnrollmentCSR(csrDER []byte, nodeID, role string) (*x509.CertificateRe
 	if _, ok := request.PublicKey.(ed25519.PublicKey); !ok {
 		return nil, fmt.Errorf("%w: enrollment CSR key must be Ed25519", ErrInvalidEnrollmentRequest)
 	}
-	if err := validateCSRIdentity(request, nodeID, role); err != nil {
+	if err := validateCSRIdentity(request, nodeID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
 	return request, nil

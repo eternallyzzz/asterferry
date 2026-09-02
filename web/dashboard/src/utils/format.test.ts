@@ -10,7 +10,6 @@ import {
   parseLabels,
   parseObject,
   prettyJson,
-  roleLabel,
   splitList,
   stateLabel,
   userRoleLabel,
@@ -31,12 +30,6 @@ describe("formatTime", () => {
 });
 
 describe("label helpers", () => {
-  it("maps node roles", () => {
-    expect(roleLabel("gateway")).toBe("Gateway");
-    expect(roleLabel("agent")).toBe("Agent");
-    expect(roleLabel("other")).toBe("other");
-  });
-
   it("maps user roles", () => {
     expect(userRoleLabel("admin")).toContain("Admin");
     expect(userRoleLabel("viewer")).toContain("Viewer");

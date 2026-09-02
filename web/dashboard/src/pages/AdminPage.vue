@@ -106,7 +106,7 @@ async function issueToken() {
   issuing.value = true;
   try {
     const ttl = Math.max(60, Math.min(900, Number(enrollTTL.value) || 900));
-    const result = await createEnrollmentToken(undefined, ttl, undefined, newIdempotencyKey());
+    const result = await createEnrollmentToken(ttl, undefined, newIdempotencyKey());
     issuedToken.value = result.token;
     notify.success("令牌已创建；明文只显示在当前页面，请立即复制。");
     await refresh();
@@ -205,7 +205,7 @@ async function confirmRevoke() {
           <tbody>
             <tr v-for="item in tokens" :key="item.id">
               <td><code>{{ item.id }}</code></td>
-              <td>{{ item.role ? "兼容 token" : "通用 Node" }}</td>
+              <td>通用 Node</td>
               <td>{{ formatTime(item.expires_at) }}</td>
               <td>
                 <StatusPill v-if="item.used_at" tone="neutral">已使用/吊销</StatusPill>

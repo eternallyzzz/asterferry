@@ -16,18 +16,17 @@ architecture.
 - Ships REST/OpenAPI and a Dashboard with Controller resource CRUD, assignment
   visibility, runtime actions and audit history.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
-  protocol. Existing node configurations must be initialized again; existing
-  Controller stores require the explicit migration described below.
-- Adds an explicit stopped-database migration from Controller schema v3, v4,
-  v5 or v6 to schema v7. The `node_bootstraps` table stores pending
-  installation intents and `node_specs` stores the behavior envelope without
-  pre-creating node identities. Run
-  `asterferry controller migrate --config <controller.json>` during a
-  maintenance window; `OpenStore` never rewrites a database implicitly, and a
-  pre-v7 rollback backup is retained after publication.
+  protocol. Existing node configurations must be initialized again. The
+  Controller store is now schema v8 and intentionally requires a fresh
+  initialization; `OpenStore` rejects older generations instead of rewriting
+  them in place.
+- The `node_bootstraps` table stores pending installation intents and
+  `node_specs` stores the behavior envelope without pre-creating node
+  identities. Back up/export the old Controller before creating the new
+  generation during the pre-release upgrade window.
 - Adds Dashboard install-first provisioning: the generated command is the only
   action required on a Node host, and the identity plus any optional initial
   spec are created atomically when the host completes its first enrollment.
-- AFDP/1 to AFDP/2 is an intentional wire-level breaking change: both the QUIC
-  ALPN and version byte changed, with no fallback codec. Upgrade Controller,
-  Gateway and Agent binaries as a coordinated rollout.
+- AFDP/1 to AFDP/2 and control/1 to control/2 are intentional wire-level
+  breaking changes with no fallback or negotiation. Upgrade Controller and all
+  Node binaries as a coordinated rollout.

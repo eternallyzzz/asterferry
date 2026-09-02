@@ -16,14 +16,14 @@ import (
 )
 
 type Options struct {
-	Role        string
+	Kind        domain.NodeSpecKind
 	NodeID      string
 	MaxStreams  int
 	MaxSessions int
 }
 
 type Engine struct {
-	role        string
+	kind        domain.NodeSpecKind
 	nodeID      string
 	maxStreams  int
 	maxSessions int
@@ -74,8 +74,8 @@ func (l *OpenLease) Release() {
 }
 
 func New(options Options) (*Engine, error) {
-	if options.Role != domain.RoleGateway && options.Role != domain.RoleAgent {
-		return nil, errors.New("data-plane role must be gateway or agent")
+	if options.Kind != domain.NodeSpecGateway && options.Kind != domain.NodeSpecAgent {
+		return nil, errors.New("data-plane kind must be gateway or agent")
 	}
 	if err := domain.ValidateID(options.NodeID, "node_id"); err != nil {
 		return nil, err
@@ -92,14 +92,14 @@ func New(options Options) (*Engine, error) {
 	if options.MaxSessions > 1<<20 {
 		return nil, errors.New("data-plane session limit exceeds the supported maximum")
 	}
-	return &Engine{role: options.Role, nodeID: options.NodeID, maxStreams: options.MaxStreams, baseMaxStreams: options.MaxStreams, maxSessions: options.MaxSessions, assignments: map[string]afdp.AssignmentView{}, services: map[string]domain.Service{}, active: map[string]int{}}, nil
+	return &Engine{kind: options.Kind, nodeID: options.NodeID, maxStreams: options.MaxStreams, baseMaxStreams: options.MaxStreams, maxSessions: options.MaxSessions, assignments: map[string]afdp.AssignmentView{}, services: map[string]domain.Service{}, active: map[string]int{}}, nil
 }
 
-func (e *Engine) Role() string          { return e.role }
-func (e *Engine) NodeID() string        { return e.nodeID }
-func (e *Engine) Generation() uint64    { e.mu.RLock(); defer e.mu.RUnlock(); return e.generation }
-func (e *Engine) ActiveStreams() int64  { return e.streams.Load() }
-func (e *Engine) ActiveSessions() int64 { return e.sessions.Load() }
+func (e *Engine) Kind() domain.NodeSpecKind { return e.kind }
+func (e *Engine) NodeID() string            { return e.nodeID }
+func (e *Engine) Generation() uint64        { e.mu.RLock(); defer e.mu.RUnlock(); return e.generation }
+func (e *Engine) ActiveStreams() int64      { return e.streams.Load() }
+func (e *Engine) ActiveSessions() int64     { return e.sessions.Load() }
 
 // MaxBufferBytes is the node-scoped copy-buffer budget from the applied
 // snapshot. A zero value means the transport default. Consumers use this
@@ -208,10 +208,10 @@ func (e *Engine) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnaps
 	if snapshot.NodeID != e.nodeID {
 		return errors.New("snapshot node id does not match engine")
 	}
-	if e.role == domain.RoleGateway && snapshot.Gateway == nil {
+	if e.kind == domain.NodeSpecGateway && snapshot.Gateway == nil {
 		return errors.New("gateway snapshot is required")
 	}
-	if e.role == domain.RoleAgent && snapshot.Agent == nil {
+	if e.kind == domain.NodeSpecAgent && snapshot.Agent == nil {
 		return errors.New("agent snapshot is required")
 	}
 	currentGeneration := e.Generation()
@@ -241,7 +241,7 @@ func (e *Engine) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnaps
 		if err := service.Validate(); err != nil {
 			return err
 		}
-		if service.AgentID != e.nodeID && e.role == domain.RoleAgent {
+		if service.AgentID != e.nodeID && e.kind == domain.NodeSpecAgent {
 			continue
 		}
 		service.GatewaySelector.MatchLabels = cloneStringMap(service.GatewaySelector.MatchLabels)
@@ -251,10 +251,10 @@ func (e *Engine) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnaps
 		if assignment.Generation > snapshot.Generation {
 			return fmt.Errorf("assignment %s generation is newer than snapshot", assignment.ID)
 		}
-		if e.role == domain.RoleGateway && assignment.GatewayID != e.nodeID {
+		if e.kind == domain.NodeSpecGateway && assignment.GatewayID != e.nodeID {
 			continue
 		}
-		if e.role == domain.RoleAgent && assignment.AgentID != e.nodeID {
+		if e.kind == domain.NodeSpecAgent && assignment.AgentID != e.nodeID {
 			continue
 		}
 		for _, serviceID := range assignment.ServiceIDs {

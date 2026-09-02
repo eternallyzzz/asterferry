@@ -1,4 +1,3 @@
-{{- $command := default "node" .Values.role }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,11 +33,11 @@ spec:
             - name: state
               mountPath: /var/lib/asterferry/state
       containers:
-        - name: {{ $command }}
+        - name: node
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           workingDir: /var/lib/asterferry
-          args: [{{ $command | quote }}, "run", "--bootstrap", "/var/lib/asterferry/state/bootstrap.json"]
+          args: ["node", "run", "--bootstrap", "/var/lib/asterferry/state/bootstrap.json"]
           ports:
             - name: data
               containerPort: {{ .Values.dataPort }}

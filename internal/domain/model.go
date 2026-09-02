@@ -22,9 +22,6 @@ const (
 	SchemaVersion = 1
 	DataALPN      = "asterferry-data/2"
 
-	RoleGateway = "gateway"
-	RoleAgent   = "agent"
-
 	CertificateActive  = "active"
 	CertificateRevoked = "revoked"
 	CertificateExpired = "expired"
@@ -43,11 +40,6 @@ const (
 // ID is immutable once a node has enrolled.
 type Node struct {
 	ID string `json:"id"`
-	// Role is retained as an internal compatibility hint for the legacy
-	// scheduler/data-plane code. It is not part of the Node API anymore: the
-	// configured behavior of a node lives in NodeSpec below and is allowed to
-	// change independently of the node identity.
-	Role string `json:"-"`
 	// SpecKind is a read-only projection used by list/detail clients. It is
 	// derived from node_specs and is intentionally not accepted as Node
 	// identity input.
@@ -68,9 +60,6 @@ func (n Node) Validate() error {
 	}
 	if name := strings.TrimSpace(n.Name); name == "" || len(name) > 128 || containsControl(name) {
 		return &ApplyError{Code: "invalid_name", Path: "node.name", Message: "name must contain 1 to 128 printable characters"}
-	}
-	if n.Role != "" && n.Role != RoleGateway && n.Role != RoleAgent {
-		return &ApplyError{Code: "invalid_role", Path: "node.role", Message: "node role must be gateway or agent when supplied internally"}
 	}
 	if n.CertificateState != "" && n.CertificateState != CertificatePending && n.CertificateState != CertificateActive && n.CertificateState != CertificateRevoked && n.CertificateState != CertificateExpired {
 		return &ApplyError{Code: "invalid_certificate_state", Path: "node.certificate_state", Message: "certificate state is invalid"}
@@ -103,8 +92,8 @@ func (n Node) Validate() error {
 type NodeSpecKind string
 
 const (
-	NodeSpecGateway NodeSpecKind = NodeSpecKind(RoleGateway)
-	NodeSpecAgent   NodeSpecKind = NodeSpecKind(RoleAgent)
+	NodeSpecGateway NodeSpecKind = "gateway"
+	NodeSpecAgent   NodeSpecKind = "agent"
 )
 
 // NodeSpec is the single persisted configuration envelope for a node. The
@@ -167,12 +156,9 @@ func NewAgentNodeSpec(spec AgentSpec) NodeSpec {
 func (s NodeSpec) RuntimeKind() string { return string(s.Kind) }
 
 type Capacity struct {
-	MaxAgents       int `json:"max_agents"`
-	MaxConnections  int `json:"max_connections"`
-	MaxServices     int `json:"max_services"`
-	UsedAgents      int `json:"used_agents"`
-	UsedConnections int `json:"used_connections"`
-	UsedServices    int `json:"used_services"`
+	MaxAgents      int `json:"max_agents"`
+	MaxConnections int `json:"max_connections"`
+	MaxServices    int `json:"max_services"`
 }
 
 type PortPool struct {
@@ -226,6 +212,12 @@ func (o ObfuscationPolicy) Validate(path string) error {
 		if len(key) != 0 && len(key) != 32 {
 			return &ApplyError{Code: "invalid_obfuscation", Path: path + "." + keyPath, Message: "data-plane obfuscation keys must contain exactly 32 bytes"}
 		}
+	}
+	if len(o.Key) > 0 && o.KeyID != "" && o.KeyID != ObfuscationKeyID(o.Key) {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".key_id", Message: "key_id does not identify key"}
+	}
+	if len(o.PreviousKey) > 0 && o.PreviousKeyID != "" && o.PreviousKeyID != ObfuscationKeyID(o.PreviousKey) {
+		return &ApplyError{Code: "invalid_obfuscation", Path: path + ".previous_key_id", Message: "previous_key_id does not identify previous_key"}
 	}
 	for idPath, id := range map[string]string{"key_id": o.KeyID, "previous_key_id": o.PreviousKeyID} {
 		if len(id) > 128 || strings.ContainsAny(id, "\x00\r\n") {
@@ -619,14 +611,14 @@ func (s DesiredSnapshot) Validate() error {
 		return &ApplyError{Code: "snapshot_too_large", Message: "snapshot contains too many resources"}
 	}
 	if s.Gateway != nil && s.Agent != nil {
-		return &ApplyError{Code: "invalid_role_spec", Message: "snapshot must contain at most one gateway or agent spec"}
+		return &ApplyError{Code: "invalid_node_spec", Message: "snapshot must contain at most one gateway or agent spec"}
 	}
 	// An empty snapshot is the explicit fail-closed state used after an
 	// operator removes a NodeSpec. It carries no data-plane resources and lets
-	// a connected generic Node retire its previous role without inventing a
+	// a connected generic Node retire its previous behavior without inventing a
 	// second control-protocol message type.
 	if s.Gateway == nil && s.Agent == nil && (len(s.Services) > 0 || len(s.Assignments) > 0) {
-		return &ApplyError{Code: "invalid_role_spec", Message: "an unconfigured snapshot cannot contain services or assignments"}
+		return &ApplyError{Code: "invalid_node_spec", Message: "an unconfigured snapshot cannot contain services or assignments"}
 	}
 	if s.Gateway != nil {
 		if s.Gateway.NodeID != s.NodeID {
@@ -800,10 +792,10 @@ func (g GatewaySpec) Validate() error {
 		}
 		seenListeners[key] = struct{}{}
 	}
-	if g.Capacity.MaxAgents < 0 || g.Capacity.MaxServices < 0 || g.Capacity.MaxConnections < 0 || g.Capacity.UsedAgents < 0 || g.Capacity.UsedServices < 0 || g.Capacity.UsedConnections < 0 {
+	if g.Capacity.MaxAgents < 0 || g.Capacity.MaxServices < 0 || g.Capacity.MaxConnections < 0 {
 		return &ApplyError{Code: "invalid_capacity", Path: "gateway.capacity", Message: "capacity values cannot be negative"}
 	}
-	if g.Capacity.MaxAgents > 1<<20 || g.Capacity.MaxServices > 1<<20 || g.Capacity.MaxConnections > 1<<20 || g.Capacity.UsedAgents > 1<<20 || g.Capacity.UsedServices > 1<<20 || g.Capacity.UsedConnections > 1<<20 {
+	if g.Capacity.MaxAgents > 1<<20 || g.Capacity.MaxServices > 1<<20 || g.Capacity.MaxConnections > 1<<20 {
 		return &ApplyError{Code: "invalid_capacity", Path: "gateway.capacity", Message: "capacity values exceed the supported maximum"}
 	}
 	if err := g.PortPool.Validate(); err != nil {

@@ -13,6 +13,17 @@ import (
 // identity.  A ciphertext is deliberately never a checksum identity.
 var ErrMissingObfuscationKeyID = errors.New("checksum requires a canonical obfuscation key id")
 
+// ObfuscationKeyID is the stable, non-secret identity of a data-plane key.
+// Both the at-rest and wire representations use this value; ciphertext,
+// nonces and serialization details never participate in the identity.
+func ObfuscationKeyID(key []byte) string {
+	if len(key) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(key)
+	return hex.EncodeToString(digest[:])
+}
+
 // ChecksumDocument is the only document serialized by ComputeChecksum.  It is
 // intentionally separate from DesiredSnapshot so repository metadata and the
 // two storage/wire forms of obfuscation keys cannot accidentally enter the

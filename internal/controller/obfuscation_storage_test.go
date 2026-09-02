@@ -18,7 +18,7 @@ func TestObfuscationKeysAreEncryptedAtRestAndDecryptedForWire(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Name: "gateway", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	current := []byte("01234567890123456789012345678901")
@@ -27,18 +27,21 @@ func TestObfuscationKeysAreEncryptedAtRestAndDecryptedForWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	var persisted []byte
-	if err := store.db.QueryRow(`SELECT document_json FROM gateway_specs WHERE node_id='gw'`).Scan(&persisted); err != nil {
+	if err := store.db.QueryRow(`SELECT document_json FROM node_specs WHERE node_id='gw'`).Scan(&persisted); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(persisted), string(current)) || strings.Contains(string(persisted), string(previous)) || strings.Contains(string(persisted), `"key":`) || strings.Contains(string(persisted), `"previous_key":`) {
 		t.Fatalf("plaintext data-plane key was persisted: %s", persisted)
 	}
-	var stored domain.GatewaySpec
-	if err := json.Unmarshal(persisted, &stored); err != nil {
+	var envelope domain.NodeSpec
+	if err := json.Unmarshal(persisted, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if len(stored.Obfuscation.KeyCiphertext) == 0 || len(stored.Obfuscation.PreviousKeyCiphertext) == 0 || stored.Obfuscation.KeyID == "" || stored.Obfuscation.PreviousKeyID == "" {
-		t.Fatalf("at-rest key policy is incomplete: %#v", stored.Obfuscation)
+	if envelope.Gateway == nil {
+		t.Fatalf("at-rest node spec is missing gateway document: %#v", envelope)
+	}
+	if len(envelope.Gateway.Obfuscation.KeyCiphertext) == 0 || len(envelope.Gateway.Obfuscation.PreviousKeyCiphertext) == 0 || envelope.Gateway.Obfuscation.KeyID == "" || envelope.Gateway.Obfuscation.PreviousKeyID == "" {
+		t.Fatalf("at-rest key policy is incomplete: %#v", envelope.Gateway.Obfuscation)
 	}
 
 	snapshot, err := store.EnsureDesiredSnapshot(ctx, "gw")
@@ -65,14 +68,17 @@ func TestLegacyAssignmentObfuscationChecksumIsCanonicalized(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", PublicPort: 18080}, WriteOptions{}); err != nil {

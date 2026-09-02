@@ -6,12 +6,12 @@ import ModalDialog from "../ui/ModalDialog.vue";
 import FormField from "../ui/FormField.vue";
 import EmptyState from "../ui/EmptyState.vue";
 import {
-  createAgentProxy,
-  createAgentRoute,
-  deleteAgentProxy,
-  deleteAgentRoute,
-  updateAgentProxy,
-  updateAgentRoute,
+  createNodeProxy,
+  createNodeRoute,
+  deleteNodeProxy,
+  deleteNodeRoute,
+  updateNodeProxy,
+  updateNodeRoute,
   type ProxySpec,
   type RouteRule,
 } from "../../controller-api";
@@ -84,8 +84,8 @@ async function save() {
   try {
     if (isProxy.value) {
       const proxy: ProxySpec = { id: proxyForm.value.id.trim(), protocol: proxyForm.value.protocol, bind: proxyForm.value.bind.trim(), route: proxyForm.value.route.trim(), enabled: proxyForm.value.enabled };
-      if (editing.value) await updateAgentProxy(props.nodeId, proxy.id, proxy, props.revision, undefined, newIdempotencyKey());
-      else await createAgentProxy(props.nodeId, proxy, props.revision, undefined, newIdempotencyKey());
+      if (editing.value) await updateNodeProxy(props.nodeId, proxy.id, proxy, props.revision, undefined, newIdempotencyKey());
+      else await createNodeProxy(props.nodeId, proxy, props.revision, undefined, newIdempotencyKey());
     } else {
       const route: RouteRule = {
         name: routeForm.value.name.trim(),
@@ -95,8 +95,8 @@ async function save() {
         geoip: splitList(routeForm.value.geoip),
         enabled: routeForm.value.enabled,
       };
-      if (editing.value) await updateAgentRoute(props.nodeId, route.name, route, props.revision, undefined, newIdempotencyKey());
-      else await createAgentRoute(props.nodeId, route, props.revision, undefined, newIdempotencyKey());
+      if (editing.value) await updateNodeRoute(props.nodeId, route.name, route, props.revision, undefined, newIdempotencyKey());
+      else await createNodeRoute(props.nodeId, route, props.revision, undefined, newIdempotencyKey());
     }
     notify.success(`${noun.value}已保存。`);
     formOpen.value = false;
@@ -112,8 +112,8 @@ async function confirmDelete() {
   if (!pendingDelete.value || props.revision === undefined) return;
   deleting.value = true;
   try {
-    if (isProxy.value) await deleteAgentProxy(props.nodeId, (pendingDelete.value as ProxySpec).id, props.revision, undefined, newIdempotencyKey());
-    else await deleteAgentRoute(props.nodeId, (pendingDelete.value as RouteRule).name, props.revision, undefined, newIdempotencyKey());
+    if (isProxy.value) await deleteNodeProxy(props.nodeId, (pendingDelete.value as ProxySpec).id, props.revision, undefined, newIdempotencyKey());
+    else await deleteNodeRoute(props.nodeId, (pendingDelete.value as RouteRule).name, props.revision, undefined, newIdempotencyKey());
     notify.success(`${noun.value}已删除。`);
     pendingDelete.value = null;
     emit("changed");

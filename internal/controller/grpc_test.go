@@ -51,10 +51,10 @@ func TestEnrollmentOverGRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.CreateNode(context.Background(), domain.Node{ID: "agent-grpc", Name: "agent", Role: domain.RoleAgent, Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(context.Background(), domain.Node{ID: "agent-grpc", Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := store.CreateEnrollmentToken(context.Background(), domain.RoleAgent, time.Minute)
+	token, _, err := store.CreateEnrollmentToken(context.Background(), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestEnrollmentOverGRPC(t *testing.T) {
 	}
 	defer grpcServer.Stop()
 	defer listener.Close()
-	bootstrap, err := node.Enroll(context.Background(), node.EnrollOptions{ControllerAddress: listener.Addr().String(), Token: token, NodeID: "agent-grpc", Role: domain.RoleAgent, CAPath: filepath.Join(root, "ca", "ca.crt"), CachePath: filepath.Join(root, "agent.cache")})
+	bootstrap, err := node.Enroll(context.Background(), node.EnrollOptions{ControllerAddress: listener.Addr().String(), Token: token, NodeID: "agent-grpc", CAPath: filepath.Join(root, "ca", "ca.crt"), CachePath: filepath.Join(root, "agent.cache")})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,13 +54,18 @@ func (s *Store) ScheduleAgent(ctx context.Context, agentID string, options Write
 	if err != nil {
 		return nil, err
 	}
-	if agent.Role != domain.RoleAgent || !agent.Enabled {
-		return nil, errors.New("agent is disabled or has the wrong role")
+	if !agent.Enabled {
+		return nil, errors.New("agent is disabled")
 	}
-	agentSpec, err := s.GetAgentSpec(ctx, agentID)
+	nodeSpec, err := s.GetNodeSpec(ctx, agentID)
 	if err != nil {
 		return nil, err
 	}
+	if nodeSpec.Kind != domain.NodeSpecAgent || nodeSpec.Agent == nil {
+		return nil, errors.New("node is not configured as an agent")
+	}
+	agentSpec := *nodeSpec.Agent
+	agentSpec.Revision = nodeSpec.Revision
 	services, err := s.ListServices(ctx, agentID)
 	if err != nil {
 		return nil, err
@@ -133,15 +138,12 @@ func (s *Store) ReconcileAssignmentsForAgents(ctx context.Context, agentIDs ...s
 		if err != nil {
 			return nil, err
 		}
-		if node.Role != domain.RoleAgent || !node.Enabled {
-			continue
+		nodeSpec, specErr := s.GetNodeSpec(ctx, agentID)
+		if specErr != nil && !errors.Is(specErr, sql.ErrNoRows) {
+			return nil, specErr
 		}
-		if _, err := s.GetAgentSpec(ctx, agentID); errors.Is(err, sql.ErrNoRows) {
-			// A node created through the legacy API may not have a spec yet.
-			// Leave its services untouched until the operator supplies one.
+		if specErr != nil || nodeSpec.Kind != domain.NodeSpecAgent || !node.Enabled {
 			continue
-		} else if err != nil {
-			return nil, err
 		}
 		services, err := s.ListServices(ctx, agentID)
 		if err != nil {
@@ -173,7 +175,7 @@ func (s *Store) ReconcileAssignmentsForAgents(ctx context.Context, agentIDs ...s
 func (s *Store) ReconcilePendingServices(ctx context.Context) (result []domain.Assignment, returnErr error) {
 	finishMetrics := s.metrics.startSchedule()
 	defer func() { finishMetrics(returnErr) }()
-	nodes, err := s.ListNodes(ctx, domain.RoleAgent)
+	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecAgent))
 	if err != nil {
 		return nil, err
 	}
@@ -279,10 +281,15 @@ func (s *Store) scheduleExistingAssignment(ctx context.Context, existing domain.
 	if err != nil {
 		return domain.Assignment{}, err
 	}
-	agentSpec, err := s.GetAgentSpec(ctx, existing.AgentID)
+	nodeSpec, err := s.GetNodeSpec(ctx, existing.AgentID)
 	if err != nil {
 		return domain.Assignment{}, err
 	}
+	if nodeSpec.Kind != domain.NodeSpecAgent || nodeSpec.Agent == nil {
+		return domain.Assignment{}, errors.New("node is not configured as an agent")
+	}
+	agentSpec := *nodeSpec.Agent
+	agentSpec.Revision = nodeSpec.Revision
 	services, err := s.ListServices(ctx, existing.AgentID)
 	if err != nil {
 		return domain.Assignment{}, err
@@ -299,7 +306,7 @@ func (s *Store) scheduleExistingAssignment(ctx context.Context, existing domain.
 }
 
 func (s *Store) gatewayCandidates(ctx context.Context) ([]GatewayCandidate, error) {
-	nodes, err := s.ListNodes(ctx, domain.RoleGateway)
+	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecGateway))
 	if err != nil {
 		return nil, err
 	}
@@ -308,13 +315,18 @@ func (s *Store) gatewayCandidates(ctx context.Context) ([]GatewayCandidate, erro
 		if !gateway.Enabled || gateway.CertificateState == domain.CertificateRevoked || gateway.CertificateState == domain.CertificateExpired {
 			continue
 		}
-		spec, specErr := s.GetGatewaySpec(ctx, gateway.ID)
+		nodeSpec, specErr := s.GetNodeSpec(ctx, gateway.ID)
 		if specErr != nil {
 			if errors.Is(specErr, sql.ErrNoRows) {
 				continue
 			}
 			return nil, specErr
 		}
+		if nodeSpec.Kind != domain.NodeSpecGateway || nodeSpec.Gateway == nil {
+			continue
+		}
+		spec := *nodeSpec.Gateway
+		spec.Revision = nodeSpec.Revision
 		gatewayAssignments, listErr := s.ListAssignments(ctx, gateway.ID, "")
 		if listErr != nil {
 			return nil, listErr
@@ -520,7 +532,7 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 	if err := domain.ValidateID(request.Agent.ID, "agent.id"); err != nil {
 		return domain.Assignment{}, err
 	}
-	if request.Agent.Role != domain.RoleAgent || request.Generation == 0 {
+	if request.Generation == 0 {
 		return domain.Assignment{}, errors.New("agent and positive generation are required")
 	}
 	if request.AgentSpec.NodeID == "" {
@@ -562,8 +574,10 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 				return leftExisting
 			}
 		}
-		leftLoad := len(left.Assignments)*1000 + left.Spec.Capacity.UsedServices
-		rightLoad := len(right.Assignments)*1000 + right.Spec.Capacity.UsedServices
+		leftServices := activeAssignmentServiceCount(left.Assignments)
+		rightServices := activeAssignmentServiceCount(right.Assignments)
+		leftLoad := len(activeAssignmentAgents(left.Assignments))*1000 + leftServices
+		rightLoad := len(activeAssignmentAgents(right.Assignments))*1000 + rightServices
 		if leftLoad != rightLoad {
 			return leftLoad < rightLoad
 		}
@@ -572,29 +586,11 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 	var explicitConflict error
 	var placementErr error
 	for _, candidate := range ordered {
-		if !candidate.Node.Enabled || candidate.Node.CertificateState == domain.CertificateRevoked || candidate.Node.CertificateState == domain.CertificateExpired || candidate.Node.Role != domain.RoleGateway || !candidate.Healthy || !request.AgentSpec.GatewaySelector.Matches(candidate.Node.Labels) {
+		if !candidate.Node.Enabled || candidate.Node.CertificateState == domain.CertificateRevoked || candidate.Node.CertificateState == domain.CertificateExpired || candidate.Node.SpecKind != domain.NodeSpecGateway || !candidate.Healthy || !request.AgentSpec.GatewaySelector.Matches(candidate.Node.Labels) {
 			continue
 		}
-		usedAgents := candidate.Spec.Capacity.UsedAgents
-		usedServices := candidate.Spec.Capacity.UsedServices
-		// Capacity counters may be stale or omitted in a freshly published
-		// GatewaySpec. Never under-count the assignments already present in the
-		// candidate view; use the larger of the reported and derived values.
-		derivedAgents := make(map[string]struct{})
-		derivedServices := 0
-		for _, current := range candidate.Assignments {
-			if current.State == domain.AssignmentDegraded || current.State == domain.AssignmentDraining {
-				continue
-			}
-			derivedAgents[current.AgentID] = struct{}{}
-			derivedServices += len(current.ServiceIDs)
-		}
-		if len(derivedAgents) > usedAgents {
-			usedAgents = len(derivedAgents)
-		}
-		if derivedServices > usedServices {
-			usedServices = derivedServices
-		}
+		usedAgents := len(activeAssignmentAgents(candidate.Assignments))
+		usedServices := activeAssignmentServiceCount(candidate.Assignments)
 		// A reschedule that keeps the current Gateway must not count its own
 		// assignment against capacity or port occupancy. Otherwise a stable
 		// assignment can fail simply because its already allocated port appears
@@ -623,15 +619,6 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 			continue
 		}
 		if candidate.Spec.Capacity.MaxServices > 0 && usedServices+len(request.Services) > candidate.Spec.Capacity.MaxServices {
-			continue
-		}
-		// MaxConnections is a runtime capacity advertised by the Gateway. It
-		// cannot be derived from the assignment list (connections are dynamic),
-		// but an observed counter at or above the limit is a hard placement
-		// rejection. This keeps a saturated Gateway out of failover selection
-		// without treating a missing/zero counter as a reason to churn healthy
-		// assignments.
-		if candidate.Spec.Capacity.MaxConnections > 0 && candidate.Spec.Capacity.UsedConnections >= candidate.Spec.Capacity.MaxConnections {
 			continue
 		}
 		bindings := cloneBindingSet(candidate.UsedBindings)
@@ -732,6 +719,28 @@ func filterEnabledServices(values []domain.Service) []domain.Service {
 		}
 	}
 	return result
+}
+
+func activeAssignmentAgents(values []domain.Assignment) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, assignment := range values {
+		if assignment.State == domain.AssignmentDegraded || assignment.State == domain.AssignmentDraining {
+			continue
+		}
+		result[assignment.AgentID] = struct{}{}
+	}
+	return result
+}
+
+func activeAssignmentServiceCount(values []domain.Assignment) int {
+	count := 0
+	for _, assignment := range values {
+		if assignment.State == domain.AssignmentDegraded || assignment.State == domain.AssignmentDraining {
+			continue
+		}
+		count += len(assignment.ServiceIDs)
+	}
+	return count
 }
 
 func sameAssignmentPlacement(left, right domain.Assignment) bool {

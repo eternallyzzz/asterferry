@@ -1,158 +1,66 @@
 package controller
 
 import (
-	"asterferry/internal/domain"
 	"net/http"
-	"strings"
+
+	"asterferry/internal/domain"
 )
 
-func (s *Server) agents(w http.ResponseWriter, r *http.Request) {
+// gatewayEgressAction edits the singleton egress policy as a compare-and-swap
+// subresource of the gateway branch of NodeSpec. The parent revision on the
+// wire makes policy changes participate in the same optimistic-concurrency
+// transaction as the complete typed document.
+func (s *Server) gatewayEgressAction(w http.ResponseWriter, r *http.Request, gatewayID string) {
+	spec, err := s.store.GetGatewaySpec(r.Context(), gatewayID)
 	if r.Method == http.MethodGet {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		views, err := s.store.ListAgentViews(r.Context())
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		items := make([]map[string]any, 0, len(views))
-		for _, view := range views {
-			item := map[string]any{"node": view.Node}
-			if view.Spec != nil {
-				item["spec"] = view.Spec
-			}
-			items = append(items, item)
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
-		return
-	}
-	user, ok := s.authorize(w, r, RoleOperator)
-	if !ok {
-		return
-	}
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w, http.MethodGet, http.MethodPost)
-		return
-	}
-	var spec domain.AgentSpec
-	if err := decodeJSON(r, &spec, 4<<20); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if err := s.store.PutAgentSpec(r.Context(), spec, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	created, err := s.store.GetAgentSpec(r.Context(), spec.NodeID)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	setETag(w, created.Revision)
-	writeJSON(w, http.StatusCreated, created)
-}
-
-func (s *Server) agentAction(w http.ResponseWriter, r *http.Request) {
-	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/agents/"), "/")
-	parts := strings.Split(path, "/")
-	id := parts[0]
-	if id == "" {
-		writeError(w, http.StatusNotFound, "not_found", "agent not found")
-		return
-	}
-	if len(parts) == 2 && parts[1] == "egress" {
-		s.agentEgressAction(w, r, id)
-		return
-	}
-	if len(parts) >= 2 && (parts[1] == "proxies" || parts[1] == "routes") {
-		s.agentSpecSubresource(w, r, id, parts[1], parts[2:])
-		return
-	}
-	if len(parts) == 3 && parts[1] == "actions" && r.Method == http.MethodPost {
-		user, ok := s.authorize(w, r, RoleOperator)
-		if !ok {
-			return
-		}
-		if parts[2] != "schedule" {
-			writeError(w, http.StatusBadRequest, "unknown_action", "unsupported agent action")
-			return
-		}
-		assignments, err := s.store.ScheduleAgent(r.Context(), id, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"assignments": assignments})
-		return
-	}
-	if len(parts) != 1 {
-		writeError(w, http.StatusNotFound, "not_found", "agent resource was not found")
-		return
-	}
-	if r.Method == http.MethodGet {
-		if _, ok := s.authorize(w, r, RoleViewer); !ok {
-			return
-		}
-		spec, err := s.store.GetAgentSpec(r.Context(), id)
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
 		setETag(w, spec.Revision)
-		writeJSON(w, http.StatusOK, spec)
-		return
-	}
-	if r.Method != http.MethodPut {
-		if r.Method == http.MethodDelete {
-			user, ok := s.authorize(w, r, RoleOperator)
-			if !ok {
-				return
-			}
-			expected, err := parseIfMatch(r.Header.Get("If-Match"))
-			if err != nil {
-				writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
-				return
-			}
-			if err := s.store.DeleteAgentSpec(r.Context(), id, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
-				writeStoreError(w, err)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		methodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+		writeJSON(w, http.StatusOK, spec.Egress)
 		return
 	}
 	user, ok := s.authorize(w, r, RoleOperator)
 	if !ok {
 		return
 	}
-	var spec domain.AgentSpec
-	if err := decodeJSON(r, &spec, 4<<20); err != nil {
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if r.Method != http.MethodPut && r.Method != http.MethodPatch {
+		methodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch)
+		return
+	}
+	var policy domain.EgressPolicy
+	if err := decodeJSON(r, &policy, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	spec.NodeID = id
+	spec.Egress = policy
 	expected, err := parseIfMatch(r.Header.Get("If-Match"))
 	if err != nil {
 		writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 		return
 	}
-	if err := s.store.PutAgentSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.store.PutGatewaySpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.GetAgentSpec(r.Context(), id)
+	updated, err := s.store.GetGatewaySpec(r.Context(), gatewayID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	setETag(w, updated.Revision)
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, updated.Egress)
 }
 
-// agentEgressAction is the Agent counterpart to gatewayEgressAction. The
+// agentEgressAction is the agent counterpart to gatewayEgressAction. The
 // complete AgentSpec remains the persisted resource; this endpoint only offers
 // a narrow policy-shaped API for Dashboard and automation clients.
 func (s *Server) agentEgressAction(w http.ResponseWriter, r *http.Request, agentID string) {
@@ -210,7 +118,7 @@ func (s *Server) agentEgressAction(w http.ResponseWriter, r *http.Request, agent
 // protects the collection from lost concurrent updates.
 func (s *Server) agentSpecSubresource(w http.ResponseWriter, r *http.Request, agentID, kind string, rest []string) {
 	if len(rest) > 1 {
-		writeError(w, http.StatusNotFound, "not_found", "agent subresource was not found")
+		writeError(w, http.StatusNotFound, "not_found", "node spec subresource was not found")
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -246,7 +154,7 @@ func (s *Server) agentSpecSubresource(w http.ResponseWriter, r *http.Request, ag
 				}
 			}
 		}
-		writeError(w, http.StatusNotFound, "not_found", "agent subresource was not found")
+		writeError(w, http.StatusNotFound, "not_found", "node spec subresource was not found")
 		return
 	}
 	user, ok := s.authorize(w, r, RoleOperator)

@@ -19,25 +19,33 @@ func TestStoreRevisionAndAtomicSnapshot(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if err := store.CreateNode(ctx, domain.Node{ID: "gw-1", Role: domain.RoleGateway, Name: "gateway", Enabled: true, Labels: map[string]string{"region": "east"}, CreatedAt: now}, WriteOptions{Actor: "test"}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "gw-1", Name: "gateway", Enabled: true, Labels: map[string]string{"region": "east"}, CreatedAt: now}, WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateNode(ctx, domain.Node{ID: "idempotent", Role: domain.RoleGateway, Name: "idempotent", Enabled: true}, WriteOptions{Actor: "test", IdempotencyKey: "create-once"}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "idempotent", Name: "idempotent", Enabled: true}, WriteOptions{Actor: "test", IdempotencyKey: "create-once"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateNode(ctx, domain.Node{ID: "idempotent", Role: domain.RoleGateway, Name: "idempotent", Enabled: true}, WriteOptions{Actor: "test", IdempotencyKey: "create-once"}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "idempotent", Name: "idempotent", Enabled: true}, WriteOptions{Actor: "test", IdempotencyKey: "create-once"}); err != nil {
 		t.Fatalf("idempotent create: %v", err)
 	}
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent-1", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{Actor: "test"}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "agent-1", Name: "agent", Enabled: true}, WriteOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutNodeSpec(ctx, domain.NewAgentNodeSpec(domain.AgentSpec{NodeID: "agent-1"}), WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	service := domain.Service{ID: "svc-1", AgentID: "agent-1", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", PublicPort: 0, Enabled: true}
 	if err := store.PutService(ctx, service, WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PutNodeSpec(ctx, domain.NewGatewayNodeSpec(domain.GatewaySpec{NodeID: "gw-1", PublicEndpoints: []string{"gw.example:4433"}}), WriteOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
 	assignment := domain.Assignment{ID: "as-1", GatewayID: "gw-1", AgentID: "agent-1", ServiceIDs: []string{"svc-1"}, Bindings: []domain.Binding{{ServiceID: "svc-1", Protocol: domain.ProtocolTCP, Bind: "0.0.0.0", Port: 18080}}, Generation: 1, State: domain.AssignmentPending}
-	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: "gw-1", Generation: 1, Gateway: &domain.GatewaySpec{NodeID: "gw-1", PublicEndpoints: []string{"gw.example:4433"}}, Services: []domain.Service{service}, Assignments: []domain.Assignment{assignment}}
-	if err := store.ApplySnapshot(ctx, snapshot, WriteOptions{Actor: "test"}); err != nil {
+	if err := store.PutAssignment(ctx, assignment, WriteOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureDesiredSnapshot(ctx, "gw-1"); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := store.LoadSnapshot(ctx, "gw-1")
@@ -47,10 +55,7 @@ func TestStoreRevisionAndAtomicSnapshot(t *testing.T) {
 	if loaded.Generation != 1 || loaded.Checksum == "" {
 		t.Fatalf("unexpected snapshot: %#v", loaded)
 	}
-	if err := store.ApplySnapshot(ctx, snapshot, WriteOptions{Actor: "test"}); !IsRevisionConflict(err) {
-		t.Fatalf("stale snapshot error = %v", err)
-	}
-	updated := domain.Node{ID: "gw-1", Role: domain.RoleGateway, Name: "gateway-updated", Enabled: true}
+	updated := domain.Node{ID: "gw-1", Name: "gateway-updated", Enabled: true}
 	if err := store.UpdateNode(ctx, updated, WriteOptions{IfMatch: 1, Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,20 +77,17 @@ func TestCryptoAndEnrollmentToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.CreateNode(context.Background(), domain.Node{ID: "agent-1", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(context.Background(), domain.Node{ID: "agent-1", Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := store.CreateEnrollmentToken(context.Background(), domain.RoleAgent, time.Minute)
+	token, _, err := store.CreateEnrollmentToken(context.Background(), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.consumeEnrollmentToken(context.Background(), token, domain.RoleGateway); err == nil {
-		t.Fatal("role mismatch accepted")
-	}
-	if err := store.consumeEnrollmentToken(context.Background(), token, domain.RoleAgent); err != nil {
+	if err := store.consumeEnrollmentToken(context.Background(), token); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.consumeEnrollmentToken(context.Background(), token, domain.RoleAgent); err == nil {
+	if err := store.consumeEnrollmentToken(context.Background(), token); err == nil {
 		t.Fatal("token reuse accepted")
 	}
 	key := []byte("01234567890123456789012345678901")
@@ -134,7 +136,7 @@ func TestSnapshotPersistenceRejectsStaleOrConflictingGeneration(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {
@@ -171,10 +173,10 @@ func TestScheduleAgentUpdatesBothNodeSnapshots(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Name: "gateway", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18080, Max: 18081}}}}, WriteOptions{}); err != nil {
@@ -218,14 +220,17 @@ func TestAssignmentRequiresBothNodeAcks(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}, WriteOptions{}); err != nil {
@@ -265,14 +270,17 @@ func TestServiceUpdateReopensAssignmentGeneration(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	service := domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}
@@ -314,14 +322,17 @@ func TestPutAssignmentCannotBypassAcknowledgementBarrier(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0"}, WriteOptions{}); err != nil {
@@ -334,50 +345,6 @@ func TestPutAssignmentCannotBypassAcknowledgementBarrier(t *testing.T) {
 	}
 }
 
-func TestApplySnapshotCannotPublishAppliedAssignment(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
-	} {
-		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}}, WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	service := domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0"}
-	if err := store.PutService(ctx, service, WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	snapshot := domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
-		NodeID:        "gw",
-		Generation:    1,
-		Gateway:       &domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}},
-		Services:      []domain.Service{service},
-		Assignments: []domain.Assignment{{
-			ID: "assignment", GatewayID: "gw", AgentID: "agent", ServiceIDs: []string{"svc"},
-			Bindings:   []domain.Binding{{ServiceID: "svc", Protocol: domain.ProtocolTCP, Bind: "0.0.0.0", Port: 18080}},
-			Generation: 1, State: domain.AssignmentApplied,
-		}},
-	}
-	if err := store.ApplySnapshot(ctx, snapshot, WriteOptions{}); err == nil {
-		t.Fatal("applied assignment was published without participant acknowledgements")
-	} else {
-		var applyErr *domain.ApplyError
-		if !errors.As(err, &applyErr) || applyErr.Code != "state_controller_owned" {
-			t.Fatalf("unexpected applied assignment error: %v", err)
-		}
-	}
-}
-
 func TestAssignmentUpdateReleasesRemovedBinding(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
@@ -385,10 +352,16 @@ func TestAssignmentUpdateReleasesRemovedBinding(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	for _, node := range []domain.Node{{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true}, {ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true}} {
+	for _, node := range []domain.Node{{ID: "gw", Name: "gateway", Enabled: true}, {ID: "agent", Name: "agent", Enabled: true}} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
 	}
 	for _, service := range []domain.Service{
 		{ID: "svc-a", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8001", PublicBind: "0.0.0.0"},
@@ -416,13 +389,13 @@ func TestAssignmentUpdateReleasesRemovedBinding(t *testing.T) {
 
 func TestSchedulePreservesHealthyAssignmentAndPort(t *testing.T) {
 	request := ScheduleRequest{
-		Agent:      domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		Agent:      domain.Node{ID: "agent", Name: "agent", Enabled: true},
 		AgentSpec:  domain.AgentSpec{NodeID: "agent"},
 		Services:   []domain.Service{{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}},
 		Existing:   &domain.Assignment{ID: "agent-gw", GatewayID: "gw", AgentID: "agent", ServiceIDs: []string{"svc"}, Bindings: []domain.Binding{{ServiceID: "svc", Protocol: domain.ProtocolTCP, Bind: "0.0.0.0", Port: 18080}}, Generation: 4},
 		Generation: 5,
 	}
-	assignment, err := Schedule(request, []GatewayCandidate{{Node: domain.Node{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true}, Spec: domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18080, Max: 18080}}}}, Healthy: true, Assignments: []domain.Assignment{*request.Existing}, UsedBindings: map[string]struct{}{"tcp|0.0.0.0|18080": {}}}})
+	assignment, err := Schedule(request, []GatewayCandidate{{Node: domain.Node{ID: "gw", Name: "gateway", Enabled: true, SpecKind: domain.NodeSpecGateway}, Spec: domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18080, Max: 18080}}}}, Healthy: true, Assignments: []domain.Assignment{*request.Existing}, UsedBindings: map[string]struct{}{"tcp|0.0.0.0|18080": {}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,9 +412,9 @@ func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw-a", Role: domain.RoleGateway, Name: "gateway-a", Enabled: true},
-		{ID: "gw-b", Role: domain.RoleGateway, Name: "gateway-b", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw-a", Name: "gateway-a", Enabled: true},
+		{ID: "gw-b", Name: "gateway-b", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
@@ -482,14 +455,14 @@ func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
 
 func TestScheduleSkipsGatewayAtConnectionCapacity(t *testing.T) {
 	request := ScheduleRequest{
-		Agent:      domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		Agent:      domain.Node{ID: "agent", Name: "agent", Enabled: true},
 		AgentSpec:  domain.AgentSpec{NodeID: "agent"},
 		Services:   []domain.Service{{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}},
 		Generation: 1,
 	}
 	candidates := []GatewayCandidate{
-		{Node: domain.Node{ID: "gw-full", Role: domain.RoleGateway, Name: "full", Enabled: true}, Spec: domain.GatewaySpec{NodeID: "gw-full", PublicEndpoints: []string{"full.example:4433"}, Capacity: domain.Capacity{MaxConnections: 1, UsedConnections: 1}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18080, Max: 18080}}}}, Healthy: true},
-		{Node: domain.Node{ID: "gw-free", Role: domain.RoleGateway, Name: "free", Enabled: true}, Spec: domain.GatewaySpec{NodeID: "gw-free", PublicEndpoints: []string{"free.example:4433"}, Capacity: domain.Capacity{MaxConnections: 1}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18081, Max: 18081}}}}, Healthy: true},
+		{Node: domain.Node{ID: "gw-full", Name: "full", Enabled: true, SpecKind: domain.NodeSpecGateway}, Spec: domain.GatewaySpec{NodeID: "gw-full", PublicEndpoints: []string{"full.example:4433"}, Capacity: domain.Capacity{MaxAgents: 1}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18080, Max: 18080}}}}, Healthy: true, Assignments: []domain.Assignment{{ID: "existing", AgentID: "other-agent", ServiceIDs: []string{"other-service"}, State: domain.AssignmentPending}}},
+		{Node: domain.Node{ID: "gw-free", Name: "free", Enabled: true, SpecKind: domain.NodeSpecGateway}, Spec: domain.GatewaySpec{NodeID: "gw-free", PublicEndpoints: []string{"free.example:4433"}, Capacity: domain.Capacity{MaxAgents: 1}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18081, Max: 18081}}}}, Healthy: true},
 	}
 	assignment, err := Schedule(request, candidates)
 	if err != nil {

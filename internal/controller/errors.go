@@ -16,7 +16,6 @@ var (
 	ErrInvalidEnrollmentToken   = errors.New("invalid enrollment token")
 	ErrEnrollmentTokenUsed      = errors.New("enrollment token has already been used or revoked")
 	ErrEnrollmentTokenExpired   = errors.New("enrollment token has expired")
-	ErrEnrollmentRoleMismatch   = errors.New("enrollment token role does not match node role")
 	ErrEnrollmentNodeMismatch   = errors.New("enrollment token is bound to a different node")
 	ErrNodeNotEnrolled          = errors.New("node is not enrolled")
 	ErrInvalidEnrollmentRequest = errors.New("invalid enrollment request")
@@ -32,7 +31,6 @@ func isCredentialError(err error) bool {
 		errors.Is(err, ErrInvalidEnrollmentToken) ||
 		errors.Is(err, ErrEnrollmentTokenUsed) ||
 		errors.Is(err, ErrEnrollmentTokenExpired) ||
-		errors.Is(err, ErrEnrollmentRoleMismatch) ||
 		errors.Is(err, ErrEnrollmentNodeMismatch) ||
 		errors.Is(err, ErrNodeNotEnrolled) ||
 		errors.Is(err, ErrNodeEnrollmentNotAllowed)

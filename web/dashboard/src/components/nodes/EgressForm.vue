@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import FormField from "../ui/FormField.vue";
-import { updateAgentEgress, updateGatewayEgress, type EgressPolicy } from "../../controller-api";
+import { updateNodeEgress, type EgressPolicy } from "../../controller-api";
 import { useNotify } from "../../composables/useNotify";
 import { useSession } from "../../session";
 import { describeError, joinList, newIdempotencyKey, splitList } from "../../utils/format";
@@ -52,8 +52,7 @@ async function save() {
       allow_special_cidrs: splitList(form.value.special),
       max_connections: Number(form.value.max) || 0,
     };
-    const update = props.kind === "gateway" ? updateGatewayEgress : updateAgentEgress;
-    await update(props.nodeId, policy, props.revision, undefined, newIdempotencyKey());
+    await updateNodeEgress(props.nodeId, policy, props.revision, undefined, newIdempotencyKey());
     notify.success("出口策略已保存。");
     emit("saved");
   } catch (caught) {

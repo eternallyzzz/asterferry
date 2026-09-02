@@ -9,7 +9,7 @@ import Spinner from "../components/ui/Spinner.vue";
 import {
   listAssignments,
   listNodes,
-  scheduleAgent,
+  scheduleNode,
   type ControllerAssignment,
   type ControllerNode,
 } from "../controller-api";
@@ -52,7 +52,7 @@ const { refresh } = usePolling(load);
 async function schedule(agent: ControllerNode) {
   scheduling.value = agent.id;
   try {
-    await scheduleAgent(agent.id, undefined, newIdempotencyKey());
+    await scheduleNode(agent.id, undefined, newIdempotencyKey());
     notify.success(`已请求为 ${agent.id} 重新调度。`);
     await refresh();
   } catch (caught) {

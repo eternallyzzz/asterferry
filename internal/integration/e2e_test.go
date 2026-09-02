@@ -64,10 +64,10 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	httpProxyPort := freeTCPPort(t)
 	socksProxyPort := freeTCPPort(t)
 
-	if err := store.CreateNode(ctx, domain.Node{ID: "gateway-e2e", Role: domain.RoleGateway, Name: "gateway", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "gateway-e2e", Name: "gateway", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent-e2e", Role: domain.RoleAgent, Name: "agent", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "agent-e2e", Name: "agent", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gateway-e2e", PublicEndpoints: []string{net.JoinHostPort("127.0.0.1", fmt.Sprint(quicPort))}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: uint16(tcpPort), Max: uint16(tcpPort)}}, UDP: []domain.PortRange{{Min: uint16(udpPort), Max: uint16(udpPort)}}}}, controller.WriteOptions{Actor: "integration"}); err != nil {
@@ -84,19 +84,19 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	}
 
 	caPath := configResult.Config.CACertPath
-	gatewayToken, _, err := store.CreateEnrollmentToken(ctx, domain.RoleGateway, time.Minute)
+	gatewayToken, _, err := store.CreateEnrollmentToken(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentToken, _, err := store.CreateEnrollmentToken(ctx, domain.RoleAgent, time.Minute)
+	agentToken, _, err := store.CreateEnrollmentToken(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gatewayBootstrap, err := node.Enroll(ctx, node.EnrollOptions{ControllerAddress: grpcListener.Addr().String(), Token: gatewayToken, NodeID: "gateway-e2e", Role: domain.RoleGateway, CAPath: caPath, CachePath: filepath.Join(root, "gateway", "snapshot.cache")})
+	gatewayBootstrap, err := node.Enroll(ctx, node.EnrollOptions{ControllerAddress: grpcListener.Addr().String(), Token: gatewayToken, NodeID: "gateway-e2e", CAPath: caPath, CachePath: filepath.Join(root, "gateway", "snapshot.cache")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentBootstrap, err := node.Enroll(ctx, node.EnrollOptions{ControllerAddress: grpcListener.Addr().String(), Token: agentToken, NodeID: "agent-e2e", Role: domain.RoleAgent, CAPath: caPath, CachePath: filepath.Join(root, "agent", "snapshot.cache")})
+	agentBootstrap, err := node.Enroll(ctx, node.EnrollOptions{ControllerAddress: grpcListener.Addr().String(), Token: agentToken, NodeID: "agent-e2e", CAPath: caPath, CachePath: filepath.Join(root, "agent", "snapshot.cache")})
 	if err != nil {
 		t.Fatal(err)
 	}

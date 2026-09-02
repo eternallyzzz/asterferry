@@ -167,7 +167,7 @@ func scanNode(row scanner) (domain.Node, error) {
 	var labels []byte
 	var enabled int
 	var created, updated string
-	if err := row.Scan(&node.ID, &node.Role, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated); err != nil {
+	if err := row.Scan(&node.ID, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated); err != nil {
 		return domain.Node{}, err
 	}
 	if len(labels) > 0 {

@@ -27,10 +27,10 @@ func TestGenericNodeAndBehaviorSpecLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Role != "" || node.SpecKind != "" {
+	if node.SpecKind != "" {
 		t.Fatalf("new node is already configured: %#v", node)
 	}
-	if nodes, err := store.ListNodes(ctx, domain.RoleAgent); err != nil || len(nodes) != 0 {
+	if nodes, err := store.ListNodes(ctx, string(domain.NodeSpecAgent)); err != nil || len(nodes) != 0 {
 		t.Fatalf("unconfigured node appeared in agent filter: nodes=%#v err=%v", nodes, err)
 	}
 	encoded, err := json.Marshal(node)
@@ -59,10 +59,10 @@ func TestGenericNodeAndBehaviorSpecLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Role != domain.RoleAgent || node.SpecKind != domain.NodeSpecAgent {
+	if node.SpecKind != domain.NodeSpecAgent {
 		t.Fatalf("configured Node projection is wrong: %#v", node)
 	}
-	if nodes, err := store.ListNodes(ctx, domain.RoleAgent); err != nil || len(nodes) != 1 || nodes[0].ID != "node" {
+	if nodes, err := store.ListNodes(ctx, string(domain.NodeSpecAgent)); err != nil || len(nodes) != 1 || nodes[0].ID != "node" {
 		t.Fatalf("agent kind filter is wrong: nodes=%#v err=%v", nodes, err)
 	}
 	snapshot, err := store.BuildDesiredSnapshot(ctx, "node")
@@ -88,7 +88,7 @@ func TestGenericNodeAndBehaviorSpecLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.Role != "" || node.SpecKind != "" {
+	if node.SpecKind != "" {
 		t.Fatalf("Node behavior projection was not cleared: %#v", node)
 	}
 	cleared, err := store.EnsureDesiredSnapshot(ctx, "node")

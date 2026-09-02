@@ -93,11 +93,7 @@ func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (
 	default:
 		return nil, status.Error(codes.ResourceExhausted, "enrollment capacity is temporarily exhausted")
 	}
-	role, err := protoRole(request.GetRole())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	certificate, err := s.store.IssueNodeCertificate(ctx, s.config, request.GetToken(), role, request.GetNodeId(), request.GetCsrDer())
+	certificate, err := s.store.IssueNodeCertificate(ctx, s.config, request.GetToken(), request.GetNodeId(), request.GetCsrDer())
 	if err != nil {
 		if errors.Is(err, ErrInvalidEnrollmentRequest) {
 			return nil, status.Error(codes.InvalidArgument, "enrollment request is invalid")
@@ -177,12 +173,8 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		}
 		seenCapabilities[capability] = struct{}{}
 	}
-	role, err := protoRole(hello.GetRole())
-	if err != nil {
-		return status.Error(codes.InvalidArgument, err.Error())
-	}
 	// Authenticate the certificate identity before consulting SQLite. This
-	// keeps unknown node IDs, disabled nodes and role mismatches from becoming
+	// keeps unknown node IDs, disabled nodes and behavior mismatches from becoming
 	// an externally observable lookup oracle.
 	if err := verifyPeerIdentity(stream.Context(), hello.GetNodeId()); err != nil {
 		return status.Error(codes.PermissionDenied, "control stream authentication failed")
@@ -195,7 +187,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		slog.Default().Error("control stream node lookup failed", "node_id", hello.GetNodeId(), "error", err)
 		return status.Error(codes.Unavailable, "controller storage is temporarily unavailable")
 	}
-	if (role != "" && node.Role != role) || !node.Enabled || node.CertificateState != domain.CertificateActive {
+	if !node.Enabled || node.CertificateState != domain.CertificateActive {
 		return status.Error(codes.PermissionDenied, "control stream authentication failed")
 	}
 	if certificate, certErr := peerCertificate(stream.Context()); certErr != nil || node.CertificateSerial == "" || !strings.EqualFold(certificate.SerialNumber.Text(16), node.CertificateSerial) {
@@ -262,7 +254,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	defer unsubscribeActions()
 	// A node's Hello is sent before the Controller can authenticate the
 	// bidirectional RPC.  Send an explicit readiness marker only after all
-	// certificate, role and current-serial checks above have succeeded; the
+	// certificate, behavior and current-serial checks above have succeeded; the
 	// node uses it to lift a reconnect/revocation drain safely.
 	if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "session_ready"}}}); err != nil {
 		return err
@@ -289,15 +281,12 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		// A node's Hello carries both its applied generation and checksum. Send
 		// a newer generation, or repair a same-generation cache divergence.
 		if snapshotRecord.Generation > hello.GetAppliedGeneration() || (snapshotRecord.Generation == hello.GetAppliedGeneration() && !strings.EqualFold(snapshotRecord.Checksum, hello.GetAppliedChecksum())) {
-			wireDocument, wireErr := s.store.SnapshotDocumentForWire(snapshotRecord.Document)
-			if wireErr != nil {
+			if err := s.sendSnapshotForWire(connectionCtx, cancel, snapshotRecord, send, &lastSent); err != nil {
+				if connectionCtx.Err() != nil {
+					return connectionCtx.Err()
+				}
 				return status.Error(codes.Internal, "prepare desired snapshot for wire failed")
 			}
-			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshotRecord.NodeID, Generation: snapshotRecord.Generation, Checksum: snapshotRecord.Checksum, DocumentJson: wireDocument}}}
-			if err := send(message); err != nil {
-				return err
-			}
-			lastSent.Store(snapshotRecord.Generation)
 		}
 	}
 	go s.pushSnapshots(connectionCtx, cancel, hello.GetNodeId(), send, &lastSent, snapshotChanges)
@@ -406,7 +395,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				}
 			}
 			if s.metrics != nil {
-				s.metrics.observeNode(hello.GetNodeId(), role, observed)
+				s.metrics.observeNode(hello.GetNodeId(), string(node.SpecKind), observed)
 			}
 		case message.GetObservedState() != nil:
 			observed, decodeErr := controlwire.ObservedFromProto(message.GetObservedState())
@@ -434,7 +423,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				return status.Error(codes.Internal, "save observed state failed")
 			}
 			if s.metrics != nil {
-				s.metrics.observeNode(hello.GetNodeId(), role, observed)
+				s.metrics.observeNode(hello.GetNodeId(), string(node.SpecKind), observed)
 			}
 		case message.GetApplyResult() != nil:
 			result := message.GetApplyResult()
@@ -620,48 +609,59 @@ func (s *ControlServer) pushSnapshots(ctx context.Context, cancel context.Cancel
 			if !ok {
 				return
 			}
-			retryDelay := snapshotWireRetryStart
-			wireFailures := 0
-			for {
-				snapshot, err := s.store.EnsureDesiredSnapshot(ctx, nodeID)
-				if err != nil {
-					if errors.Is(err, sql.ErrNoRows) {
-						break
-					}
-					slog.Default().Warn("failed to refresh node desired snapshot", "node_id", nodeID, "error", err)
-					break
-				}
-				previous := lastSent.Load()
-				if snapshot.Generation <= previous {
-					break
-				}
-				wireDocument, wireErr := s.store.SnapshotDocumentForWire(snapshot.Document)
-				if wireErr != nil {
-					wireFailures++
-					if wireFailures >= snapshotWireRetryLimit {
-						slog.Default().Error("desired snapshot remained unavailable for wire", "node_id", nodeID, "attempts", wireFailures, "error", wireErr)
-						if cancel != nil {
-							cancel()
-						}
-						return
-					}
-					slog.Default().Warn("failed to prepare desired snapshot for wire; retrying", "node_id", nodeID, "attempt", wireFailures, "retry_after", retryDelay, "error", wireErr)
-					if !waitForSnapshotRetry(ctx, retryDelay) {
-						return
-					}
-					retryDelay *= 2
-					if retryDelay > snapshotWireRetryMax {
-						retryDelay = snapshotWireRetryMax
-					}
+			snapshot, err := s.store.EnsureDesiredSnapshot(ctx, nodeID)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
 					continue
 				}
-				message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
-				if err := send(message); err != nil {
-					return
-				}
-				lastSent.Store(snapshot.Generation)
-				break
+				slog.Default().Warn("failed to refresh node desired snapshot", "node_id", nodeID, "error", err)
+				continue
 			}
+			previous := lastSent.Load()
+			if snapshot.Generation <= previous {
+				continue
+			}
+			if err := s.sendSnapshotForWire(ctx, cancel, snapshot, send, lastSent); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// sendSnapshotForWire is shared by the initial handshake and change-driven
+// publication path. A transient inability to decrypt an at-rest obfuscation
+// key must not strand an otherwise healthy control stream at its old
+// generation. After a bounded retry window the stream is cancelled so the
+// Node reconnects and re-enters the complete bootstrap/authentication path.
+func (s *ControlServer) sendSnapshotForWire(ctx context.Context, cancel context.CancelFunc, snapshot SnapshotRecord, send func(*v1.ControllerMessage) error, lastSent *atomic.Uint64) error {
+	retryDelay := snapshotWireRetryStart
+	for attempt := 1; ; attempt++ {
+		wireDocument, err := s.store.SnapshotDocumentForWire(snapshot.Document)
+		if err == nil {
+			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
+			if err := send(message); err != nil {
+				return err
+			}
+			lastSent.Store(snapshot.Generation)
+			return nil
+		}
+		if attempt >= snapshotWireRetryLimit {
+			slog.Default().Error("desired snapshot remained unavailable for wire", "node_id", snapshot.NodeID, "attempts", attempt, "error", err)
+			if cancel != nil {
+				cancel()
+			}
+			return err
+		}
+		slog.Default().Warn("failed to prepare desired snapshot for wire; retrying", "node_id", snapshot.NodeID, "attempt", attempt, "retry_after", retryDelay, "error", err)
+		if !waitForSnapshotRetry(ctx, retryDelay) {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errors.New("snapshot wire retry was interrupted")
+		}
+		retryDelay *= 2
+		if retryDelay > snapshotWireRetryMax {
+			retryDelay = snapshotWireRetryMax
 		}
 	}
 }
@@ -812,19 +812,6 @@ func loadControlTLS(config Config) (*tls.Config, error) {
 	// identity check after enrollment; VerifyClientCertIfGiven keeps both RPCs
 	// on one endpoint without weakening the node stream.
 	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, ClientCAs: pool, ClientAuth: tls.VerifyClientCertIfGiven, NextProtos: []string{"h2", controlwire.ControlALPN}}, nil
-}
-
-func protoRole(role v1.NodeRole) (string, error) {
-	switch role {
-	case v1.NodeRole_NODE_ROLE_GATEWAY:
-		return domain.RoleGateway, nil
-	case v1.NodeRole_NODE_ROLE_AGENT:
-		return domain.RoleAgent, nil
-	case v1.NodeRole_NODE_ROLE_UNSPECIFIED:
-		return "", nil
-	default:
-		return "", errors.New("node behavior value is invalid")
-	}
 }
 
 func verifyPeerIdentity(ctx context.Context, nodeID string) error {

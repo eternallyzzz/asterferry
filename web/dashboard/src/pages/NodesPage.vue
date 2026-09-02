@@ -308,7 +308,7 @@ async function confirmDelete() {
 
     <ModalDialog :open="installOpen" title="一键安装注册命令" width="680px" @close="installOpen = false">
       <div v-if="installResult" class="install-dialog">
-        <p class="form-note">Node daemon{{ installResult.role ? ` · 兼容角色 ${installResult.role.toUpperCase()}` : "" }} · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
+        <p class="form-note">Node daemon · {{ installResult.platform }}/{{ installResult.arch }} · v{{ installResult.version }}</p>
         <p class="form-note warning">命令包含一次性注册 Token，有效期至 {{ new Date(installResult.expires_at).toLocaleString() }}。不要发到公开聊天或日志中。</p>
         <textarea class="install-command" readonly :value="installResult.command" rows="7" @focus="selectInstallCommand" />
         <p class="form-note">在对应机器的管理员 PowerShell 或 root shell 中执行。执行前节点不会出现在正式节点列表；Enroll 成功后才会自动上线。</p>

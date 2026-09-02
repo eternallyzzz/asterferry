@@ -40,9 +40,9 @@ helm upgrade --install agent-east ./deploy/helm/asterferry-node \
   --set bootstrapSecret=agent-east-bootstrap
 ```
 
-The deprecated `--set role=gateway|agent` switch remains available for old
-role-bound bootstrap files. With the generic chart default, select the Node
-behavior in the Dashboard after it connects.
+There is no role switch in the chart. Both releases run the same generic Node
+command; select Gateway or Agent behavior in the Dashboard after the Node
+connects.
 
 The node chart copies the Secret into its private state PVC so certificate
 rotation can atomically update the bootstrap file. Configured Gateway data

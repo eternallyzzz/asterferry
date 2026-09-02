@@ -17,10 +17,7 @@ import (
 // from domain.Node: an installation that has never reached the Controller is
 // not an enrolled identity and must not be schedulable.
 type PendingNodeBootstrap struct {
-	NodeID string `json:"node_id"`
-	// Role is a legacy internal hint. The pending resource exposes only the
-	// optional configured spec kind; a generic installation may have neither.
-	Role      string            `json:"-"`
+	NodeID    string            `json:"node_id"`
 	SpecKind  string            `json:"spec_kind,omitempty"`
 	Name      string            `json:"name"`
 	Labels    map[string]string `json:"labels,omitempty"`
@@ -33,16 +30,15 @@ type PendingNodeBootstrap struct {
 
 type pendingNodeBootstrap struct {
 	PendingNodeBootstrap
-	TokenHash       string
-	GatewaySpecJSON []byte
-	AgentSpecJSON   []byte
+	TokenHash string
+	SpecJSON  []byte
 }
 
 // CreatePendingNodeBootstrap stores only the installation intent and a hash
 // of the one-time enrollment token. The node identity and its business spec
 // are created later by IssueNodeCertificate, after the installer reaches the
 // Controller with the token.
-func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, gatewaySpec *domain.GatewaySpec, agentSpec *domain.AgentSpec, options WriteOptions) (string, PendingNodeBootstrap, error) {
+func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, spec *domain.NodeSpec, options WriteOptions) (string, PendingNodeBootstrap, error) {
 	if err := node.Validate(); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
@@ -54,54 +50,28 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 		return "", PendingNodeBootstrap{}, err
 	}
 
-	var gatewayJSON, agentJSON []byte
-	if gatewaySpec != nil && agentSpec != nil {
-		return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec", Path: "spec", Message: "a pending node can contain only one behavior spec"}
-	}
-	if node.Role != "" && node.Role != domain.RoleGateway && node.Role != domain.RoleAgent {
-		return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "spec.kind", Message: "node behavior must be gateway or agent"}
-	}
-	if gatewaySpec != nil {
-		if node.Role != "" && node.Role != domain.RoleGateway {
-			return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "spec.kind", Message: "gateway spec does not match node behavior"}
-		}
-		node.Role = domain.RoleGateway
-		spec := *gatewaySpec
-		spec.NodeID = node.ID
-		spec.Revision = 0
-		if spec.Labels == nil {
-			spec.Labels = cloneStringMap(node.Labels)
-		}
-		if err := spec.Validate(); err != nil {
-			return "", PendingNodeBootstrap{}, err
-		}
-		if err := s.protectObfuscationPolicy(&spec.Obfuscation); err != nil {
-			return "", PendingNodeBootstrap{}, err
-		}
-		gatewayJSON, err = json.Marshal(spec)
-		if err != nil {
-			return "", PendingNodeBootstrap{}, err
-		}
-	} else if agentSpec != nil || node.Role == domain.RoleAgent {
-		if node.Role != "" && node.Role != domain.RoleAgent {
-			return "", PendingNodeBootstrap{}, &domain.ApplyError{Code: "invalid_spec_kind", Path: "spec.kind", Message: "agent spec does not match node behavior"}
-		}
-		node.Role = domain.RoleAgent
-		if agentSpec == nil {
-			spec := domain.AgentSpec{
-				NodeID:  node.ID,
-				Limits:  domain.AgentLimits{MaxConnections: 4096, MaxStreams: 1024, MaxBufferBytes: 64 << 20},
-				Logging: domain.LoggingPolicy{Level: "info", Format: "json"},
+	var specJSON []byte
+	if spec != nil {
+		value := *spec
+		value.NodeID = node.ID
+		value.Revision = 0
+		value.UpdatedAt = time.Time{}
+		if value.Gateway != nil {
+			value.Gateway.NodeID = node.ID
+			if value.Gateway.Labels == nil {
+				value.Gateway.Labels = cloneStringMap(node.Labels)
 			}
-			agentSpec = &spec
+			if err := s.protectObfuscationPolicy(&value.Gateway.Obfuscation); err != nil {
+				return "", PendingNodeBootstrap{}, err
+			}
 		}
-		spec := *agentSpec
-		spec.NodeID = node.ID
-		spec.Revision = 0
-		if err := spec.Validate(); err != nil {
+		if value.Agent != nil {
+			value.Agent.NodeID = node.ID
+		}
+		if err := value.Validate(); err != nil {
 			return "", PendingNodeBootstrap{}, err
 		}
-		agentJSON, err = json.Marshal(spec)
+		specJSON, err = json.Marshal(value)
 		if err != nil {
 			return "", PendingNodeBootstrap{}, err
 		}
@@ -115,16 +85,14 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 	tokenHash := HashToken(plain)
 	now := time.Now().UTC()
 	pending := PendingNodeBootstrap{
-		NodeID: node.ID, Role: node.Role, Name: node.Name, Labels: cloneStringMap(node.Labels),
+		NodeID: node.ID, Name: node.Name, Labels: cloneStringMap(node.Labels),
 		Enabled: node.Enabled, Platform: platform, Arch: arch,
 		ExpiresAt: now.Add(EnrollmentTTL), CreatedAt: now,
 	}
-	if len(gatewayJSON) > 0 {
-		pending.SpecKind = string(domain.NodeSpecGateway)
-	} else if len(agentJSON) > 0 {
-		pending.SpecKind = string(domain.NodeSpecAgent)
+	if spec != nil {
+		pending.SpecKind = string(spec.Kind)
 	}
-	request := pendingBootstrapRequestForHash(pending, gatewaySpec, agentSpec)
+	request := pendingBootstrapRequestForHash(pending, spec)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -160,12 +128,12 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 	if err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO node_bootstraps(node_id,role,name,labels_json,enabled,platform,arch,gateway_spec_json,agent_spec_json,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		node.ID, node.Role, node.Name, labels, boolInt(node.Enabled), platform, arch, nullableJSON(gatewayJSON), nullableJSON(agentJSON), tokenHash, pending.ExpiresAt.Format(time.RFC3339Nano), pending.CreatedAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO node_bootstraps(node_id,name,labels_json,enabled,platform,arch,spec_json,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		node.ID, node.Name, labels, boolInt(node.Enabled), platform, arch, nullableJSON(specJSON), tokenHash, pending.ExpiresAt.Format(time.RFC3339Nano), pending.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return "", PendingNodeBootstrap{}, fmt.Errorf("create pending node bootstrap: %w", err)
 	}
-	if err := insertAudit(ctx, tx, options.Actor, "create", "node_bootstrap", node.ID, 0, map[string]string{"role": node.Role, "platform": platform, "arch": arch}); err != nil {
+	if err := insertAudit(ctx, tx, options.Actor, "create", "node_bootstrap", node.ID, 0, map[string]string{"platform": platform, "arch": arch}); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, pendingBootstrapIdempotencyResponse(pending)); err != nil {
@@ -177,30 +145,24 @@ func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node
 	return plain, pending, nil
 }
 
-func pendingBootstrapRequestForHash(pending PendingNodeBootstrap, gatewaySpec *domain.GatewaySpec, agentSpec *domain.AgentSpec) any {
+func pendingBootstrapRequestForHash(pending PendingNodeBootstrap, spec *domain.NodeSpec) any {
 	request := struct {
-		NodeID      string            `json:"node_id"`
-		Role        string            `json:"role"`
-		Name        string            `json:"name"`
-		Labels      map[string]string `json:"labels,omitempty"`
-		Enabled     bool              `json:"enabled"`
-		Platform    string            `json:"platform"`
-		Arch        string            `json:"arch"`
-		GatewaySpec any               `json:"gateway_spec,omitempty"`
-		AgentSpec   any               `json:"agent_spec,omitempty"`
-	}{NodeID: pending.NodeID, Role: pending.Role, Name: pending.Name, Labels: pending.Labels, Enabled: pending.Enabled, Platform: pending.Platform, Arch: pending.Arch}
-	if gatewaySpec != nil {
-		spec := *gatewaySpec
-		spec.NodeID = pending.NodeID
-		spec.Revision = 0
-		spec.Obfuscation = obfuscationRequestPolicyWithKeyIDs(spec.Obfuscation)
-		request.GatewaySpec = spec
-	}
-	if agentSpec != nil {
-		spec := *agentSpec
-		spec.NodeID = pending.NodeID
-		spec.Revision = 0
-		request.AgentSpec = spec
+		NodeID   string            `json:"node_id"`
+		Name     string            `json:"name"`
+		Labels   map[string]string `json:"labels,omitempty"`
+		Enabled  bool              `json:"enabled"`
+		Platform string            `json:"platform"`
+		Arch     string            `json:"arch"`
+		Spec     any               `json:"spec,omitempty"`
+	}{NodeID: pending.NodeID, Name: pending.Name, Labels: pending.Labels, Enabled: pending.Enabled, Platform: pending.Platform, Arch: pending.Arch}
+	if spec != nil {
+		value := *spec
+		value.NodeID = pending.NodeID
+		value.Revision = 0
+		if value.Gateway != nil {
+			value.Gateway.Obfuscation = obfuscationRequestPolicyWithKeyIDs(value.Gateway.Obfuscation)
+		}
+		request.Spec = value
 	}
 	return request
 }
@@ -358,14 +320,14 @@ func (s *Store) DeletePendingNodeBootstrap(ctx context.Context, nodeID string, o
 	return tx.Commit()
 }
 
-const pendingBootstrapSelect = `SELECT node_id,role,name,labels_json,enabled,platform,arch,expires_at,created_at,CASE WHEN gateway_spec_json IS NOT NULL THEN 'gateway' WHEN agent_spec_json IS NOT NULL THEN 'agent' ELSE '' END FROM node_bootstraps`
+const pendingBootstrapSelect = `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,CASE WHEN spec_json IS NOT NULL THEN json_extract(spec_json,'$.kind') ELSE '' END FROM node_bootstraps`
 
 func loadPendingBootstrapTx(ctx context.Context, tx *sql.Tx, nodeID string) (pendingNodeBootstrap, error) {
-	return scanPendingBootstrapWithSpec(tx.QueryRowContext(ctx, `SELECT node_id,role,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,gateway_spec_json,agent_spec_json FROM node_bootstraps WHERE node_id=?`, nodeID))
+	return scanPendingBootstrapWithSpec(tx.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE node_id=?`, nodeID))
 }
 
 func (s *Store) pendingBootstrapForToken(ctx context.Context, tokenHash string) (pendingNodeBootstrap, error) {
-	return scanPendingBootstrapWithSpec(s.db.QueryRowContext(ctx, `SELECT node_id,role,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,gateway_spec_json,agent_spec_json FROM node_bootstraps WHERE token_hash=?`, tokenHash))
+	return scanPendingBootstrapWithSpec(s.db.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE token_hash=?`, tokenHash))
 }
 
 func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
@@ -373,7 +335,7 @@ func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 	var labels []byte
 	var enabled int
 	var expires, created string
-	if err := row.Scan(&pending.NodeID, &pending.Role, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.SpecKind); err != nil {
+	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.SpecKind); err != nil {
 		return PendingNodeBootstrap{}, err
 	}
 	if len(labels) > 0 {
@@ -396,10 +358,10 @@ func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 
 func scanPendingBootstrapWithSpec(row scanner) (pendingNodeBootstrap, error) {
 	var pending pendingNodeBootstrap
-	var labels, gatewayJSON, agentJSON []byte
+	var labels, specJSON []byte
 	var enabled int
 	var expires, created string
-	if err := row.Scan(&pending.NodeID, &pending.Role, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.TokenHash, &gatewayJSON, &agentJSON); err != nil {
+	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.TokenHash, &specJSON); err != nil {
 		return pendingNodeBootstrap{}, err
 	}
 	if len(labels) > 0 {
@@ -408,12 +370,12 @@ func scanPendingBootstrapWithSpec(row scanner) (pendingNodeBootstrap, error) {
 		}
 	}
 	pending.Enabled = enabled != 0
-	pending.GatewaySpecJSON = append([]byte(nil), gatewayJSON...)
-	pending.AgentSpecJSON = append([]byte(nil), agentJSON...)
-	if len(gatewayJSON) > 0 {
-		pending.SpecKind = string(domain.NodeSpecGateway)
-	} else if len(agentJSON) > 0 {
-		pending.SpecKind = string(domain.NodeSpecAgent)
+	pending.SpecJSON = append([]byte(nil), specJSON...)
+	if len(specJSON) > 0 {
+		var spec domain.NodeSpec
+		if err := json.Unmarshal(specJSON, &spec); err == nil {
+			pending.SpecKind = string(spec.Kind)
+		}
 	}
 	var err error
 	pending.ExpiresAt, err = parseStoredTime("node_bootstrap.expires_at", expires)
@@ -428,5 +390,5 @@ func scanPendingBootstrapWithSpec(row scanner) (pendingNodeBootstrap, error) {
 }
 
 func (p PendingNodeBootstrap) node() domain.Node {
-	return domain.Node{ID: p.NodeID, Role: p.Role, Name: p.Name, Labels: cloneStringMap(p.Labels), Enabled: p.Enabled}
+	return domain.Node{ID: p.NodeID, Name: p.Name, Labels: cloneStringMap(p.Labels), Enabled: p.Enabled}
 }

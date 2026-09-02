@@ -9,7 +9,7 @@ import (
 )
 
 func TestEngineEgressPolicyResolvesAndLimitsTargets(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-egress"})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-egress"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestEngineEgressPolicyResolvesAndLimitsTargets(t *testing.T) {
 }
 
 func TestEngineEgressPolicyRequiresSpecialUseException(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-special"})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-special"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestEngineEgressPolicyRequiresSpecialUseException(t *testing.T) {
 }
 
 func TestEngineEgressLimitAppliesWhenFilteringIsDisabled(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-unrestricted"})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-unrestricted"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestEngineEgressLimitAppliesWhenFilteringIsDisabled(t *testing.T) {
 }
 
 func TestGatewayEngineAuthorizesEgressWithoutService(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleGateway, NodeID: "gateway-egress"})
+	engine, err := New(Options{Kind: domain.NodeSpecGateway, NodeID: "gateway-egress"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestGatewayEngineAuthorizesEgressWithoutService(t *testing.T) {
 }
 
 func TestEngineAppliesAtomicallyAndBoundsAdmissions(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-1", MaxStreams: 1, MaxSessions: 1})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-1", MaxStreams: 1, MaxSessions: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestEngineAppliesAtomicallyAndBoundsAdmissions(t *testing.T) {
 }
 
 func TestEngineAppliesAgentConnectionLimit(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-connections", MaxStreams: 8})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-connections", MaxStreams: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestEngineAppliesAgentConnectionLimit(t *testing.T) {
 }
 
 func TestEngineLocalProxyUsesConnectionLimit(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-local", MaxStreams: 4})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-local", MaxStreams: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestEngineLocalProxyUsesConnectionLimit(t *testing.T) {
 }
 
 func TestEngineResetSnapshotClearsSpeculativeGeneration(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-reset"})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-reset"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestEngineResetSnapshotClearsSpeculativeGeneration(t *testing.T) {
 }
 
 func TestEngineOpenLeaseIsGenerationScoped(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-lease", MaxStreams: 8})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-lease", MaxStreams: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestEngineOpenLeaseIsGenerationScoped(t *testing.T) {
 }
 
 func TestEngineSnapshotStreamLimitCanBeRelaxed(t *testing.T) {
-	engine, err := New(Options{Role: domain.RoleAgent, NodeID: "agent-limit-reset", MaxStreams: 4})
+	engine, err := New(Options{Kind: domain.NodeSpecAgent, NodeID: "agent-limit-reset", MaxStreams: 4})
 	if err != nil {
 		t.Fatal(err)
 	}

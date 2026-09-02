@@ -107,20 +107,19 @@ $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferr
 $binaryPath = Join-Path $output "asterferry.exe"
 Invoke-Checked "Windows amd64 binary" "go" @("build", "-trimpath", "-ldflags=$ldflags", "-o", $binaryPath, "./cmd/asterferry")
 $versionOutput = (& $binaryPath version | Out-String)
-if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: AFDP/2 \+ control/1") {
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: AFDP/2 \+ control/2") {
 	throw "Release binary did not report version $Version and AFDP/2: $versionOutput"
 }
 
 Invoke-Checked "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
-Invoke-Checked "Helm lint Gateway node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=gateway")
-Invoke-Checked "Helm lint Agent node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=agent")
-$gatewayTemplate = (& helm template release-check deploy/helm/asterferry-node --set role=gateway | Out-String)
+Invoke-Checked "Helm lint Node" "helm" @("lint", "deploy/helm/asterferry-node")
+$nodeTemplate = (& helm template release-check deploy/helm/asterferry-node | Out-String)
 $expectedImage = "ghcr.io/eternallyzzz/asterferry:$Version"
-if ($LASTEXITCODE -ne 0 -or $gatewayTemplate -notmatch [regex]::Escape($expectedImage)) {
+if ($LASTEXITCODE -ne 0 -or $nodeTemplate -notmatch [regex]::Escape($expectedImage)) {
     throw "Default Helm image reference did not resolve to the release version"
 }
 $digest = "sha256:" + ("a" * 64)
-$digestTemplate = (& helm template release-check deploy/helm/asterferry-node --set role=gateway --set image.digest=$digest | Out-String)
+$digestTemplate = (& helm template release-check deploy/helm/asterferry-node --set image.digest=$digest | Out-String)
 if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch "ghcr\.io/eternallyzzz/asterferry@$digest") {
     throw "Helm digest image override did not render correctly"
 }
@@ -143,10 +142,10 @@ if (-not $SkipDocker) {
 
 $report = [ordered]@{
     version = $Version
-    protocol = "AFDP/2 + control/1"
+    protocol = "AFDP/2 + control/2"
     windows_binary = $binaryPath
     charts = @("asterferry-controller-$Version.tgz", "asterferry-node-$Version.tgz")
     docker_checked = (-not $SkipDocker)
 }
 $report | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $output "report.json")
-Write-Host "Release preflight passed for $Version (AFDP/2 + control/1)"
+Write-Host "Release preflight passed for $Version (AFDP/2 + control/2)"

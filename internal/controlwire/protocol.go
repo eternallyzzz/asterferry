@@ -24,7 +24,7 @@ import (
 const (
 	MaxControlMessageBytes = 16 << 20
 	MaxEventBatchBytes     = 4 << 20
-	ControlALPN            = "asterferry-control/1"
+	ControlALPN            = "asterferry-control/2"
 )
 
 var (

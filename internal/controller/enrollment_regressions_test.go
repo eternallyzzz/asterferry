@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,35 +12,33 @@ import (
 	nodepkg "asterferry/internal/node"
 )
 
-func TestRolelessEnrollmentTokenUsesConfiguredNodeRole(t *testing.T) {
+func TestGenericEnrollmentTokenCanReenrollConfiguredNode(t *testing.T) {
 	config, store := openEnrollmentTestController(t)
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "gateway", Role: domain.RoleGateway, Name: "gateway", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "gateway", Name: "gateway", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := store.CreateEnrollmentToken(ctx, "", time.Minute)
+	if err := store.PutNodeSpec(ctx, domain.NewGatewayNodeSpec(domain.GatewaySpec{
+		NodeID: "gateway", PublicEndpoints: []string{"gateway.example:4433"},
+	}), WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := store.CreateEnrollmentToken(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr, _, err := nodepkg.GenerateCSR("gateway", "")
+	csr, _, err := nodepkg.GenerateCSR("gateway")
 	if err != nil {
 		t.Fatal(err)
 	}
-	certificate, err := store.IssueNodeCertificate(ctx, config, token, "", "gateway", csr)
+	certificate, err := store.IssueNodeCertificate(ctx, config, token, "gateway", csr)
 	if err != nil {
-		t.Fatalf("roleless re-enrollment failed: %v", err)
+		t.Fatalf("generic re-enrollment failed: %v", err)
 	}
 	leaf := parseEnrollmentCertificate(t, certificate.CertificatePEM)
-	organization := make(map[string]struct{}, len(leaf.Subject.Organization))
-	for _, value := range leaf.Subject.Organization {
-		organization[value] = struct{}{}
-	}
-	if _, ok := organization["AsterFerry"]; !ok {
-		t.Fatalf("certificate organization = %#v, missing generic marker", leaf.Subject.Organization)
-	}
-	if _, ok := organization[domain.RoleGateway]; !ok {
-		t.Fatalf("certificate organization = %#v, missing gateway marker", leaf.Subject.Organization)
+	if len(leaf.Subject.Organization) != 1 || leaf.Subject.Organization[0] != "AsterFerry" {
+		t.Fatalf("certificate organization = %#v, want generic identity", leaf.Subject.Organization)
 	}
 	node, err := store.GetNode(ctx, "gateway")
 	if err != nil {
@@ -52,57 +49,42 @@ func TestRolelessEnrollmentTokenUsesConfiguredNodeRole(t *testing.T) {
 	}
 }
 
-func TestRolelessEnrollmentUsesBoundTokenRoleAndRejectsMismatch(t *testing.T) {
+func TestGenericEnrollmentTokenIsNotBoundToSpecKind(t *testing.T) {
 	config, store := openEnrollmentTestController(t)
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
+	for _, node := range []domain.Node{
+		{ID: "agent", Name: "agent", Enabled: true},
+		{ID: "gateway", Name: "gateway", Enabled: true},
+	} {
+		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.PutNodeSpec(ctx, domain.NewAgentNodeSpec(domain.AgentSpec{NodeID: "agent"}), WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	csr, _, err := nodepkg.GenerateCSR("agent", "")
+	if err := store.PutNodeSpec(ctx, domain.NewGatewayNodeSpec(domain.GatewaySpec{NodeID: "gateway", PublicEndpoints: []string{"gateway.example:4433"}}), WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := store.CreateEnrollmentToken(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	boundToken, _, err := store.CreateEnrollmentToken(ctx, domain.RoleAgent, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.IssueNodeCertificate(ctx, config, boundToken, "", "agent", csr); err != nil {
-		t.Fatalf("roleless request did not use the configured Node role: %v", err)
-	}
-	mismatchedToken, _, err := store.CreateEnrollmentToken(ctx, domain.RoleGateway, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.IssueNodeCertificate(ctx, config, mismatchedToken, "", "agent", csr); !errors.Is(err, ErrEnrollmentRoleMismatch) {
-		t.Fatalf("mismatched bound token error = %v, want ErrEnrollmentRoleMismatch", err)
-	}
-}
-
-func TestGenericCSRCanRenewConfiguredNodeCertificate(t *testing.T) {
-	config, store := openEnrollmentTestController(t)
-	defer store.Close()
-	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	token, _, err := store.CreateEnrollmentToken(ctx, "", time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	csr, _, err := nodepkg.GenerateCSR("agent", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.IssueNodeCertificate(ctx, config, token, "", "agent", csr); err != nil {
-		t.Fatal(err)
-	}
-	renewedCSR, _, err := nodepkg.GenerateCSR("agent", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.RenewNodeCertificate(ctx, config, "agent", renewedCSR); err != nil {
-		t.Fatalf("generic CSR renewal failed: %v", err)
+	for _, nodeID := range []string{"agent", "gateway"} {
+		csr, _, err := nodepkg.GenerateCSR(nodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.IssueNodeCertificate(ctx, config, token, nodeID, csr); err != nil {
+			t.Fatalf("generic token could not enroll %s: %v", nodeID, err)
+		}
+		if nodeID == "agent" {
+			token, _, err = store.CreateEnrollmentToken(ctx, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 

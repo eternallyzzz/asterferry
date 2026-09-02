@@ -16,11 +16,6 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		kind := r.URL.Query().Get("kind")
-		if kind == "" {
-			// Keep the old query name for one release so existing automation does
-			// not lose access while the public resource is renamed to Node.
-			kind = r.URL.Query().Get("role")
-		}
 		nodes, err := s.store.ListNodes(r.Context(), kind)
 		if err != nil {
 			writeStoreError(w, err)
@@ -77,8 +72,21 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		s.nodeBootstrap(w, r, nodeID)
 		return
 	}
-	if len(parts) == 2 && parts[1] == "spec" {
-		s.nodeSpecAction(w, r, nodeID)
+	if len(parts) >= 2 && parts[1] == "spec" {
+		switch {
+		case len(parts) == 2:
+			s.nodeSpecAction(w, r, nodeID)
+		case len(parts) == 3 && parts[2] == "egress":
+			s.nodeEgressAction(w, r, nodeID)
+		case len(parts) >= 3 && (parts[2] == "proxies" || parts[2] == "routes"):
+			if len(parts) > 4 {
+				writeError(w, http.StatusNotFound, "not_found", "node spec subresource was not found")
+				return
+			}
+			s.nodeAgentSpecSubresource(w, r, nodeID, parts[2], parts[3:])
+		default:
+			writeError(w, http.StatusNotFound, "not_found", "node spec resource was not found")
+		}
 		return
 	}
 	if len(parts) == 2 && r.Method == http.MethodGet && (parts[1] == "observed" || parts[1] == "snapshot" || parts[1] == "desired") {
@@ -222,6 +230,15 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		action := parts[2]
+		if action == "schedule" {
+			assignments, scheduleErr := s.store.ScheduleAgent(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+			if scheduleErr != nil {
+				writeStoreError(w, scheduleErr)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, map[string]any{"node_id": nodeID, "action": action, "assignments": assignments})
+			return
+		}
 		if action != "drain" && action != "reconnect" && action != "resync" {
 			writeError(w, http.StatusBadRequest, "unknown_action", "unsupported node action")
 			return

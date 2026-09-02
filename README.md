@@ -84,9 +84,9 @@ asterferry node enroll --controller controller.example:9443 --token <one-time-to
 asterferry node run --bootstrap node-bootstrap.json
 ```
 
-The legacy `gateway` and `agent` commands remain available for existing
-role-bound bootstrap files. Business resources are managed through `/api/v1` or the optional
-Dashboard at `/dashboard/`. Mutating API requests use `If-Match` revisions and
+Business resources are managed through `/api/v1` or the optional Dashboard at
+`/dashboard/`. The public API has one Node resource tree; Gateway/Agent are
+behavior values under `/nodes/{id}/spec`. Mutating API requests use `If-Match` revisions and
 may include an `Idempotency-Key`.
 
 Controller backups include the database, master key, CA and TLS identity:
@@ -105,7 +105,7 @@ are AES-GCM encrypted with the master key, passwords use Argon2id, and API or
 enrollment tokens are stored only as hashes.
 
 The REST API supports login/logout, Cookie sessions with CSRF protection, API
-tokens, fixed Viewer/Operator/Admin roles, Node and Node Spec resources,
+tokens, fixed Viewer/Operator/Admin roles, unified Node and Node Spec resources,
 typed Gateway/Agent behavior documents, services, assignments, enrollment
 tokens, runtime actions, observed state, events and audit queries. `/healthz` is anonymous; `/readyz` and `/metrics` are protected
 by deployment policy. OpenAPI is served at `/openapi.yaml`.
@@ -116,20 +116,13 @@ port collisions are transactional conflicts; zero ports are allocated from the
 Gateway's protocol-specific pool. Every desired snapshot has one node scope,
 monotonic generation, schema version and SHA-256 checksum.
 
-### Controller database upgrades
+### Controller database lifecycle
 
-Controller schema upgrades are explicit maintenance operations. Stop the
-Controller, run a validation-only pass, then publish the migration:
-
-```powershell
-asterferry controller migrate --config ./controller/controller.json --dry-run
-asterferry controller migrate --config ./controller/controller.json
-```
-
-The command upgrades schema v3, v4, v5 or v6 to v7, keeps the original database as
-a rollback backup, and never runs while `controller run` is active. Existing
-databases are not rewritten by `OpenStore`; take a complete Controller backup
-before the maintenance window.
+This pre-1.0 generation uses a fresh SQLite schema (v8) and intentionally has no
+in-place migration command. A database from an older generation is rejected by
+`OpenStore`; export any required business configuration, take a complete backup,
+then initialize a new Controller directory during the upgrade window. Never
+point a new binary at an old database and expect it to rewrite it silently.
 
 ## Node behavior
 
@@ -161,7 +154,7 @@ input fails closed. Routing, egress, quotas and obfuscation policy come from
 the node snapshot; the Controller never enters the business data path.
 
 AFDP/1 and AFDP/2 are not wire-compatible: the ALPN and version byte changed,
-and there is no fallback codec. Upgrade Gateway and Agent binaries together
+and there is no fallback codec. Upgrade all Node binaries together
 with the Controller-side rollout before opening new data-plane sessions.
 
 The first release supports multiple Gateways only when each has an independent
@@ -171,8 +164,9 @@ migration and Controller HA are deliberately out of scope.
 ## Deployment and verification
 
 The Controller has standalone Docker, systemd and single-replica StatefulSet
-examples under `deploy/`. Gateway and Agent are independently deployable and
-mount only their bootstrap/cache directories. The Dashboard is static and can
+examples under `deploy/`. Every data-plane host runs the same generic `node`
+command and mounts only its bootstrap/cache directories; its Gateway or Agent
+behavior is selected later by the Node Spec. The Dashboard is static and can
 be disabled in Controller JSON.
 
 Run the core verification suite:

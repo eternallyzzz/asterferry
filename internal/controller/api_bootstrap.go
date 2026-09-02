@@ -46,14 +46,7 @@ func (s *Server) nodeBootstrap(w http.ResponseWriter, r *http.Request, nodeID st
 		writeStoreError(w, err)
 		return
 	}
-	// ensureBootstrapSpec may have materialized the first behavior for a
-	// generic identity. Reload the node before binding the one-time token so the
-	// token role and generated command cannot carry the stale empty hint.
-	if node, err = s.store.GetNode(r.Context(), nodeID); err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	plain, token, err := s.store.CreateNodeEnrollmentTokenWithOptions(r.Context(), node.ID, node.Role, EnrollmentTTL, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	plain, token, err := s.store.CreateNodeEnrollmentTokenWithOptions(r.Context(), node.ID, EnrollmentTTL, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		if errors.Is(err, ErrSecretAlreadyCreated) {
 			writeAlreadyCreatedSecret(w, "token_metadata", token)
@@ -96,45 +89,6 @@ func (s *Server) ensureBootstrapSpec(r *http.Request, node domain.Node, input No
 			}
 		}
 		return s.store.PutNodeSpec(r.Context(), spec, WriteOptions{Actor: actor})
-	}
-	if node.Role == domain.RoleGateway {
-		_, err := s.store.GetGatewaySpec(r.Context(), node.ID)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if input.GatewaySpec == nil {
-			return &domain.ApplyError{Code: "gateway_spec_required", Path: "gateway_spec", Message: "a Gateway public endpoint and port pool are required for first provisioning"}
-		}
-		spec := *input.GatewaySpec
-		spec.NodeID = node.ID
-		spec.Revision = 0
-		if spec.Labels == nil {
-			spec.Labels = cloneStringMap(node.Labels)
-		}
-		return s.store.PutGatewaySpec(r.Context(), spec, WriteOptions{Actor: actor})
-	}
-	if node.Role == domain.RoleAgent {
-		_, err := s.store.GetAgentSpec(r.Context(), node.ID)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		spec := domain.AgentSpec{
-			NodeID:  node.ID,
-			Limits:  domain.AgentLimits{MaxConnections: 4096, MaxStreams: 1024, MaxBufferBytes: 64 << 20},
-			Logging: domain.LoggingPolicy{Level: "info", Format: "json"},
-		}
-		if input.AgentSpec != nil {
-			spec = *input.AgentSpec
-			spec.NodeID = node.ID
-			spec.Revision = 0
-		}
-		return s.store.PutAgentSpec(r.Context(), spec, WriteOptions{Actor: actor})
 	}
 	// A generic node may be bootstrapped before its behavior is chosen. It will
 	// enroll, establish a control stream, and remain idle until /spec is set.

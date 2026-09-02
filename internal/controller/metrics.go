@@ -39,7 +39,7 @@ type ControllerMetrics struct {
 }
 
 type observedMetric struct {
-	role       string
+	kind       string
 	healthy    bool
 	generation uint64
 	streams    float64
@@ -59,20 +59,20 @@ func newControllerMetrics() *ControllerMetrics {
 	m.streams = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_control_streams", Help: "Connected node control streams."})
 	m.schedRun = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "asterferry_controller_scheduler_runs_total", Help: "Controller scheduling and reconciliation runs."}, []string{"result"})
 	m.schedTime = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "asterferry_controller_scheduler_duration_seconds", Help: "Controller scheduling duration."})
-	m.observedNodes = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_observed_nodes", Help: "Observed node counts by role and health."}, []string{"role", "health"})
-	m.snapshotGen = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_snapshot_generation", Help: "Highest applied snapshot generation observed by node role."}, []string{"role"})
-	m.activeStreams = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_streams", Help: "Observed active data streams by node role."}, []string{"role"})
-	m.activeSessions = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_sessions", Help: "Observed active sessions by node role."}, []string{"role"})
-	m.activeEgress = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_egress", Help: "Observed active egress connections by node role."}, []string{"role"})
+	m.observedNodes = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_observed_nodes", Help: "Observed node counts by behavior kind and health."}, []string{"kind", "health"})
+	m.snapshotGen = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_snapshot_generation", Help: "Highest applied snapshot generation observed by node kind."}, []string{"kind"})
+	m.activeStreams = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_streams", Help: "Observed active data streams by node kind."}, []string{"kind"})
+	m.activeSessions = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_sessions", Help: "Observed active sessions by node kind."}, []string{"kind"})
+	m.activeEgress = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_active_egress", Help: "Observed active egress connections by node kind."}, []string{"kind"})
 	m.listeners = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_listeners", Help: "Observed listeners by protocol."}, []string{"protocol"})
-	m.geoipUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Number of observed nodes with an available optional GeoIP database, by node role."}, []string{"role"})
+	m.geoipUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Number of observed nodes with an available optional GeoIP database, by node kind."}, []string{"kind"})
 	for _, collector := range []prometheus.Collector{m.up, m.sqliteUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.listeners, m.geoipUp} {
 		m.registry.MustRegister(collector)
 	}
 	m.up.Set(1)
 	m.sqliteUp.Set(1)
-	for _, role := range []string{domain.RoleGateway, domain.RoleAgent} {
-		m.geoipUp.WithLabelValues(role).Set(0)
+	for _, kind := range []string{string(domain.NodeSpecGateway), string(domain.NodeSpecAgent)} {
+		m.geoipUp.WithLabelValues(kind).Set(0)
 	}
 	return m
 }
@@ -128,11 +128,11 @@ func (m *ControllerMetrics) observeGRPC(method, code string) {
 	}
 }
 
-func (m *ControllerMetrics) observeNode(nodeID, role string, observed domain.ObservedState) {
+func (m *ControllerMetrics) observeNode(nodeID, kind string, observed domain.ObservedState) {
 	if m == nil {
 		return
 	}
-	current := observedMetric{role: role, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], geoipUp: observed.Metrics["geoip_up"] >= 0.5, listeners: make(map[string]int)}
+	current := observedMetric{kind: kind, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], geoipUp: observed.Metrics["geoip_up"] >= 0.5, listeners: make(map[string]int)}
 	for _, listener := range observed.Listeners {
 		current.listeners[listener.Protocol]++
 	}
@@ -153,10 +153,10 @@ func (m *ControllerMetrics) removeNode(nodeID string) {
 }
 
 func (m *ControllerMetrics) recomputeLocked() {
-	byRole := make(map[string]struct{ healthy, degraded, streams, sessions, egress, generation, geoipUp float64 })
+	byKind := make(map[string]struct{ healthy, degraded, streams, sessions, egress, generation, geoipUp float64 })
 	listenerTotals := make(map[string]float64)
 	for _, value := range m.nodes {
-		aggregate := byRole[value.role]
+		aggregate := byKind[value.kind]
 		if value.healthy {
 			aggregate.healthy++
 		} else {
@@ -171,23 +171,23 @@ func (m *ControllerMetrics) recomputeLocked() {
 		if generation := float64(value.generation); generation > aggregate.generation {
 			aggregate.generation = generation
 		}
-		byRole[value.role] = aggregate
+		byKind[value.kind] = aggregate
 		for protocol, count := range value.listeners {
 			listenerTotals[protocol] += float64(count)
 		}
 	}
-	for role, aggregate := range byRole {
-		m.observedNodes.WithLabelValues(role, "healthy").Set(aggregate.healthy)
-		m.observedNodes.WithLabelValues(role, "degraded").Set(aggregate.degraded)
-		m.activeStreams.WithLabelValues(role).Set(aggregate.streams)
-		m.activeSessions.WithLabelValues(role).Set(aggregate.sessions)
-		m.activeEgress.WithLabelValues(role).Set(aggregate.egress)
-		m.snapshotGen.WithLabelValues(role).Set(aggregate.generation)
-		m.geoipUp.WithLabelValues(role).Set(aggregate.geoipUp)
+	for kind, aggregate := range byKind {
+		m.observedNodes.WithLabelValues(kind, "healthy").Set(aggregate.healthy)
+		m.observedNodes.WithLabelValues(kind, "degraded").Set(aggregate.degraded)
+		m.activeStreams.WithLabelValues(kind).Set(aggregate.streams)
+		m.activeSessions.WithLabelValues(kind).Set(aggregate.sessions)
+		m.activeEgress.WithLabelValues(kind).Set(aggregate.egress)
+		m.snapshotGen.WithLabelValues(kind).Set(aggregate.generation)
+		m.geoipUp.WithLabelValues(kind).Set(aggregate.geoipUp)
 	}
-	for _, role := range []string{domain.RoleGateway, domain.RoleAgent} {
-		if _, ok := byRole[role]; !ok {
-			m.geoipUp.WithLabelValues(role).Set(0)
+	for _, kind := range []string{string(domain.NodeSpecGateway), string(domain.NodeSpecAgent)} {
+		if _, ok := byKind[kind]; !ok {
+			m.geoipUp.WithLabelValues(kind).Set(0)
 		}
 	}
 	for _, protocol := range []string{"tcp", "udp", "http", "socks5"} {
@@ -215,7 +215,7 @@ func routeLabel(path string) string {
 		return path
 	}
 	if len(path) >= len("/api/v1/") && path[:len("/api/v1/")] == "/api/v1/" {
-		for _, prefix := range []string{"auth/login", "auth/logout", "me", "nodes", "gateways", "agents", "services", "assignments", "enrollment-tokens", "audit", "events", "users"} {
+		for _, prefix := range []string{"auth/login", "auth/logout", "me", "nodes", "node-installations", "services", "assignments", "enrollment-tokens", "audit", "events", "users"} {
 			base := "/api/v1/" + prefix
 			if path == base || (len(path) > len(base) && path[:len(base)+1] == base+"/") {
 				return base

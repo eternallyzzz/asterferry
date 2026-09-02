@@ -111,9 +111,11 @@ func (s *Store) protectObfuscationPolicy(policy *domain.ObfuscationPolicy) error
 	if err != nil || len(current) != 32 {
 		return errors.New("camouflage current key is not a valid Controller-encrypted 32-byte key")
 	}
-	if policy.KeyID == "" {
-		policy.KeyID = obfuscationKeyID(current)
+	currentKeyID := domain.ObfuscationKeyID(current)
+	if policy.KeyID != "" && policy.KeyID != currentKeyID {
+		return errors.New("obfuscation key id does not match the encrypted current key")
 	}
+	policy.KeyID = currentKeyID
 	if len(policy.PreviousKey) > 0 {
 		if len(policy.PreviousKey) != 32 {
 			return errors.New("previous data-plane obfuscation key must contain exactly 32 bytes")
@@ -131,9 +133,11 @@ func (s *Store) protectObfuscationPolicy(policy *domain.ObfuscationPolicy) error
 		if err != nil || len(previous) != 32 {
 			return errors.New("previous obfuscation key is not a valid Controller-encrypted 32-byte key")
 		}
-		if policy.PreviousKeyID == "" {
-			policy.PreviousKeyID = obfuscationKeyID(previous)
+		previousKeyID := domain.ObfuscationKeyID(previous)
+		if policy.PreviousKeyID != "" && policy.PreviousKeyID != previousKeyID {
+			return errors.New("obfuscation previous key id does not match the encrypted previous key")
 		}
+		policy.PreviousKeyID = previousKeyID
 	}
 	policy.Key = nil
 	policy.PreviousKey = nil
@@ -141,8 +145,7 @@ func (s *Store) protectObfuscationPolicy(policy *domain.ObfuscationPolicy) error
 }
 
 func obfuscationKeyID(key []byte) string {
-	digest := sha256.Sum256(key)
-	return hex.EncodeToString(digest[:])
+	return domain.ObfuscationKeyID(key)
 }
 
 func obfuscationRequestPolicy(policy domain.ObfuscationPolicy) domain.ObfuscationPolicy {
@@ -167,17 +170,6 @@ func sameObfuscationPolicy(left, right domain.ObfuscationPolicy) bool {
 		left.PreviousKeyID == right.PreviousKeyID &&
 		left.MaxPaddingBytes == right.MaxPaddingBytes &&
 		left.HandshakeShaping == right.HandshakeShaping
-}
-
-func snapshotForIdempotency(snapshot domain.DesiredSnapshot) domain.DesiredSnapshot {
-	request := snapshot.Clone()
-	if request.Gateway != nil {
-		request.Gateway.Obfuscation = obfuscationRequestPolicy(request.Gateway.Obfuscation)
-	}
-	for index := range request.Assignments {
-		request.Assignments[index].Obfuscation = obfuscationRequestPolicy(request.Assignments[index].Obfuscation)
-	}
-	return request
 }
 
 // SnapshotDocumentForWire decrypts only the data-plane keys needed by an
@@ -222,6 +214,10 @@ func (s *Store) decryptObfuscationPolicyForWire(policy *domain.ObfuscationPolicy
 		}
 		policy.Key = key
 	}
+	if policy.KeyID != "" && policy.KeyID != domain.ObfuscationKeyID(policy.Key) {
+		return errors.New("wire obfuscation key id does not match current key")
+	}
+	policy.KeyID = domain.ObfuscationKeyID(policy.Key)
 	if len(policy.PreviousKeyCiphertext) > 0 && len(policy.PreviousKey) == 0 {
 		key, err := DecryptSecret(s.masterKey[:], policy.PreviousKeyCiphertext)
 		if err != nil || len(key) != 32 {
@@ -231,6 +227,13 @@ func (s *Store) decryptObfuscationPolicyForWire(policy *domain.ObfuscationPolicy
 	}
 	if len(policy.Key) != 32 || (len(policy.PreviousKey) != 0 && len(policy.PreviousKey) != 32) {
 		return errors.New("wire obfuscation key has an invalid length")
+	}
+	if len(policy.PreviousKey) > 0 {
+		previousKeyID := domain.ObfuscationKeyID(policy.PreviousKey)
+		if policy.PreviousKeyID != "" && policy.PreviousKeyID != previousKeyID {
+			return errors.New("wire obfuscation previous key id does not match previous key")
+		}
+		policy.PreviousKeyID = previousKeyID
 	}
 	policy.KeyCiphertext = nil
 	policy.PreviousKeyCiphertext = nil

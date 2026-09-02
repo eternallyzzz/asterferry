@@ -40,7 +40,7 @@ type Runtime struct {
 	runtimeMu     sync.RWMutex
 	engine        *dataplane.Engine
 	dataPlane     *DataPlaneRuntime
-	runtimeKind   string
+	runtimeKind   domain.NodeSpecKind
 	runtimeOpts   RuntimeOptions
 	runCtx        context.Context
 	reconciler    *Reconciler
@@ -86,11 +86,6 @@ func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {
 		return nil, err
 	}
 	runtime.reconciler = reconciler
-	if bootstrap.Role != "" {
-		if _, _, err := runtime.ensureRuntimeKind(bootstrap.Role); err != nil {
-			return nil, err
-		}
-	}
 	if snapshot, readErr := cache.Read(); readErr == nil {
 		if kind, kindErr := snapshotRuntimeKind(snapshot); kindErr != nil {
 			return nil, kindErr
@@ -127,12 +122,12 @@ func (r *Runtime) DataPlane() *DataPlaneRuntime {
 
 func (r *Runtime) Reconciler() *Reconciler { return r.reconciler }
 
-func snapshotRuntimeKind(snapshot domain.DesiredSnapshot) (string, error) {
+func snapshotRuntimeKind(snapshot domain.DesiredSnapshot) (domain.NodeSpecKind, error) {
 	if snapshot.Gateway != nil && snapshot.Agent == nil {
-		return domain.RoleGateway, nil
+		return domain.NodeSpecGateway, nil
 	}
 	if snapshot.Agent != nil && snapshot.Gateway == nil {
-		return domain.RoleAgent, nil
+		return domain.NodeSpecAgent, nil
 	}
 	if snapshot.Gateway == nil && snapshot.Agent == nil {
 		return "", nil
@@ -140,11 +135,12 @@ func snapshotRuntimeKind(snapshot domain.DesiredSnapshot) (string, error) {
 	return "", errors.New("desired snapshot selects multiple node behaviors")
 }
 
-// ensureRuntimeKind lazily creates the role-specific data-plane components.
+// ensureRuntimeKind lazily creates the data-plane components for the selected
+// NodeSpec behavior.
 // The process, certificate, control stream, cache, and reconnect loop are
 // shared; only the adapters behind the current spec are replaced.
-func (r *Runtime) ensureRuntimeKind(kind string) (*dataplane.Engine, *DataPlaneRuntime, error) {
-	if kind != domain.RoleGateway && kind != domain.RoleAgent {
+func (r *Runtime) ensureRuntimeKind(kind domain.NodeSpecKind) (*dataplane.Engine, *DataPlaneRuntime, error) {
+	if kind != domain.NodeSpecGateway && kind != domain.NodeSpecAgent {
 		return nil, nil, errors.New("node behavior must be gateway or agent")
 	}
 	r.runtimeMu.Lock()
@@ -163,7 +159,7 @@ func (r *Runtime) ensureRuntimeKind(kind string) (*dataplane.Engine, *DataPlaneR
 	// replacement. A transient constructor or Start failure must be safe to
 	// retry instead of reusing a data plane that has already been closed.
 	r.engine, r.dataPlane, r.runtimeKind = nil, nil, ""
-	engine, err := dataplane.New(dataplane.Options{Role: kind, NodeID: r.bootstrap.NodeID, MaxStreams: r.runtimeOpts.MaxStreams, MaxSessions: r.runtimeOpts.MaxSessions})
+	engine, err := dataplane.New(dataplane.Options{Kind: kind, NodeID: r.bootstrap.NodeID, MaxStreams: r.runtimeOpts.MaxStreams, MaxSessions: r.runtimeOpts.MaxSessions})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -222,7 +218,7 @@ func (r *Runtime) applySnapshot(ctx context.Context, snapshot domain.DesiredSnap
 	if err != nil {
 		return err
 	}
-	previousKind := ""
+	var previousKind domain.NodeSpecKind
 	if previous != nil {
 		previousKind, _ = snapshotRuntimeKind(*previous)
 	}
@@ -242,7 +238,7 @@ func (r *Runtime) applySnapshot(ctx context.Context, snapshot domain.DesiredSnap
 	if !sameKind {
 		// An engine rejects a snapshot for the other behavior. A kind switch is
 		// a complete component replacement, so the new engine starts without a
-		// role-mismatched rollback baseline.
+		// behavior-mismatched rollback baseline.
 		enginePrevious = nil
 	}
 	wasDraining := engine.IsDraining()
@@ -284,7 +280,7 @@ func (r *Runtime) applySnapshot(ctx context.Context, snapshot domain.DesiredSnap
 			}
 			return err
 		}
-		// A failed kind switch is restored by constructing the old role again.
+		// A failed kind switch is restored by constructing the old behavior again.
 		oldEngine, oldDataPlane, restoreErr := r.ensureRuntimeKind(previousKind)
 		if restoreErr == nil {
 			restoreErr = oldEngine.ApplySnapshot(rollbackCtx, *previous, nil)
@@ -483,19 +479,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	}
 	state := r.observedState()
 	appliedChecksum := r.reconciler.AppliedChecksum()
-	role := v1.NodeRole_NODE_ROLE_UNSPECIFIED
-	if engine := r.Engine(); engine != nil {
-		if engine.Role() == domain.RoleGateway {
-			role = v1.NodeRole_NODE_ROLE_GATEWAY
-		} else if engine.Role() == domain.RoleAgent {
-			role = v1.NodeRole_NODE_ROLE_AGENT
-		}
-	} else if bootstrap.Role == domain.RoleGateway {
-		role = v1.NodeRole_NODE_ROLE_GATEWAY
-	} else if bootstrap.Role == domain.RoleAgent {
-		role = v1.NodeRole_NODE_ROLE_AGENT
-	}
-	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, Role: role, SchemaVersion: domain.SchemaVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5"}}}}); err != nil {
+	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.SchemaVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5"}}}}); err != nil {
 		return err
 	}
 	r.reconciler.MarkConnected(time.Now().UTC())
@@ -646,7 +630,7 @@ func renewalRequest(bootstrap Bootstrap) ([]byte, error) {
 	if leaf.NotAfter.After(time.Now().UTC().Add(7 * 24 * time.Hour)) {
 		return nil, nil
 	}
-	return GenerateCSRWithPrivateKey(bootstrap.NodeID, bootstrap.Role, []byte(bootstrap.PrivateKeyPEM))
+	return GenerateCSRWithPrivateKey(bootstrap.NodeID, []byte(bootstrap.PrivateKeyPEM))
 }
 
 func (r *Runtime) acceptCertificate(bundle *v1.CertificateBundle) error {

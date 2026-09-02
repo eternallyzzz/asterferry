@@ -297,12 +297,8 @@ try {
 
     Invoke-Logged "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
     Invoke-Logged "Helm lint generic Node" "helm" @("lint", "deploy/helm/asterferry-node")
-    Invoke-Logged "Helm lint Gateway node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=gateway")
-    Invoke-Logged "Helm lint Agent node" "helm" @("lint", "deploy/helm/asterferry-node", "--set", "role=agent")
     Invoke-LoggedToFile "Helm template Controller" "helm" @("template", "asterferry-controller", "deploy/helm/asterferry-controller") (Join-Path $outputDir "controller.yaml")
     Invoke-LoggedToFile "Helm template generic Node" "helm" @("template", "asterferry-node", "deploy/helm/asterferry-node") (Join-Path $outputDir "node.yaml")
-    Invoke-LoggedToFile "Helm template Gateway node" "helm" @("template", "asterferry-gateway", "deploy/helm/asterferry-node", "--set", "role=gateway") (Join-Path $outputDir "gateway.yaml")
-    Invoke-LoggedToFile "Helm template Agent node" "helm" @("template", "asterferry-agent", "deploy/helm/asterferry-node", "--set", "role=agent") (Join-Path $outputDir "agent.yaml")
 
     if ($FullBench) {
         $oldDistro = $env:ASTERFERRY_WSL_DISTRO

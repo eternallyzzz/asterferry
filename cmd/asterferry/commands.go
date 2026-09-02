@@ -55,8 +55,6 @@ func newRootCommand(out, errOut io.Writer) *cobra.Command {
 		newControllerCommand(),
 		newEnrollTokenCommand(),
 		newNodeCommand(),
-		newGatewayCommand(),
-		newAgentCommand(),
 	)
 	return root
 }

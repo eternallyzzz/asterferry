@@ -23,8 +23,8 @@ func TestGatewayObfuscationRotationPropagatesToAssignments(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw", Role: domain.RoleGateway, Name: "gateway", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
@@ -107,9 +107,9 @@ func TestScheduleAgentPreservesDisjointAssignments(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	for _, node := range []domain.Node{
-		{ID: "gw-a", Role: domain.RoleGateway, Name: "gateway-a", Enabled: true},
-		{ID: "gw-b", Role: domain.RoleGateway, Name: "gateway-b", Enabled: true},
-		{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true},
+		{ID: "gw-a", Name: "gateway-a", Enabled: true},
+		{ID: "gw-b", Name: "gateway-b", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
 	} {
 		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
 			t.Fatal(err)
@@ -178,11 +178,11 @@ func TestOneTimeTokenIdempotentRetryDoesNotReturnPlaintext(t *testing.T) {
 		t.Fatalf("API token retry = %q, %#v, err=%v", retryPlain, retry, err)
 	}
 
-	enrollmentPlain, firstEnrollment, err := store.CreateEnrollmentTokenWithOptions(ctx, domain.RoleAgent, time.Minute, WriteOptions{IdempotencyKey: "enrollment-token-once"})
+	enrollmentPlain, firstEnrollment, err := store.CreateEnrollmentTokenWithOptions(ctx, time.Minute, WriteOptions{IdempotencyKey: "enrollment-token-once"})
 	if err != nil || enrollmentPlain == "" {
 		t.Fatalf("first enrollment token = %q, %#v, err=%v", enrollmentPlain, firstEnrollment, err)
 	}
-	retryEnrollmentPlain, retryEnrollment, err := store.CreateEnrollmentTokenWithOptions(ctx, domain.RoleAgent, time.Minute, WriteOptions{IdempotencyKey: "enrollment-token-once"})
+	retryEnrollmentPlain, retryEnrollment, err := store.CreateEnrollmentTokenWithOptions(ctx, time.Minute, WriteOptions{IdempotencyKey: "enrollment-token-once"})
 	if !errors.Is(err, ErrSecretAlreadyCreated) || retryEnrollmentPlain != "" || retryEnrollment.ID != firstEnrollment.ID {
 		t.Fatalf("enrollment token retry = %q, %#v, err=%v", retryEnrollmentPlain, retryEnrollment, err)
 	}
@@ -218,10 +218,10 @@ func TestTokenRetryAPIReturnsConflictWithMetadata(t *testing.T) {
 	}
 	response := request("/api/v1/users/"+user.ID+"/tokens", `{"name":"api-retry"}`, "api-handler-once")
 	assertAlreadyCreatedResponse(t, response, "metadata")
-	if response := request("/api/v1/enrollment-tokens", `{"role":"agent","ttl_seconds":60}`, "enrollment-handler-once"); response.Code != http.StatusCreated {
+	if response := request("/api/v1/enrollment-tokens", `{"ttl_seconds":60}`, "enrollment-handler-once"); response.Code != http.StatusCreated {
 		t.Fatalf("first enrollment response = %d, body=%s", response.Code, response.Body.String())
 	}
-	response = request("/api/v1/enrollment-tokens", `{"role":"agent","ttl_seconds":60}`, "enrollment-handler-once")
+	response = request("/api/v1/enrollment-tokens", `{"ttl_seconds":60}`, "enrollment-handler-once")
 	assertAlreadyCreatedResponse(t, response, "token_metadata")
 }
 
@@ -255,7 +255,7 @@ func TestSaveObservedHeartbeatAcceptsOlderGeneration(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Role: domain.RoleAgent, Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
+	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent"}, WriteOptions{}); err != nil {

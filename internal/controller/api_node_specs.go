@@ -88,6 +88,53 @@ func (s *Server) nodeSpecAction(w http.ResponseWriter, r *http.Request, nodeID s
 	writeJSON(w, status, updated)
 }
 
+func (s *Server) nodeEgressAction(w http.ResponseWriter, r *http.Request, nodeID string) {
+	if r.Method == http.MethodGet {
+		if _, ok := s.authorize(w, r, RoleViewer); !ok {
+			return
+		}
+	} else {
+		if _, ok := s.authorize(w, r, RoleOperator); !ok {
+			return
+		}
+	}
+	spec, err := s.store.GetNodeSpec(r.Context(), nodeID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	switch spec.Kind {
+	case domain.NodeSpecGateway:
+		s.gatewayEgressAction(w, r, nodeID)
+	case domain.NodeSpecAgent:
+		s.agentEgressAction(w, r, nodeID)
+	default:
+		writeError(w, http.StatusNotFound, "not_found", "node behavior is not configured")
+	}
+}
+
+func (s *Server) nodeAgentSpecSubresource(w http.ResponseWriter, r *http.Request, nodeID, kind string, rest []string) {
+	if r.Method == http.MethodGet {
+		if _, ok := s.authorize(w, r, RoleViewer); !ok {
+			return
+		}
+	} else {
+		if _, ok := s.authorize(w, r, RoleOperator); !ok {
+			return
+		}
+	}
+	spec, err := s.store.GetNodeSpec(r.Context(), nodeID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if spec.Kind != domain.NodeSpecAgent || spec.Agent == nil {
+		writeError(w, http.StatusNotFound, "not_found", "node behavior is not an agent")
+		return
+	}
+	s.agentSpecSubresource(w, r, nodeID, kind, rest)
+}
+
 func parseOptionalIfMatch(value string) (int64, error) {
 	if strings.TrimSpace(value) == "" {
 		return 0, nil

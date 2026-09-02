@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("", "agent", "gateway")][string]$Role = "",
   [Parameter(Mandatory = $true)][string]$NodeId,
   [Parameter(Mandatory = $true)][string]$Controller,
   [Parameter(Mandatory = $true)][string]$Token,
@@ -43,8 +42,7 @@ $archivePath = Join-Path $tempRoot $archive
 $sumsPath = Join-Path $tempRoot "SHA256SUMS"
 $extractRoot = Join-Path $tempRoot "extract"
 $caPath = Join-Path $stateRoot "controller-ca.crt"
-$bootstrapName = if ($Role) { "{0}-bootstrap.json" -f $Role } else { "node-bootstrap.json" }
-$bootstrapPath = Join-Path $stateRoot $bootstrapName
+$bootstrapPath = Join-Path $stateRoot "node-bootstrap.json"
 $cachePath = Join-Path $stateRoot "snapshot.cache"
 $binaryPath = Join-Path $installRoot "asterferry.exe"
 
@@ -65,8 +63,7 @@ try {
 
   [IO.File]::WriteAllBytes($caPath, [Convert]::FromBase64String($CAPemB64))
   if (-not (Test-Path -LiteralPath $bootstrapPath) -or $Force) {
-    $nodeCommand = if ($Role) { $Role } else { "node" }
-    & $binaryPath $nodeCommand enroll --controller $Controller --token $Token --node-id $NodeId --ca $caPath --output $bootstrapPath --cache $cachePath
+    & $binaryPath node enroll --controller $Controller --token $Token --node-id $NodeId --ca $caPath --output $bootstrapPath --cache $cachePath
     if ($LASTEXITCODE -ne 0) { throw "AsterFerry enrollment failed with exit code $LASTEXITCODE" }
   } else {
     Write-Host "existing $bootstrapPath found; enrollment skipped"
@@ -79,10 +76,10 @@ try {
   $acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\LOCAL SERVICE", "ReadAndExecute,Write", "ContainerInherit,ObjectInherit", "None", "Allow")))
   Set-Acl -LiteralPath $stateRoot -AclObject $acl
 
-  $nodeCommand = if ($Role) { $Role } else { "node" }
-  $serviceSuffix = if ($Role) { $Role } else { "Node" }
-  $serviceName = "AsterFerry-$serviceSuffix"
-  $displayName = "AsterFerry $(if ($Role) { $Role } else { 'Node' })"
+  $nodeCommand = "node"
+  $serviceSuffix = "Node"
+  $serviceName = "AsterFerry-Node"
+  $displayName = "AsterFerry Node"
   $binPath = '"{0}" {1} run --bootstrap "{2}"' -f $binaryPath, $nodeCommand, $bootstrapPath
   $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
   if ($existing) {

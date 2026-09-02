@@ -5,12 +5,10 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: install-node.sh --node-id ID --controller HOST:PORT
   --token TOKEN --ca-pem-b64 BASE64 --release-base-url URL --version X.Y.Z --arch amd64|arm64
-  --role agent|gateway is accepted only for legacy installations.
 USAGE
   exit 2
 }
 
-ROLE=""
 NODE_ID=""
 CONTROLLER=""
 TOKEN=""
@@ -21,7 +19,6 @@ EXPECTED_ARCH=""
 
 while (($# > 0)); do
   case "$1" in
-    --role) ROLE="${2:?missing value for --role}"; shift 2 ;;
     --node-id) NODE_ID="${2:?missing value for --node-id}"; shift 2 ;;
     --controller) CONTROLLER="${2:?missing value for --controller}"; shift 2 ;;
     --token) TOKEN="${2:?missing value for --token}"; shift 2 ;;
@@ -34,7 +31,6 @@ while (($# > 0)); do
   esac
 done
 
-[[ -z "$ROLE" || "$ROLE" == "agent" || "$ROLE" == "gateway" ]] || { echo "role must be agent or gateway" >&2; exit 2; }
 [[ "$EXPECTED_ARCH" == "amd64" || "$EXPECTED_ARCH" == "arm64" ]] || { echo "arch must be amd64 or arm64" >&2; exit 2; }
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z" >&2; exit 2; }
 [[ -n "$NODE_ID" && -n "$CONTROLLER" && -n "$TOKEN" && -n "$CA_PEM_B64" && -n "$RELEASE_BASE_URL" ]] || usage
@@ -78,21 +74,13 @@ install -m 0755 "$tmp_dir/asterferry" /usr/local/bin/asterferry
 ca_path=/var/lib/asterferry/controller-ca.crt
 printf '%s' "$CA_PEM_B64" | base64 --decode > "$tmp_dir/controller-ca.crt"
 install -o asterferry -g asterferry -m 0644 "$tmp_dir/controller-ca.crt" "$ca_path"
-bootstrap_name="node-bootstrap.json"
-if [[ -n "$ROLE" ]]; then bootstrap_name="${ROLE}-bootstrap.json"; fi
-bootstrap_path="/var/lib/asterferry/${bootstrap_name}"
+bootstrap_path="/var/lib/asterferry/node-bootstrap.json"
 cache_path=/var/lib/asterferry/snapshot.cache
 
 node_command=(/usr/local/bin/asterferry node enroll)
 node_run_command="node"
 service_suffix="Node"
-service_description="generic Node daemon"
-if [[ -n "$ROLE" ]]; then
-  node_command=(/usr/local/bin/asterferry "$ROLE" enroll)
-  node_run_command="$ROLE"
-  service_suffix="$ROLE"
-  service_description="$ROLE data-plane node"
-fi
+service_description="Node daemon"
 if [[ ! -f "$bootstrap_path" ]]; then
   runuser -u asterferry -- "${node_command[@]}" \
     --controller "$CONTROLLER" \

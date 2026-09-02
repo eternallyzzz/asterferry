@@ -8,10 +8,6 @@ export function formatTime(value: string | undefined | null): string {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
-export function roleLabel(role: string): string {
-  return role === "gateway" ? "Gateway" : role === "agent" ? "Agent" : role;
-}
-
 export function userRoleLabel(role: string): string {
   return ({ viewer: "Viewer · 只读", operator: "Operator · 运维", admin: "Admin · 管理员" } as Record<string, string>)[role] || role;
 }

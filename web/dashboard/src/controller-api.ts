@@ -18,8 +18,6 @@ export interface ControllerNode {
   id: string;
   name: string;
   spec_kind?: "gateway" | "agent";
-  /** Deprecated compatibility field; behavior is configured by /nodes/{id}/spec. */
-  role?: "gateway" | "agent";
   labels?: Record<string, string>;
   enabled: boolean;
   certificate_state: string;
@@ -44,14 +42,10 @@ export interface NodeBootstrapRequest {
   platform: "linux" | "windows";
   arch: "amd64" | "arm64";
   spec?: ControllerNodeSpec;
-  gateway_spec?: unknown;
-  agent_spec?: unknown;
 }
 
 export interface NodeInstallationRequest extends NodeBootstrapRequest {
   node_id: string;
-  /** Deprecated compatibility input; new installers are behavior-neutral. */
-  role?: "gateway" | "agent";
   name: string;
   labels?: Record<string, string>;
   enabled?: boolean;
@@ -61,7 +55,6 @@ export interface NodeBootstrapResponse {
   installation_id?: string;
   state?: string;
   node_id: string;
-  role?: "gateway" | "agent";
   platform: "linux" | "windows";
   arch: "amd64" | "arm64";
   version: string;
@@ -201,19 +194,9 @@ export function nodeAction(id: string, action: "drain" | "reconnect" | "resync",
 export function getNodeSpec(id: string, token?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, {}, token); }
 export function putNodeSpec(id: string, spec: ControllerNodeSpec, revision?: number, token?: string, idempotencyKey?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "PUT", headers: { "Content-Type": "application/json", ...(revision !== undefined ? { "If-Match": String(revision) } : {}), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
 export function deleteNodeSpec(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
-export function listGateways(token?: string): Promise<{ items: Array<{ node: ControllerNode; spec?: unknown }> }> { return request(`/gateways`, {}, token); }
-export function createGateway(spec: unknown, token?: string, idempotencyKey?: string): Promise<unknown> { return request(`/gateways`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
-export function getGateway(id: string, token?: string): Promise<unknown> { return request(`/gateways/${encodeURIComponent(id)}`, {}, token); }
-export function updateGateway(id: string, spec: unknown, revision: number, token?: string, idempotencyKey?: string): Promise<unknown> { return request(`/gateways/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
-export function getGatewayEgress(id: string, token?: string): Promise<EgressPolicy> { return request(`/gateways/${encodeURIComponent(id)}/egress`, {}, token); }
-export function updateGatewayEgress(id: string, policy: EgressPolicy, revision: number, token?: string, idempotencyKey?: string): Promise<EgressPolicy> { return request(`/gateways/${encodeURIComponent(id)}/egress`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(policy) }, token); }
-export function listAgents(token?: string): Promise<{ items: Array<{ node: ControllerNode; spec?: unknown }> }> { return request(`/agents`, {}, token); }
-export function createAgent(spec: unknown, token?: string, idempotencyKey?: string): Promise<unknown> { return request(`/agents`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
-export function getAgent(id: string, token?: string): Promise<unknown> { return request(`/agents/${encodeURIComponent(id)}`, {}, token); }
-export function updateAgent(id: string, spec: unknown, revision: number, token?: string, idempotencyKey?: string): Promise<unknown> { return request(`/agents/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
-export function getAgentEgress(id: string, token?: string): Promise<EgressPolicy> { return request(`/agents/${encodeURIComponent(id)}/egress`, {}, token); }
-export function updateAgentEgress(id: string, policy: EgressPolicy, revision: number, token?: string, idempotencyKey?: string): Promise<EgressPolicy> { return request(`/agents/${encodeURIComponent(id)}/egress`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(policy) }, token); }
-export function scheduleAgent(id: string, token?: string, idempotencyKey?: string): Promise<{ assignments: ControllerAssignment[] }> { return request<{ assignments: ControllerAssignment[] }>(`/agents/${encodeURIComponent(id)}/actions/schedule`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
+export function getNodeEgress(id: string, token?: string): Promise<EgressPolicy> { return request(`/nodes/${encodeURIComponent(id)}/spec/egress`, {}, token); }
+export function updateNodeEgress(id: string, policy: EgressPolicy, revision: number, token?: string, idempotencyKey?: string): Promise<EgressPolicy> { return request<EgressPolicy>(`/nodes/${encodeURIComponent(id)}/spec/egress`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(policy) }, token); }
+export function scheduleNode(id: string, token?: string, idempotencyKey?: string): Promise<{ assignments: ControllerAssignment[] }> { return request<{ assignments: ControllerAssignment[] }>(`/nodes/${encodeURIComponent(id)}/actions/schedule`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function listServices(agentID?: string, token?: string): Promise<{ items: ControllerService[] }> { return request(`/services${agentID ? `?agent_id=${encodeURIComponent(agentID)}` : ""}`, {}, token); }
 export function createService(service: Omit<ControllerService, "revision">, token?: string, idempotencyKey?: string): Promise<ControllerService> { return request<ControllerService>("/services", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(service) }, token); }
 export function updateService(id: string, service: Partial<ControllerService>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerService> { return request<ControllerService>(`/services/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(service) }, token); }
@@ -227,7 +210,7 @@ export function listAudit(limit = 100, token?: string): Promise<{ items: Control
 // 与后端 EnrollmentToken 对齐：used_at 在未使用/未吊销时整个字段被省略（omitempty）。
 export interface EnrollmentTokenMeta {
   id: string;
-  role?: "gateway" | "agent";
+
   expires_at: string;
   used_at?: string;
   created_at: string;
@@ -243,7 +226,7 @@ export interface APITokenMeta {
   created_at: string;
 }
 
-export function createEnrollmentToken(role?: "gateway" | "agent", ttlSeconds?: number, token?: string, idempotencyKey?: string): Promise<{ token: string; token_metadata: EnrollmentTokenMeta; created_by?: string }> { return request(`/enrollment-tokens`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify({ ...(role ? { role } : {}), ttl_seconds: ttlSeconds }) }, token); }
+export function createEnrollmentToken(ttlSeconds?: number, token?: string, idempotencyKey?: string): Promise<{ token: string; token_metadata: EnrollmentTokenMeta; created_by?: string }> { return request(`/enrollment-tokens`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify({ ttl_seconds: ttlSeconds }) }, token); }
 export function listEnrollmentTokens(token?: string): Promise<{ items: EnrollmentTokenMeta[] }> { return request(`/enrollment-tokens`, {}, token); }
 export function revokeEnrollmentToken(id: string, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/enrollment-tokens/${encodeURIComponent(id)}`, { method: "DELETE", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function listUserTokens(userID: string, token?: string): Promise<{ items: APITokenMeta[] }> { return request(`/users/${encodeURIComponent(userID)}/tokens`, {}, token); }
@@ -316,12 +299,10 @@ export interface EgressPolicy {
   max_connections: number;
 }
 
-export function deleteGateway(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/gateways/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
-export function deleteAgent(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/agents/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 
 // ---------------------------------------------------------------------------
-// Agent proxies / routes（AgentSpec 的 CAS 子资源，变更需携带父规格 revision）
-// ---------------------------------------------------------------------------
+// Node Agent proxies / routes. These are CAS subresources of the unified
+// node spec and are available only when the node's persisted kind is agent.
 
 export interface ProxySpec {
   id: string;
@@ -340,19 +321,18 @@ export interface RouteRule {
   enabled: boolean;
 }
 
-// 后端对空集合返回 items: null，统一归一化为空数组。
-export async function listAgentProxies(id: string, token?: string): Promise<{ items: ProxySpec[] }> {
-  const result = await request<{ items: ProxySpec[] | null }>(`/agents/${encodeURIComponent(id)}/proxies`, {}, token);
+export async function listNodeProxies(id: string, token?: string): Promise<{ items: ProxySpec[] }> {
+  const result = await request<{ items: ProxySpec[] | null }>(`/nodes/${encodeURIComponent(id)}/spec/proxies`, {}, token);
   return { items: result.items ?? [] };
 }
-export function createAgentProxy(id: string, proxy: ProxySpec, specRevision: number, token?: string, idempotencyKey?: string): Promise<ProxySpec> { return request<ProxySpec>(`/agents/${encodeURIComponent(id)}/proxies`, { method: "POST", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(proxy) }, token); }
-export function updateAgentProxy(id: string, proxyId: string, proxy: ProxySpec, specRevision: number, token?: string, idempotencyKey?: string): Promise<ProxySpec> { return request<ProxySpec>(`/agents/${encodeURIComponent(id)}/proxies/${encodeURIComponent(proxyId)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(proxy) }, token); }
-export function deleteAgentProxy(id: string, proxyId: string, specRevision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/agents/${encodeURIComponent(id)}/proxies/${encodeURIComponent(proxyId)}`, { method: "DELETE", headers: { "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
+export function createNodeProxy(id: string, proxy: ProxySpec, specRevision: number, token?: string, idempotencyKey?: string): Promise<ProxySpec> { return request<ProxySpec>(`/nodes/${encodeURIComponent(id)}/spec/proxies`, { method: "POST", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(proxy) }, token); }
+export function updateNodeProxy(id: string, proxyId: string, proxy: ProxySpec, specRevision: number, token?: string, idempotencyKey?: string): Promise<ProxySpec> { return request<ProxySpec>(`/nodes/${encodeURIComponent(id)}/spec/proxies/${encodeURIComponent(proxyId)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(proxy) }, token); }
+export function deleteNodeProxy(id: string, proxyId: string, specRevision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}/spec/proxies/${encodeURIComponent(proxyId)}`, { method: "DELETE", headers: { "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 
-export async function listAgentRoutes(id: string, token?: string): Promise<{ items: RouteRule[] }> {
-  const result = await request<{ items: RouteRule[] | null }>(`/agents/${encodeURIComponent(id)}/routes`, {}, token);
+export async function listNodeRoutes(id: string, token?: string): Promise<{ items: RouteRule[] }> {
+  const result = await request<{ items: RouteRule[] | null }>(`/nodes/${encodeURIComponent(id)}/spec/routes`, {}, token);
   return { items: result.items ?? [] };
 }
-export function createAgentRoute(id: string, route: RouteRule, specRevision: number, token?: string, idempotencyKey?: string): Promise<RouteRule> { return request<RouteRule>(`/agents/${encodeURIComponent(id)}/routes`, { method: "POST", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(route) }, token); }
-export function updateAgentRoute(id: string, routeName: string, route: RouteRule, specRevision: number, token?: string, idempotencyKey?: string): Promise<RouteRule> { return request<RouteRule>(`/agents/${encodeURIComponent(id)}/routes/${encodeURIComponent(routeName)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(route) }, token); }
-export function deleteAgentRoute(id: string, routeName: string, specRevision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/agents/${encodeURIComponent(id)}/routes/${encodeURIComponent(routeName)}`, { method: "DELETE", headers: { "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
+export function createNodeRoute(id: string, route: RouteRule, specRevision: number, token?: string, idempotencyKey?: string): Promise<RouteRule> { return request<RouteRule>(`/nodes/${encodeURIComponent(id)}/spec/routes`, { method: "POST", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(route) }, token); }
+export function updateNodeRoute(id: string, routeName: string, route: RouteRule, specRevision: number, token?: string, idempotencyKey?: string): Promise<RouteRule> { return request<RouteRule>(`/nodes/${encodeURIComponent(id)}/spec/routes/${encodeURIComponent(routeName)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(route) }, token); }
+export function deleteNodeRoute(id: string, routeName: string, specRevision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}/spec/routes/${encodeURIComponent(routeName)}`, { method: "DELETE", headers: { "If-Match": String(specRevision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }

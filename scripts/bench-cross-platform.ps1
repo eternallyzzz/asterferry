@@ -40,7 +40,7 @@ $wslVersion = (& wsl.exe -d $WslDistro -- $wslBinary version --short | Out-Strin
 if ($LASTEXITCODE -ne 0 -or $wslVersion.Length -eq 0) { throw "WSL AFDP/2 binary check failed" }
 $report = [ordered]@{
     commit = (git rev-parse HEAD).Trim()
-    protocol = "AFDP/2 + control/1"
+    protocol = "AFDP/2 + control/2"
     binaries = @(
         (Invoke-Version $windowsBinary "windows"),
         [ordered]@{ name = "wsl-linux"; version = $wslVersion }

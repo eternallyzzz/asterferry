@@ -28,17 +28,10 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-For an existing schema v3, v4, v5 or v6 database, stop the Controller and run the
-explicit migration to schema v7 during a maintenance window. Validate first;
-the publish step retains the original file as a rollback backup:
-
-```sh
-asterferry controller migrate --config /var/lib/asterferry/controller.json --dry-run
-asterferry controller migrate --config /var/lib/asterferry/controller.json
-```
-
-`OpenStore` does not perform implicit schema rewrites. Do not start the
-Controller until the migration command has completed successfully.
+This pre-1.0 generation uses a fresh schema v8 and intentionally has no
+in-place migration command. `OpenStore` rejects older databases instead of
+rewriting them. Export any needed resources, retain a complete backup, and
+initialize a new Controller directory during the maintenance window.
 
 `deploy/asterferry-controller.service` is a single-replica systemd unit; the
 Controller is not advertised as highly available. Nodes retain their encrypted
@@ -70,11 +63,10 @@ asterferry node enroll --controller controller.example:9443 \
 asterferry node run --bootstrap /var/lib/asterferry/node-bootstrap.json
 ```
 
-The legacy `gateway`/`agent` enroll and run commands remain compatible with
-older bootstrap files. A bootstrap file holds only Controller address, node
-identity, certificate/key, CA and cache/logging settings. Protect it as a
-secret. Certificate renewal is automatic seven days before expiry and is
-persisted atomically by the node runtime.
+A bootstrap file holds only Controller address, node identity, certificate/key,
+CA and cache/logging settings. Protect it as a secret. Certificate renewal is
+automatic seven days before expiry and is persisted atomically by the node
+runtime.
 
 ## Linux service units
 
@@ -87,9 +79,8 @@ systemctl daemon-reload
 systemctl enable --now asterferry-node
 ```
 
-Use the legacy `asterferry-agent.service` or `asterferry-gateway.service` only
-for older role-bound bootstrap files. Nodes need outbound Controller
-connectivity; a Node configured as Gateway additionally needs its AFDP/2 QUIC
+Use `deploy/asterferry-node.service` for the generic Node. Nodes need outbound
+Controller connectivity; a Node configured as Gateway additionally needs its AFDP/2 QUIC
 endpoint reachable by Agents. All business changes go through the Controller
 API.
 
@@ -97,8 +88,7 @@ API.
 
 `deploy/docker/compose.yaml` runs the Controller and two optional Node daemon
 slots. Both slots use the same generic Node binary; Gateway or Agent behavior is
-selected later by the Controller Node Spec. The old gateway/agent service names
-remain only as topology-compatible aliases for existing deployments. The
+selected later by the Controller Node Spec. The
 Controller directory is writable; node bootstrap/state mounts are isolated from
 it. Bootstrap mounts are writable because certificate rotation atomically
 replaces the file. `deploy/helm/asterferry-controller` creates a single-replica
@@ -111,8 +101,8 @@ transparent connection migration and Controller HA are outside the first
 release.
 
 AFDP/1 to AFDP/2 is a deliberate hard wire break: QUIC ALPN and the protocol
-version byte both changed, and there is no fallback. Roll out Gateway and
-Agent binaries in coordination with the Controller-side release.
+version byte both changed, and there is no fallback. Roll out all Node binaries
+in coordination with the Controller-side release.
 
 ## Operations and verification
 

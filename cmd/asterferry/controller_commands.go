@@ -14,14 +14,13 @@ import (
 	"time"
 
 	"asterferry/internal/controller"
-	"asterferry/internal/domain"
 	"asterferry/internal/node"
 	"github.com/spf13/cobra"
 )
 
 func newControllerCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "controller", Short: "run and administer the AsterFerry Controller"}
-	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerMigrateCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
+	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
 	return cmd
 }
 
@@ -125,40 +124,6 @@ func newControllerRunCommand() *cobra.Command {
 	return cmd
 }
 
-func newControllerMigrateCommand() *cobra.Command {
-	var path string
-	var dryRun bool
-	cmd := &cobra.Command{
-		Use:   "migrate",
-		Short: "upgrade a stopped v3-v6 Controller database to schema v7",
-		Long:  "validate and upgrade a stopped v3-v6 Controller database in a maintenance window; the original database is retained as a rollback backup",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			config, err := controller.LoadConfig(path)
-			if err != nil {
-				return err
-			}
-			report, err := controller.MigrateDatabase(cmd.Context(), config.DatabasePath, dryRun)
-			if err != nil {
-				return err
-			}
-			if report.AlreadyCurrent {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "controller database is already schema v%d\n", report.ToVersion)
-				return err
-			}
-			if dryRun {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "migration dry-run passed: schema v%d -> v%d, assignments: %d, assignment services: %d, idempotency keys observed: %d\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.LegacyIdempotencyKeys)
-				return err
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "controller database migrated: schema v%d -> v%d, assignments: %d, assignment services: %d, rollback backup: %s\n", report.FromVersion, report.ToVersion, report.Assignments, report.AssignmentServices, report.BackupPath)
-			return err
-		},
-	}
-	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate the migration without changing the database")
-	return cmd
-}
-
 func newControllerBackupCommand() *cobra.Command {
 	var path, output string
 	cmd := &cobra.Command{Use: "backup", Short: "create a consistent Controller backup", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -206,7 +171,7 @@ func newEnrollTokenCommand() *cobra.Command {
 }
 
 func newEnrollTokenCreateCommand() *cobra.Command {
-	var path, role, nodeID string
+	var path, nodeID string
 	var ttl time.Duration
 	cmd := &cobra.Command{Use: "create", Short: "create a single-use node enrollment token", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		config, err := controller.LoadConfig(path)
@@ -225,18 +190,17 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 		var plain string
 		var token controller.EnrollmentToken
 		if strings.TrimSpace(nodeID) != "" {
-			plain, token, err = store.CreateNodeEnrollmentToken(cmd.Context(), nodeID, role, ttl)
+			plain, token, err = store.CreateNodeEnrollmentToken(cmd.Context(), nodeID, ttl)
 		} else {
-			plain, token, err = store.CreateEnrollmentToken(cmd.Context(), role, ttl)
+			plain, token, err = store.CreateEnrollmentToken(cmd.Context(), ttl)
 		}
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "token: %s\nrole: %s\nexpires: %s\nid: %s\n", plain, token.Role, token.ExpiresAt.Format(time.RFC3339), token.ID)
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "token: %s\nexpires: %s\nid: %s\n", plain, token.ExpiresAt.Format(time.RFC3339), token.ID)
 		return err
 	}}
 	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
-	cmd.Flags().StringVar(&role, "role", "", "optional legacy behavior binding: gateway or agent")
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "bind the token to an existing generic Node identity")
 	cmd.Flags().DurationVar(&ttl, "ttl", controller.EnrollmentTTL, "token lifetime (maximum 15m)")
 	return cmd
@@ -244,7 +208,7 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 
 func newNodeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "node", Short: "enroll and run the generic AsterFerry node daemon"}
-	cmd.AddCommand(newNodeEnrollCommand(""), newNodeRunCommand())
+	cmd.AddCommand(newNodeEnrollCommand(), newNodeRunCommand())
 	return cmd
 }
 
@@ -276,7 +240,7 @@ func newEnrollTokenRevokeCommand() *cobra.Command {
 	return cmd
 }
 
-func newNodeEnrollCommand(role string) *cobra.Command {
+func newNodeEnrollCommand() *cobra.Command {
 	var controllerAddress, token, nodeID, output, caPath, cachePath, serverName string
 	var insecure bool
 	cmd := &cobra.Command{Use: "enroll", Short: "generate node bootstrap material for Controller enrollment", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -286,7 +250,7 @@ func newNodeEnrollCommand(role string) *cobra.Command {
 		if output == "" {
 			output = nodeID + "-bootstrap.json"
 		}
-		_, err := node.Enroll(cmd.Context(), node.EnrollOptions{ControllerAddress: controllerAddress, Token: token, NodeID: nodeID, Role: role, CAPath: caPath, ServerName: serverName, InsecureSkipVerify: insecure, CachePath: cachePath, OutputPath: output})
+		_, err := node.Enroll(cmd.Context(), node.EnrollOptions{ControllerAddress: controllerAddress, Token: token, NodeID: nodeID, CAPath: caPath, ServerName: serverName, InsecureSkipVerify: insecure, CachePath: cachePath, OutputPath: output})
 		if err != nil {
 			return err
 		}
@@ -304,61 +268,22 @@ func newNodeEnrollCommand(role string) *cobra.Command {
 	return cmd
 }
 
-func newGatewayCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "gateway", Short: "enroll or run a Gateway data-plane node", Args: cobra.NoArgs}
-	cmd.AddCommand(newNodeEnrollCommand(domain.RoleGateway), newGatewayRunCommand())
-	return cmd
-}
-
-func newAgentCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "agent", Short: "enroll or run an Agent data-plane node", Args: cobra.NoArgs}
-	cmd.AddCommand(newNodeEnrollCommand(domain.RoleAgent), newAgentRunCommand())
-	return cmd
-}
-
-func newGatewayRunCommand() *cobra.Command {
-	var bootstrapPath string
-	cmd := &cobra.Command{Use: "run", Short: "run a Gateway data-plane node", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if strings.TrimSpace(bootstrapPath) == "" {
-			return &codedError{code: 2, err: errors.New("--bootstrap is required; business configuration is owned by the Controller")}
-		}
-		return runNodeBootstrap(cmd.Context(), bootstrapPath, domain.RoleGateway, cmd.ErrOrStderr())
-	}}
-	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
-	return cmd
-}
-
-func newAgentRunCommand() *cobra.Command {
-	var bootstrapPath string
-	cmd := &cobra.Command{Use: "run", Short: "run an Agent data-plane node", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if strings.TrimSpace(bootstrapPath) == "" {
-			return &codedError{code: 2, err: errors.New("--bootstrap is required; business configuration is owned by the Controller")}
-		}
-		return runNodeBootstrap(cmd.Context(), bootstrapPath, domain.RoleAgent, cmd.ErrOrStderr())
-	}}
-	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
-	return cmd
-}
-
 func newNodeRunCommand() *cobra.Command {
 	var bootstrapPath string
 	cmd := &cobra.Command{Use: "run", Short: "run the generic Node daemon", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if strings.TrimSpace(bootstrapPath) == "" {
 			return &codedError{code: 2, err: errors.New("--bootstrap is required; configure behavior in the Controller Dashboard")}
 		}
-		return runNodeBootstrap(cmd.Context(), bootstrapPath, "", cmd.ErrOrStderr())
+		return runNodeBootstrap(cmd.Context(), bootstrapPath, cmd.ErrOrStderr())
 	}}
 	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
 	return cmd
 }
 
-func runNodeBootstrap(ctx context.Context, path, role string, errorsOut io.Writer) error {
+func runNodeBootstrap(ctx context.Context, path string, errorsOut io.Writer) error {
 	bootstrap, err := node.LoadBootstrap(path)
 	if err != nil {
 		return err
-	}
-	if role != "" && bootstrap.Role != role {
-		return fmt.Errorf("bootstrap role %q cannot run as %s", bootstrap.Role, role)
 	}
 	runtime, err := node.NewRuntime(bootstrap, node.RuntimeOptions{BootstrapPath: path, Logger: slog.New(slog.NewTextHandler(errorsOut, &slog.HandlerOptions{Level: slog.LevelInfo}))})
 	if err != nil {

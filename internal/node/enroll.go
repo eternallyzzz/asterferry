@@ -40,21 +40,17 @@ type Bootstrap struct {
 	// certificate on every reconnect.
 	ControllerServerName string `json:"controller_server_name,omitempty"`
 	NodeID               string `json:"node_id"`
-	// Role is an optional legacy runtime hint. The Controller binds the
-	// certificate to NodeID; active behavior is delivered later as a spec.
-	Role           string `json:"role,omitempty"`
-	CertificatePEM string `json:"certificate_pem"`
-	PrivateKeyPEM  string `json:"private_key_pem"`
-	CAPEM          string `json:"ca_pem"`
-	CachePath      string `json:"cache_path"`
-	LogLevel       string `json:"log_level"`
+	CertificatePEM       string `json:"certificate_pem"`
+	PrivateKeyPEM        string `json:"private_key_pem"`
+	CAPEM                string `json:"ca_pem"`
+	CachePath            string `json:"cache_path"`
+	LogLevel             string `json:"log_level"`
 }
 
 type EnrollOptions struct {
 	ControllerAddress  string
 	Token              string
 	NodeID             string
-	Role               string
 	CAPEM              []byte
 	CAPath             string
 	ServerName         string
@@ -63,18 +59,15 @@ type EnrollOptions struct {
 	OutputPath         string
 }
 
-func GenerateCSR(nodeID, role string) (der []byte, privateKeyPEM []byte, err error) {
+func GenerateCSR(nodeID string) (der []byte, privateKeyPEM []byte, err error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return nil, nil, err
-	}
-	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
-		return nil, nil, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	der, err = createCSR(nodeID, role, private)
+	der, err = createCSR(nodeID, private)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -88,12 +81,9 @@ func GenerateCSR(nodeID, role string) (der []byte, privateKeyPEM []byte, err err
 // GenerateCSRWithPrivateKey is used during certificate rotation. The caller
 // keeps the key in the encrypted bootstrap and only replaces the signed
 // certificate after the Controller has authenticated the renewal request.
-func GenerateCSRWithPrivateKey(nodeID, role string, privateKeyPEM []byte) ([]byte, error) {
+func GenerateCSRWithPrivateKey(nodeID string, privateKeyPEM []byte) ([]byte, error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return nil, err
-	}
-	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
-		return nil, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	block, _ := pem.Decode(privateKeyPEM)
 	if block == nil {
@@ -107,15 +97,11 @@ func GenerateCSRWithPrivateKey(nodeID, role string, privateKeyPEM []byte) ([]byt
 	if !ok {
 		return nil, errors.New("private key is not Ed25519")
 	}
-	return createCSR(nodeID, role, private)
+	return createCSR(nodeID, private)
 }
 
-func createCSR(nodeID, role string, private ed25519.PrivateKey) ([]byte, error) {
-	organization := []string{"AsterFerry"}
-	if role != "" {
-		organization = append(organization, role)
-	}
-	return x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: organization}}, private)
+func createCSR(nodeID string, private ed25519.PrivateKey) ([]byte, error) {
+	return x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry"}}}, private)
 }
 
 func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
@@ -124,9 +110,6 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	}
 	if strings.TrimSpace(options.ControllerAddress) == "" || strings.TrimSpace(options.Token) == "" {
 		return Bootstrap{}, errors.New("controller address and enrollment token are required")
-	}
-	if options.Role != "" && options.Role != domain.RoleGateway && options.Role != domain.RoleAgent {
-		return Bootstrap{}, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	if err := domain.ValidateID(options.NodeID, "node_id"); err != nil {
 		return Bootstrap{}, err
@@ -142,7 +125,7 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	if len(caPEM) == 0 && !options.InsecureSkipVerify {
 		return Bootstrap{}, errors.New("controller CA is required unless insecure verification is explicitly enabled")
 	}
-	csr, privateKey, err := GenerateCSR(options.NodeID, options.Role)
+	csr, privateKey, err := GenerateCSR(options.NodeID)
 	if err != nil {
 		return Bootstrap{}, err
 	}
@@ -172,14 +155,8 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	}
 	defer conn.Close()
 	client := v1.NewControlClient(conn)
-	roleValue := v1.NodeRole_NODE_ROLE_UNSPECIFIED
-	if options.Role == domain.RoleGateway {
-		roleValue = v1.NodeRole_NODE_ROLE_GATEWAY
-	} else if options.Role == domain.RoleAgent {
-		roleValue = v1.NodeRole_NODE_ROLE_AGENT
-	}
 	requestCtx, cancelRequest := boundedControllerContext(ctx, controllerRequestTimeout)
-	response, err := client.Enroll(requestCtx, &v1.EnrollRequest{Token: options.Token, Role: roleValue, NodeId: options.NodeID, CsrDer: csr})
+	response, err := client.Enroll(requestCtx, &v1.EnrollRequest{Token: options.Token, NodeId: options.NodeID, CsrDer: csr})
 	cancelRequest()
 	if err != nil {
 		return Bootstrap{}, err
@@ -197,7 +174,7 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 		caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: response.GetCertificate().GetCaCertificateDer()})
 	}
 	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: response.GetCertificate().GetCertificateDer()})
-	bootstrap := Bootstrap{SchemaVersion: domain.SchemaVersion, ControllerAddress: options.ControllerAddress, ControllerServerName: serverName, NodeID: options.NodeID, Role: options.Role, CertificatePEM: string(certificatePEM), PrivateKeyPEM: string(privateKey), CAPEM: string(caPEM), CachePath: options.CachePath, LogLevel: "info"}
+	bootstrap := Bootstrap{SchemaVersion: domain.SchemaVersion, ControllerAddress: options.ControllerAddress, ControllerServerName: serverName, NodeID: options.NodeID, CertificatePEM: string(certificatePEM), PrivateKeyPEM: string(privateKey), CAPEM: string(caPEM), CachePath: options.CachePath, LogLevel: "info"}
 	if err := validateBootstrap(bootstrap); err != nil {
 		return Bootstrap{}, fmt.Errorf("controller returned invalid bootstrap identity: %w", err)
 	}
@@ -256,9 +233,6 @@ func validateBootstrap(bootstrap Bootstrap) error {
 	}
 	if err := domain.ValidateID(bootstrap.NodeID, "node_id"); err != nil {
 		return err
-	}
-	if bootstrap.Role != "" && bootstrap.Role != domain.RoleGateway && bootstrap.Role != domain.RoleAgent {
-		return errors.New("bootstrap behavior must be gateway or agent when supplied")
 	}
 	certificate, err := tls.X509KeyPair([]byte(bootstrap.CertificatePEM), []byte(bootstrap.PrivateKeyPEM))
 	if err != nil || len(certificate.Certificate) == 0 {

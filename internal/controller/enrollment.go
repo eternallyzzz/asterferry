@@ -28,7 +28,6 @@ const (
 
 type EnrollmentToken struct {
 	ID        string     `json:"id"`
-	Role      string     `json:"role"`
 	ExpiresAt time.Time  `json:"expires_at"`
 	UsedAt    *time.Time `json:"used_at,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
@@ -42,36 +41,31 @@ type Certificate struct {
 	NotAfter       time.Time `json:"not_after"`
 }
 
-func (s *Store) CreateEnrollmentToken(ctx context.Context, role string, ttl time.Duration) (string, EnrollmentToken, error) {
-	return s.CreateEnrollmentTokenWithOptions(ctx, role, ttl, WriteOptions{Actor: "system"})
+func (s *Store) CreateEnrollmentToken(ctx context.Context, ttl time.Duration) (string, EnrollmentToken, error) {
+	return s.CreateEnrollmentTokenWithOptions(ctx, ttl, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
-	return s.createEnrollmentTokenWithOptions(ctx, "", role, ttl, options)
+func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+	return s.createEnrollmentTokenWithOptions(ctx, "", ttl, options)
 }
 
 // CreateNodeEnrollmentToken creates a short-lived enrollment credential that
 // is cryptographically bound to one pre-created node. The binding is encoded
 // in the one-time plaintext token and is covered by the stored token hash, so
 // this feature does not require a schema change to the generic enrollment
-// token table. Generic administrator-created tokens with a role remain
-// role-bound; an empty role deliberately applies to the current behavior of
-// the Node being enrolled.
-func (s *Store) CreateNodeEnrollmentToken(ctx context.Context, nodeID, role string, ttl time.Duration) (string, EnrollmentToken, error) {
-	return s.CreateNodeEnrollmentTokenWithOptions(ctx, nodeID, role, ttl, WriteOptions{Actor: "system"})
+// token table.
+func (s *Store) CreateNodeEnrollmentToken(ctx context.Context, nodeID string, ttl time.Duration) (string, EnrollmentToken, error) {
+	return s.CreateNodeEnrollmentTokenWithOptions(ctx, nodeID, ttl, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) CreateNodeEnrollmentTokenWithOptions(ctx context.Context, nodeID, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+func (s *Store) CreateNodeEnrollmentTokenWithOptions(ctx context.Context, nodeID string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return "", EnrollmentToken{}, err
 	}
-	return s.createEnrollmentTokenWithOptions(ctx, nodeID, role, ttl, options)
+	return s.createEnrollmentTokenWithOptions(ctx, nodeID, ttl, options)
 }
 
-func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, role string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
-	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
-		return "", EnrollmentToken{}, errors.New("enrollment token behavior must be gateway or agent when supplied")
-	}
+func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
 	if ttl <= 0 {
 		ttl = EnrollmentTTL
 	}
@@ -80,7 +74,7 @@ func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, ro
 	}
 	now := time.Now().UTC()
 	expires := now.Add(ttl)
-	request := map[string]any{"role": role, "ttl_seconds": int64(ttl / time.Second)}
+	request := map[string]any{"ttl_seconds": int64(ttl / time.Second)}
 	if nodeID != "" {
 		request["node_id"] = nodeID
 	}
@@ -107,7 +101,7 @@ func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, ro
 		var token EnrollmentToken
 		var expiry, created string
 		var used sqlNullString
-		if err := tx.QueryRowContext(ctx, `SELECT id,role,expires_at,used_at,created_at FROM enrollment_tokens WHERE id=?`, metadata.ID).Scan(&token.ID, &token.Role, &expiry, &used, &created); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT id,expires_at,used_at,created_at FROM enrollment_tokens WHERE id=?`, metadata.ID).Scan(&token.ID, &expiry, &used, &created); err != nil {
 			return "", EnrollmentToken{}, err
 		}
 		var parseErr error
@@ -137,15 +131,14 @@ func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, ro
 	}
 	if nodeID != "" {
 		var enabled int
-		var storedRole string
-		if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM nodes WHERE id=?`, nodeID).Scan(&storedRole, &enabled); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT enabled FROM nodes WHERE id=?`, nodeID).Scan(&enabled); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return "", EnrollmentToken{}, ErrNodeNotEnrolled
 			}
 			return "", EnrollmentToken{}, err
 		}
-		if (role != "" && storedRole != role) || enabled == 0 {
-			return "", EnrollmentToken{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
+		if enabled == 0 {
+			return "", EnrollmentToken{}, fmt.Errorf("%w: node is disabled", ErrNodeEnrollmentNotAllowed)
 		}
 		plain = nodeEnrollmentToken(nodeID, plain)
 		digest = HashToken(plain)
@@ -156,11 +149,11 @@ func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, ro
 	if err != nil {
 		return "", EnrollmentToken{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO enrollment_tokens(id,token_hash,role,expires_at,created_at) VALUES(?,?,?,?,?)`, id, digest, role, expires.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO enrollment_tokens(id,token_hash,expires_at,created_at) VALUES(?,?,?,?)`, id, digest, expires.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return "", EnrollmentToken{}, err
 	}
-	if err := insertAudit(ctx, tx, options.Actor, "create", "enrollment_token", id, 1, map[string]string{"role": role}); err != nil {
+	if err := insertAudit(ctx, tx, options.Actor, "create", "enrollment_token", id, 1, nil); err != nil {
 		return "", EnrollmentToken{}, err
 	}
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
@@ -169,7 +162,7 @@ func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID, ro
 	if err := tx.Commit(); err != nil {
 		return "", EnrollmentToken{}, err
 	}
-	return plain, EnrollmentToken{ID: id, Role: role, ExpiresAt: expires, CreatedAt: now}, nil
+	return plain, EnrollmentToken{ID: id, ExpiresAt: expires, CreatedAt: now}, nil
 }
 
 const nodeEnrollmentTokenPrefix = "afn_"
@@ -199,7 +192,7 @@ func parseNodeEnrollmentToken(token string) (nodeID string, bound bool, err erro
 }
 
 func (s *Store) ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,role,expires_at,used_at,created_at FROM enrollment_tokens ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,expires_at,used_at,created_at FROM enrollment_tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +202,7 @@ func (s *Store) ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, er
 		var token EnrollmentToken
 		var expires, created string
 		var used sqlNullString
-		if err := rows.Scan(&token.ID, &token.Role, &expires, &used, &created); err != nil {
+		if err := rows.Scan(&token.ID, &expires, &used, &created); err != nil {
 			return nil, err
 		}
 		var parseErr error
@@ -276,7 +269,7 @@ func (s *Store) RevokeEnrollmentTokenWithOptions(ctx context.Context, id string,
 // transaction. Tests exercise it directly.
 //
 //lint:ignore U1000 package tests exercise token consumption directly.
-func (s *Store) consumeEnrollmentToken(ctx context.Context, plain, role string) error {
+func (s *Store) consumeEnrollmentToken(ctx context.Context, plain string) error {
 	if strings.TrimSpace(plain) == "" {
 		return errors.New("enrollment token is required")
 	}
@@ -286,7 +279,7 @@ func (s *Store) consumeEnrollmentToken(ctx context.Context, plain, role string) 
 		return storageFailure("begin enrollment token transaction", err)
 	}
 	defer tx.Rollback()
-	if err := consumeEnrollmentTokenTx(ctx, tx, digest, role); err != nil {
+	if err := consumeEnrollmentTokenTx(ctx, tx, digest); err != nil {
 		if isCredentialError(err) {
 			return err
 		}
@@ -295,10 +288,10 @@ func (s *Store) consumeEnrollmentToken(ctx context.Context, plain, role string) 
 	return storageFailure("commit enrollment token", tx.Commit())
 }
 
-func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest, role string) error {
-	var id, storedRole, expires string
+func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest string) error {
+	var id, expires string
 	var used sqlNullString
-	if err := tx.QueryRowContext(ctx, `SELECT id,role,expires_at,used_at FROM enrollment_tokens WHERE token_hash=?`, digest).Scan(&id, &storedRole, &expires, &used); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,expires_at,used_at FROM enrollment_tokens WHERE token_hash=?`, digest).Scan(&id, &expires, &used); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
 		}
@@ -314,12 +307,6 @@ func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest, role stri
 	if !time.Now().Before(expiry) {
 		return ErrEnrollmentTokenExpired
 	}
-	// An empty token role is deliberately unbound.  The caller supplies the
-	// effective role of the Node being enrolled, while a non-empty token role
-	// remains a strict constraint.
-	if storedRole != "" && storedRole != role {
-		return ErrEnrollmentRoleMismatch
-	}
 	result, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at=? WHERE id=? AND used_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return err
@@ -334,13 +321,13 @@ func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest, role stri
 	return nil
 }
 
-func (s *Store) validateEnrollmentToken(ctx context.Context, plain, role string) error {
+func (s *Store) validateEnrollmentToken(ctx context.Context, plain string) error {
 	if strings.TrimSpace(plain) == "" {
 		return ErrInvalidEnrollmentToken
 	}
-	var storedRole, expires string
+	var expires string
 	var used sqlNullString
-	err := s.db.QueryRowContext(ctx, `SELECT role,expires_at,used_at FROM enrollment_tokens WHERE token_hash=?`, HashToken(plain)).Scan(&storedRole, &expires, &used)
+	err := s.db.QueryRowContext(ctx, `SELECT expires_at,used_at FROM enrollment_tokens WHERE token_hash=?`, HashToken(plain)).Scan(&expires, &used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrInvalidEnrollmentToken
 	}
@@ -356,12 +343,6 @@ func (s *Store) validateEnrollmentToken(ctx context.Context, plain, role string)
 	}
 	if !time.Now().UTC().Before(expiresAt) {
 		return ErrEnrollmentTokenExpired
-	}
-	// An empty token role is deliberately unbound.  The caller supplies the
-	// effective role of the Node being enrolled, while a non-empty token role
-	// remains a strict constraint.
-	if storedRole != "" && storedRole != role {
-		return ErrEnrollmentRoleMismatch
 	}
 	return nil
 }
@@ -387,12 +368,9 @@ func (v *sqlNullString) Scan(src any) error {
 	return nil
 }
 
-func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, role, nodeID string, csrDER []byte) (Certificate, error) {
+func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte) (Certificate, error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
-	}
-	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
-		return Certificate{}, fmt.Errorf("%w: node behavior must be gateway or agent when supplied", ErrInvalidEnrollmentRequest)
 	}
 	if boundNodeID, bound, err := parseNodeEnrollmentToken(token); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
@@ -405,7 +383,7 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	// below.
 	pending, pendingErr := s.pendingBootstrapForToken(ctx, HashToken(token))
 	if pendingErr == nil {
-		return s.issuePendingNodeCertificate(ctx, config, token, role, nodeID, csrDER, pending)
+		return s.issuePendingNodeCertificate(ctx, config, token, nodeID, csrDER, pending)
 	}
 	if !errors.Is(pendingErr, sql.ErrNoRows) {
 		return Certificate{}, storageFailure("look up pending node bootstrap", pendingErr)
@@ -417,18 +395,10 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 		}
 		return Certificate{}, storageFailure("load node for enrollment", err)
 	}
-	requestedRole := role
-	effectiveRole := node.Role
-	if requestedRole != "" {
-		if node.Role != "" && node.Role != requestedRole {
-			return Certificate{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
-		}
-		effectiveRole = requestedRole
-	}
 	if !node.Enabled || node.CertificateState == domain.CertificateRevoked {
-		return Certificate{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
+		return Certificate{}, fmt.Errorf("%w: node is disabled", ErrNodeEnrollmentNotAllowed)
 	}
-	if err := s.validateEnrollmentToken(ctx, token, effectiveRole); err != nil {
+	if err := s.validateEnrollmentToken(ctx, token); err != nil {
 		return Certificate{}, err
 	}
 	request, err := x509.ParseCertificateRequest(csrDER)
@@ -441,7 +411,7 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	if _, ok := request.PublicKey.(ed25519.PublicKey); !ok {
 		return Certificate{}, fmt.Errorf("%w: enrollment CSR key must be Ed25519", ErrInvalidEnrollmentRequest)
 	}
-	if err := validateCSRIdentity(request, nodeID, effectiveRole); err != nil {
+	if err := validateCSRIdentity(request, nodeID); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
 	caCert, caKey, err := readCA(config.CACertPath, config.CAKeyPath)
@@ -458,9 +428,9 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	}
 	defer tx.Rollback()
 	var revision int64
-	var currentRole, certificateState string
+	var certificateState string
 	var enabled int
-	if err := tx.QueryRowContext(ctx, `SELECT revision,role,enabled,certificate_state FROM nodes WHERE id=?`, nodeID).Scan(&revision, &currentRole, &enabled, &certificateState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT revision,enabled,certificate_state FROM nodes WHERE id=?`, nodeID).Scan(&revision, &enabled, &certificateState); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Certificate{}, ErrNodeNotEnrolled
 		}
@@ -469,32 +439,27 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 	// Re-check mutable enrollment preconditions inside the write transaction.
 	// The initial GetNode call is only a fast rejection path; an administrator
 	// can revoke/disable a node while CSR parsing and signing are in progress.
-	if (requestedRole != "" && currentRole != requestedRole) || enabled == 0 || certificateState == domain.CertificateRevoked {
-		return Certificate{}, fmt.Errorf("%w: node is disabled or behavior does not match", ErrNodeEnrollmentNotAllowed)
+	if enabled == 0 || certificateState == domain.CertificateRevoked {
+		return Certificate{}, fmt.Errorf("%w: node is disabled", ErrNodeEnrollmentNotAllowed)
 	}
-	if requestedRole == "" {
-		effectiveRole = currentRole
-	} else {
-		effectiveRole = requestedRole
-	}
-	if err := validateCSRIdentity(request, nodeID, effectiveRole); err != nil {
+	if err := validateCSRIdentity(request, nodeID); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
 	// Consume the one-time token before performing the CA signature while the
 	// transaction is still open. Any signing or persistence failure rolls the
 	// transaction back, so a valid token is not lost to an internal error.
-	if err := consumeEnrollmentTokenTx(ctx, tx, HashToken(token), effectiveRole); err != nil {
+	if err := consumeEnrollmentTokenTx(ctx, tx, HashToken(token)); err != nil {
 		if !isCredentialError(err) && !errors.Is(err, ErrInvalidEnrollmentRequest) {
 			return Certificate{}, storageFailure("consume enrollment token", err)
 		}
 		return Certificate{}, err
 	}
-	certificate, err := signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, effectiveRole, request.PublicKey)
+	certificate, err := signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, request.PublicKey)
 	if err != nil {
 		return Certificate{}, err
 	}
 	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND role=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, currentRole, domain.CertificateRevoked)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, domain.CertificateRevoked)
 	if err != nil {
 		return Certificate{}, storageFailure("update node certificate", err)
 	}
@@ -542,10 +507,10 @@ func (s *Store) RenewNodeCertificate(ctx context.Context, config Config, nodeID 
 	if _, ok := request.PublicKey.(ed25519.PublicKey); !ok {
 		return Certificate{}, fmt.Errorf("%w: renewal CSR key must be Ed25519", ErrInvalidEnrollmentRequest)
 	}
-	if err := validateCSRIdentity(request, node.ID, node.Role); err != nil {
+	if err := validateCSRIdentity(request, node.ID); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
-	certificate, err := signNodeCertificate(config, node.ID, node.Role, request.PublicKey)
+	certificate, err := signNodeCertificate(config, node.ID, request.PublicKey)
 	if err != nil {
 		return Certificate{}, err
 	}
@@ -555,19 +520,19 @@ func (s *Store) RenewNodeCertificate(ctx context.Context, config Config, nodeID 
 	}
 	defer tx.Rollback()
 	var revision int64
-	var role, certificateState string
+	var certificateState string
 	var enabled int
-	if err := tx.QueryRowContext(ctx, `SELECT revision,role,enabled,certificate_state FROM nodes WHERE id=?`, nodeID).Scan(&revision, &role, &enabled, &certificateState); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT revision,enabled,certificate_state FROM nodes WHERE id=?`, nodeID).Scan(&revision, &enabled, &certificateState); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Certificate{}, ErrNodeNotEnrolled
 		}
 		return Certificate{}, storageFailure("reload node for renewal", err)
 	}
-	if role != node.Role || enabled == 0 || certificateState == domain.CertificateRevoked {
+	if enabled == 0 || certificateState == domain.CertificateRevoked {
 		return Certificate{}, fmt.Errorf("%w: node is disabled or certificate is revoked", ErrNodeEnrollmentNotAllowed)
 	}
 	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND role=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, node.Role, domain.CertificateRevoked)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=? AND enabled=1 AND certificate_state<>?`, domain.CertificateActive, certificate.Serial, revision+1, updatedAt, nodeID, revision, domain.CertificateRevoked)
 	if err != nil {
 		return Certificate{}, storageFailure("update renewed node certificate", err)
 	}
@@ -587,35 +552,14 @@ func (s *Store) RenewNodeCertificate(ctx context.Context, config Config, nodeID 
 	return certificate, nil
 }
 
-func validateCSRIdentity(request *x509.CertificateRequest, nodeID, role string) error {
+func validateCSRIdentity(request *x509.CertificateRequest, nodeID string) error {
 	if request == nil || request.Subject.CommonName != nodeID {
 		return errors.New("CSR common name does not match node identity")
-	}
-	// The organization is informational, but when a role is expected we require
-	// either the role marker used by our own role-bound CSR generator or the
-	// role-neutral marker used by a generic Node bootstrap.  This prevents a
-	// valid node key from being accidentally enrolled for the other role while
-	// still allowing a generic bootstrap to be renewed after its Node Spec is
-	// configured.
-	if role != "" && len(request.Subject.Organization) > 0 {
-		matched := false
-		roleNeutral := true
-		for _, value := range request.Subject.Organization {
-			if value == role {
-				matched = true
-			}
-			if value != "AsterFerry" {
-				roleNeutral = false
-			}
-		}
-		if !matched && !roleNeutral {
-			return errors.New("CSR organization does not match node role")
-		}
 	}
 	return nil
 }
 
-func signNodeCertificate(config Config, nodeID, role string, publicKey any) (Certificate, error) {
+func signNodeCertificate(config Config, nodeID string, publicKey any) (Certificate, error) {
 	caCert, caKey, err := readCA(config.CACertPath, config.CAKeyPath)
 	if err != nil {
 		return Certificate{}, err
@@ -624,10 +568,10 @@ func signNodeCertificate(config Config, nodeID, role string, publicKey any) (Cer
 	if err != nil {
 		return Certificate{}, err
 	}
-	return signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, role, publicKey)
+	return signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, publicKey)
 }
 
-func signNodeCertificateWithCA(caCert *x509.Certificate, caKey ed25519.PrivateKey, caPEM []byte, nodeID, role string, publicKey any) (Certificate, error) {
+func signNodeCertificateWithCA(caCert *x509.Certificate, caKey ed25519.PrivateKey, caPEM []byte, nodeID string, publicKey any) (Certificate, error) {
 	if caCert == nil || len(caKey) == 0 || len(caPEM) == 0 {
 		return Certificate{}, errors.New("CA signing material is incomplete")
 	}
@@ -637,11 +581,7 @@ func signNodeCertificateWithCA(caCert *x509.Certificate, caKey ed25519.PrivateKe
 	}
 	now := time.Now().UTC()
 	uri := domain.NodeIdentityURI(nodeID)
-	organization := []string{"AsterFerry"}
-	if role != "" {
-		organization = append(organization, role)
-	}
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: organization}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry"}}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(NodeCertificateTTL), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, publicKey, caKey)
 	if err != nil {
 		return Certificate{}, err
@@ -660,22 +600,15 @@ func CertificateNeedsRotation(notAfter, now time.Time) bool {
 	return !notAfter.After(now.Add(CertificateRotateBefore))
 }
 
-func GenerateNodeCSR(nodeID string, role string) (csrDER, keyPEM []byte, err error) {
+func GenerateNodeCSR(nodeID string) (csrDER, keyPEM []byte, err error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return nil, nil, err
-	}
-	if role != "" && role != domain.RoleGateway && role != domain.RoleAgent {
-		return nil, nil, errors.New("node behavior must be gateway or agent when supplied")
 	}
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	organization := []string{"AsterFerry"}
-	if role != "" {
-		organization = append(organization, role)
-	}
-	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: organization}}, private)
+	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry"}}}, private)
 	if err != nil {
 		return nil, nil, err
 	}

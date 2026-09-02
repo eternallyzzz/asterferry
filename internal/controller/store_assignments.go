@@ -13,330 +13,6 @@ import (
 	"asterferry/internal/domain"
 )
 
-// ApplySnapshot commits a complete desired state and its derived resources in
-// one transaction. A failed resource or audit insert rolls the whole write
-// back, so nodes never receive a partially updated generation.
-func (s *Store) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapshot, options WriteOptions) error {
-	for index := range snapshot.Assignments {
-		if snapshot.Assignments[index].State == "" {
-			snapshot.Assignments[index].State = domain.AssignmentPending
-		}
-		// AssignmentApplied is an observed/controller-owned state.  A complete
-		// snapshot write is allowed to publish pending, degraded, or draining
-		// placement data, but it must never be used as a shortcut to open a
-		// listener without the two-sided Gateway/Agent acknowledgement barrier.
-		if snapshot.Assignments[index].State == domain.AssignmentApplied {
-			return &domain.ApplyError{Code: "state_controller_owned", Path: fmt.Sprintf("assignments[%d].state", index), Message: "assignment state applied is controller-owned"}
-		}
-	}
-	if snapshot.Gateway != nil {
-		if err := s.protectObfuscationPolicy(&snapshot.Gateway.Obfuscation); err != nil {
-			return err
-		}
-	}
-	for index := range snapshot.Assignments {
-		if err := s.protectObfuscationPolicy(&snapshot.Assignments[index].Obfuscation); err != nil {
-			return fmt.Errorf("assignment %q obfuscation: %w", snapshot.Assignments[index].ID, err)
-		}
-	}
-	if err := snapshot.Validate(); err != nil {
-		return err
-	}
-	if snapshot.Generation > math.MaxInt64 {
-		return &domain.ApplyError{Code: "invalid_generation", Path: "generation", Message: "generation exceeds repository limit"}
-	}
-	withChecksum, err := snapshot.WithChecksum()
-	if err != nil {
-		return err
-	}
-	if snapshot.Checksum != "" && !strings.EqualFold(snapshot.Checksum, withChecksum.Checksum) {
-		return &domain.ApplyError{Code: "checksum_mismatch", Path: "checksum", Message: "snapshot checksum does not match its content"}
-	}
-	snapshot = withChecksum
-	document, err := json.Marshal(snapshot)
-	if err != nil {
-		return err
-	}
-	if len(document) > maxSnapshotDocument {
-		return &domain.ApplyError{Code: "message_too_large", Message: "desired snapshot exceeds repository limit"}
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	requestSnapshot := snapshotForIdempotency(snapshot)
-	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, requestSnapshot)
-	if err != nil {
-		return err
-	}
-	if hit {
-		return nil
-	}
-	var currentGeneration uint64
-	var current []byte
-	err = tx.QueryRowContext(ctx, `SELECT generation,document_json FROM desired_snapshots WHERE node_id=?`, snapshot.NodeID).Scan(&currentGeneration, &current)
-	if err == nil && snapshot.Generation <= currentGeneration {
-		expected := currentGeneration
-		if expected < math.MaxUint64 {
-			expected++
-		}
-		return &RevisionConflictError{Resource: "desired_snapshot", Expected: uint64ToRevision(expected), Actual: uint64ToRevision(snapshot.Generation)}
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if snapshot.Gateway != nil {
-		var role string
-		if err := tx.QueryRowContext(ctx, `SELECT role FROM nodes WHERE id=?`, snapshot.Gateway.NodeID).Scan(&role); err != nil {
-			return err
-		}
-		if role != domain.RoleGateway {
-			return errors.New("snapshot gateway node has the wrong role")
-		}
-	}
-	if snapshot.Agent != nil {
-		var role string
-		if err := tx.QueryRowContext(ctx, `SELECT role FROM nodes WHERE id=?`, snapshot.Agent.NodeID).Scan(&role); err != nil {
-			return err
-		}
-		if role != domain.RoleAgent {
-			return errors.New("snapshot agent node has the wrong role")
-		}
-	}
-	// A gateway snapshot is complete for that gateway, so replacing its
-	// binding rows first releases ports removed from the desired generation.
-	// An agent snapshot is scoped to the agent and only releases bindings for
-	// the services it owns.
-	if snapshot.Gateway != nil {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM service_bindings WHERE gateway_id=?`, snapshot.NodeID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM assignments WHERE gateway_id=?`, snapshot.NodeID); err != nil {
-			return err
-		}
-	} else {
-		// Agent snapshots are complete for the agent. Remove all of its old
-		// bindings, assignments and service documents before inserting the new
-		// generation; the surrounding transaction restores them if validation
-		// or any later insert fails.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM service_bindings WHERE service_id IN (SELECT id FROM services WHERE agent_id=?)`, snapshot.NodeID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM assignments WHERE agent_id=?`, snapshot.NodeID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM services WHERE agent_id=?`, snapshot.NodeID); err != nil {
-			return err
-		}
-	}
-	// A node-scoped snapshot can be applied independently while another node
-	// is offline. Re-check the global service/assignment invariants after the
-	// scoped cleanup so a partial apply cannot silently steal a service or a
-	// public binding from a different assignment.
-	for _, service := range snapshot.Services {
-		var existingAgent string
-		if err := tx.QueryRowContext(ctx, `SELECT agent_id FROM services WHERE id=?`, service.ID).Scan(&existingAgent); err == nil {
-			if existingAgent != service.AgentID {
-				return &domain.ApplyError{Code: "resource_conflict", Path: "services", Message: fmt.Sprintf("service %q belongs to another agent", service.ID)}
-			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-	}
-	for _, assignment := range snapshot.Assignments {
-		// Assignment IDs are stable identities. A node-scoped snapshot may
-		// replace rows owned by that node, but it must never overwrite an
-		// assignment that belongs to a different Gateway/Agent pair. The
-		// regular PutAssignment path intentionally permits an atomic failover;
-		// snapshots, however, are complete documents and an owner mismatch is
-		// always a stale or corrupted Controller view.
-		var existingGateway, existingAgent string
-		if err := tx.QueryRowContext(ctx, `SELECT gateway_id,agent_id FROM assignments WHERE id=?`, assignment.ID).Scan(&existingGateway, &existingAgent); err == nil {
-			if existingGateway != assignment.GatewayID || existingAgent != assignment.AgentID {
-				return &domain.ApplyError{Code: "resource_conflict", Path: "assignments", Message: fmt.Sprintf("assignment %q belongs to another gateway or agent", assignment.ID)}
-			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		for _, serviceID := range assignment.ServiceIDs {
-			assigned, err := serviceAssignedElsewhere(ctx, tx, serviceID, assignment.ID)
-			if err != nil {
-				return err
-			}
-			if assigned {
-				return &domain.ApplyError{Code: "resource_conflict", Path: "assignments", Message: fmt.Sprintf("service %q is already assigned", serviceID)}
-			}
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at`, snapshot.NodeID, snapshot.Generation, snapshot.Checksum, document, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return err
-	}
-	if snapshot.Gateway != nil {
-		value, err := json.Marshal(snapshot.Gateway)
-		if err != nil {
-			return fmt.Errorf("encode gateway snapshot: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO gateway_specs(node_id,document_json,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(node_id) DO UPDATE SET document_json=excluded.document_json,revision=gateway_specs.revision+1,updated_at=excluded.updated_at`, snapshot.Gateway.NodeID, value, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return err
-		}
-	}
-	if snapshot.Agent != nil {
-		value, err := json.Marshal(snapshot.Agent)
-		if err != nil {
-			return fmt.Errorf("encode agent snapshot: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_specs(node_id,document_json,revision,updated_at) VALUES(?,?,1,?) ON CONFLICT(node_id) DO UPDATE SET document_json=excluded.document_json,revision=agent_specs.revision+1,updated_at=excluded.updated_at`, snapshot.Agent.NodeID, value, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return err
-		}
-	}
-	if snapshot.Agent != nil {
-		// Agent snapshots are authoritative for the services owned by that
-		// Agent, so replace their documents in the same transaction.
-		for _, service := range snapshot.Services {
-			value, err := json.Marshal(service)
-			if err != nil {
-				return fmt.Errorf("encode service %q: %w", service.ID, err)
-			}
-			var serviceRole string
-			if err := tx.QueryRowContext(ctx, `SELECT role FROM nodes WHERE id=?`, service.AgentID).Scan(&serviceRole); err != nil {
-				return fmt.Errorf("service %q agent: %w", service.ID, err)
-			}
-			if serviceRole != domain.RoleAgent {
-				return fmt.Errorf("service %q agent has the wrong role", service.ID)
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO services(id,agent_id,document_json,revision,updated_at) VALUES(?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,document_json=excluded.document_json,revision=services.revision+1,updated_at=excluded.updated_at`, service.ID, service.AgentID, value, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-				return err
-			}
-		}
-	} else {
-		// A Gateway snapshot only references service documents owned by Agents.
-		// Never let a stale Gateway stream overwrite those authoritative rows;
-		// require the referenced content to match what is already stored.
-		for _, service := range snapshot.Services {
-			var existingDocument []byte
-			if err := tx.QueryRowContext(ctx, `SELECT document_json FROM services WHERE id=?`, service.ID).Scan(&existingDocument); err != nil {
-				return fmt.Errorf("gateway snapshot service %q: %w", service.ID, err)
-			}
-			var existing domain.Service
-			if err := json.Unmarshal(existingDocument, &existing); err != nil {
-				return fmt.Errorf("decode gateway snapshot service %q: %w", service.ID, err)
-			}
-			if !sameServiceContent(existing, service) {
-				return &domain.ApplyError{Code: "resource_conflict", Path: "services", Message: fmt.Sprintf("gateway snapshot service %q is not current", service.ID)}
-			}
-		}
-	}
-	for _, assignment := range snapshot.Assignments {
-		if err := assignment.Validate(); err != nil {
-			return err
-		}
-		var gatewayRole, agentRole string
-		if err := tx.QueryRowContext(ctx, `SELECT role FROM nodes WHERE id=?`, assignment.GatewayID).Scan(&gatewayRole); err != nil {
-			return err
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT role FROM nodes WHERE id=?`, assignment.AgentID).Scan(&agentRole); err != nil {
-			return err
-		}
-		if gatewayRole != domain.RoleGateway || agentRole != domain.RoleAgent {
-			return errors.New("assignment node roles are invalid")
-		}
-		var gatewayLabelsJSON []byte
-		if err := tx.QueryRowContext(ctx, `SELECT labels_json FROM nodes WHERE id=?`, assignment.GatewayID).Scan(&gatewayLabelsJSON); err != nil {
-			return err
-		}
-		var gatewayLabels map[string]string
-		if len(gatewayLabelsJSON) > 0 {
-			if err := json.Unmarshal(gatewayLabelsJSON, &gatewayLabels); err != nil {
-				return fmt.Errorf("decode gateway labels: %w", err)
-			}
-		}
-		var gatewayPortPool domain.PortPool
-		var gatewaySpecDocument []byte
-		var gatewaySpec domain.GatewaySpec
-		haveGatewaySpec := false
-		if snapshot.Gateway != nil && snapshot.Gateway.NodeID == assignment.GatewayID {
-			gatewayPortPool = snapshot.Gateway.PortPool
-			gatewaySpec = *snapshot.Gateway
-			haveGatewaySpec = true
-		} else if err := tx.QueryRowContext(ctx, `SELECT document_json FROM gateway_specs WHERE node_id=?`, assignment.GatewayID).Scan(&gatewaySpecDocument); err == nil {
-			if err := json.Unmarshal(gatewaySpecDocument, &gatewaySpec); err != nil {
-				return fmt.Errorf("decode gateway spec: %w", err)
-			}
-			gatewayPortPool = gatewaySpec.PortPool
-			haveGatewaySpec = true
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		serviceSet := make(map[string]struct{}, len(assignment.ServiceIDs))
-		for _, serviceID := range assignment.ServiceIDs {
-			var serviceAgent string
-			var serviceDocument []byte
-			if err := tx.QueryRowContext(ctx, `SELECT agent_id,document_json FROM services WHERE id=?`, serviceID).Scan(&serviceAgent, &serviceDocument); err != nil {
-				return fmt.Errorf("assignment service %q: %w", serviceID, err)
-			}
-			if serviceAgent != assignment.AgentID {
-				return fmt.Errorf("assignment service %q belongs to another agent", serviceID)
-			}
-			var service domain.Service
-			if err := json.Unmarshal(serviceDocument, &service); err != nil {
-				return fmt.Errorf("assignment service %q: %w", serviceID, err)
-			}
-			if !service.GatewaySelector.Matches(gatewayLabels) {
-				return &domain.ApplyError{Code: "selector_mismatch", Path: "assignments", Message: fmt.Sprintf("gateway %q does not match service %q selector", assignment.GatewayID, serviceID)}
-			}
-			serviceSet[serviceID] = struct{}{}
-		}
-		value, err := json.Marshal(assignment)
-		if err != nil {
-			return fmt.Errorf("encode assignment %q: %w", assignment.ID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO assignments(id,gateway_id,agent_id,document_json,generation,revision,updated_at) VALUES(?,?,?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET gateway_id=excluded.gateway_id,agent_id=excluded.agent_id,document_json=excluded.document_json,generation=excluded.generation,revision=assignments.revision+1,updated_at=excluded.updated_at`, assignment.ID, assignment.GatewayID, assignment.AgentID, value, assignment.Generation, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return err
-		}
-		if err := replaceAssignmentServicesTx(ctx, tx, assignment); err != nil {
-			return err
-		}
-		// Degraded and draining placements have relinquished their public
-		// listeners. Keep binding metadata in the assignment document for
-		// diagnostics/failover, but do not reinsert it into the occupancy index.
-		if assignment.State != domain.AssignmentDegraded && assignment.State != domain.AssignmentDraining {
-			for _, binding := range assignment.Bindings {
-				if _, ok := serviceSet[binding.ServiceID]; !ok {
-					return fmt.Errorf("assignment binding references unknown service %q", binding.ServiceID)
-				}
-				if (snapshot.Gateway != nil || len(gatewaySpecDocument) > 0) && !portInPool(gatewayPortPool, binding.Protocol, binding.Port) {
-					return &domain.ApplyError{Code: "port_outside_pool", Path: "assignments", Message: fmt.Sprintf("binding port %d is outside gateway %q %s port pool", binding.Port, assignment.GatewayID, binding.Protocol)}
-				}
-				if haveGatewaySpec {
-					for _, listener := range gatewaySpec.Listeners {
-						if bindingKey(listener.Protocol, listener.Bind, listener.Port) == bindingKey(binding.Protocol, binding.Bind, binding.Port) {
-							return &PortConflictError{GatewayID: assignment.GatewayID, Protocol: binding.Protocol, Bind: binding.Bind, Port: binding.Port}
-						}
-					}
-				}
-				if _, bindingErr := tx.ExecContext(ctx, `INSERT INTO service_bindings(service_id,gateway_id,protocol,bind,port) VALUES(?,?,?,?,?) ON CONFLICT(service_id) DO UPDATE SET gateway_id=excluded.gateway_id,protocol=excluded.protocol,bind=excluded.bind,port=excluded.port`, binding.ServiceID, assignment.GatewayID, binding.Protocol, normalizeBind(binding.Bind), binding.Port); bindingErr != nil {
-					if isSQLiteUniqueConstraint(bindingErr) {
-						return &PortConflictError{GatewayID: assignment.GatewayID, Protocol: binding.Protocol, Bind: binding.Bind, Port: binding.Port}
-					}
-					return bindingErr
-				}
-			}
-		}
-	}
-	if err := insertAudit(ctx, tx, options.Actor, "apply", "desired_snapshot", snapshot.NodeID, int64(snapshot.Generation), map[string]string{"checksum": snapshot.Checksum}); err != nil {
-		return err
-	}
-	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, requestSnapshot, map[string]any{"node_id": snapshot.NodeID, "generation": snapshot.Generation, "checksum": snapshot.Checksum}); err != nil {
-		return err
-	}
-	affectedNodes := []string{snapshot.NodeID}
-	for _, assignment := range snapshot.Assignments {
-		affectedNodes = append(affectedNodes, assignment.GatewayID, assignment.AgentID)
-	}
-	return s.commitAndNotifyResources(tx, affectedNodes...)
-}
-
 func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment, options WriteOptions) error {
 	// API callers may omit the lifecycle field on create. Persist the safe
 	// default explicitly so a newly scheduled placement cannot be admitted by
@@ -383,24 +59,24 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 		return nil
 	}
 	// Node identity and lifecycle checks are authoritative only inside the
-	// assignment transaction. A preflight GetNode can race a role/enable
+	// assignment transaction. A preflight GetNode can race a kind/enable
 	// change and allow a placement to commit against a different identity.
-	var gatewayRole, agentRole string
+	var gatewayKind, agentKind string
 	var gatewayEnabled, agentEnabled int
-	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM nodes WHERE id=?`, assignment.GatewayID).Scan(&gatewayRole, &gatewayEnabled); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT ns.kind,n.enabled FROM nodes n JOIN node_specs ns ON ns.node_id=n.id WHERE n.id=?`, assignment.GatewayID).Scan(&gatewayKind, &gatewayEnabled); err != nil {
 		return err
 	}
-	if gatewayRole != domain.RoleGateway {
-		return errors.New("assignment gateway has the wrong role")
+	if gatewayKind != string(domain.NodeSpecGateway) {
+		return errors.New("assignment gateway has the wrong kind")
 	}
 	if gatewayEnabled == 0 {
 		return &domain.ApplyError{Code: "node_disabled", Path: "gateway_id", Message: "assignment gateway is disabled"}
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM nodes WHERE id=?`, assignment.AgentID).Scan(&agentRole, &agentEnabled); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT ns.kind,n.enabled FROM nodes n JOIN node_specs ns ON ns.node_id=n.id WHERE n.id=?`, assignment.AgentID).Scan(&agentKind, &agentEnabled); err != nil {
 		return err
 	}
-	if agentRole != domain.RoleAgent {
-		return errors.New("assignment agent has the wrong role")
+	if agentKind != string(domain.NodeSpecAgent) {
+		return errors.New("assignment agent has the wrong kind")
 	}
 	if agentEnabled == 0 {
 		return &domain.ApplyError{Code: "node_disabled", Path: "agent_id", Message: "assignment agent is disabled"}
@@ -417,10 +93,12 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	}
 	var gatewaySpec domain.GatewaySpec
 	var gatewaySpecDocument []byte
-	if err := tx.QueryRowContext(ctx, `SELECT document_json FROM gateway_specs WHERE node_id=?`, assignment.GatewayID).Scan(&gatewaySpecDocument); err == nil {
-		if err := json.Unmarshal(gatewaySpecDocument, &gatewaySpec); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT document_json FROM node_specs WHERE node_id=? AND kind=?`, assignment.GatewayID, string(domain.NodeSpecGateway)).Scan(&gatewaySpecDocument); err == nil {
+		var envelope domain.NodeSpec
+		if err := json.Unmarshal(gatewaySpecDocument, &envelope); err != nil || envelope.Gateway == nil {
 			return fmt.Errorf("decode gateway spec: %w", err)
 		}
+		gatewaySpec = *envelope.Gateway
 		// The public endpoint is a derived part of the assignment and must be
 		// one of the currently advertised endpoints.  Without this check an
 		// operator could persist a syntactically valid but unreachable endpoint
@@ -629,12 +307,6 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 		affectedNodes = append(affectedNodes, old.GatewayID, old.AgentID)
 	}
 	return s.commitAndNotifyResources(tx, affectedNodes...)
-}
-
-func serviceAssignedElsewhere(ctx context.Context, tx *sql.Tx, serviceID, assignmentID string) (bool, error) {
-	var count int
-	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignment_services WHERE service_id=? AND assignment_id<>?`, serviceID, assignmentID).Scan(&count)
-	return count > 0, err
 }
 
 func replaceAssignmentServicesTx(ctx context.Context, tx *sql.Tx, assignment domain.Assignment) error {
