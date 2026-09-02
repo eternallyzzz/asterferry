@@ -20,13 +20,14 @@ import (
 	"asterferry/internal/jsonutil"
 )
 
-const backupManifestVersion = 1
+const backupManifestVersion = 2
 
 type backupManifest struct {
-	Version        int                  `json:"version"`
-	CreatedAt      time.Time            `json:"created_at"`
-	DatabaseSchema string               `json:"database_schema,omitempty"`
-	Files          []backupManifestFile `json:"files"`
+	Version          int                  `json:"version"`
+	CreatedAt        time.Time            `json:"created_at"`
+	ControllerSchema string               `json:"controller_schema"`
+	DatabaseSchema   string               `json:"database_schema,omitempty"`
+	Files            []backupManifestFile `json:"files"`
 }
 
 type backupManifestFile struct {
@@ -274,14 +275,15 @@ func validateConfiguredDatabase(ctx context.Context, config Config, backend data
 	if openedBackend != backend {
 		return errors.New("database backend changed while opening")
 	}
-	compatible, empty, err := inspectDatabase(ctx, db, backend)
+	dialect := newDatabaseDialect(backend)
+	compatible, empty, err := inspectDatabase(ctx, db, dialect)
 	if err != nil {
 		return fmt.Errorf("inspect controller database: %w", err)
 	}
 	if empty || !compatible {
 		return ErrIncompatibleDatabase
 	}
-	if err := validateRequiredTables(ctx, db, backend); err != nil {
+	if err := validateRequiredTables(ctx, db, dialect); err != nil {
 		return fmt.Errorf("validate controller database: %w", err)
 	}
 	return nil
@@ -464,7 +466,8 @@ func ensurePostgresTargetEmpty(ctx context.Context, config Config) error {
 	if backend != databaseBackendPostgres {
 		return errors.New("restore target is not PostgreSQL")
 	}
-	compatible, empty, err := inspectDatabase(ctx, db, backend)
+	dialect := newDatabaseDialect(backend)
+	compatible, empty, err := inspectDatabase(ctx, db, dialect)
 	if err != nil {
 		return fmt.Errorf("inspect target PostgreSQL database: %w", err)
 	}
@@ -485,7 +488,13 @@ func copyFile(source, destination string, mode os.FileMode) error {
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
 
 func writeBackupManifest(directory string, createdAt time.Time, databaseSchema string, payloadFiles []string) error {
-	manifest := backupManifest{Version: backupManifestVersion, CreatedAt: createdAt.UTC(), DatabaseSchema: databaseSchema, Files: make([]backupManifestFile, 0, len(payloadFiles))}
+	manifest := backupManifest{
+		Version:          backupManifestVersion,
+		CreatedAt:        createdAt.UTC(),
+		ControllerSchema: fmt.Sprintf("%d/%s", currentDBSchema, dbSchemaFingerprint),
+		DatabaseSchema:   databaseSchema,
+		Files:            make([]backupManifestFile, 0, len(payloadFiles)),
+	}
 	for _, name := range payloadFiles {
 		entry, err := hashBackupFile(context.Background(), filepath.Join(directory, name))
 		if err != nil {
@@ -509,7 +518,7 @@ func verifyBackupManifest(directory string, payloadFiles []string) (backupManife
 	if err := jsonutil.DecodeStrict(data, &manifest); err != nil {
 		return backupManifest{}, fmt.Errorf("decode backup manifest: %w", err)
 	}
-	if manifest.Version != backupManifestVersion || manifest.CreatedAt.IsZero() {
+	if manifest.Version != backupManifestVersion || manifest.CreatedAt.IsZero() || manifest.ControllerSchema != fmt.Sprintf("%d/%s", currentDBSchema, dbSchemaFingerprint) {
 		return backupManifest{}, errors.New("backup manifest version or timestamp is invalid")
 	}
 	expected := make(map[string]struct{}, len(payloadFiles))

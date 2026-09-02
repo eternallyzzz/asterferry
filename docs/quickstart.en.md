@@ -410,7 +410,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-SQLite schema v9 remains the default for a zero-dependency installation. For a
+SQLite schema v10 remains the default for a zero-dependency installation. For a
 larger Controller, initialize with PostgreSQL instead:
 
 ```sh
@@ -420,21 +420,10 @@ asterferry controller init --dir /var/lib/asterferry \
   --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
 ```
 
-To move an existing SQLite installation, stop the Controller and validate an
-empty PostgreSQL database first. The apply command copies Controller and
-runtime tables in one transaction and writes a separate PostgreSQL config;
-the original directory remains available for rollback:
-
-```sh
-asterferry controller migrate --config ./controller/controller.json \
-  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' \
-  --dry-run
-asterferry controller migrate --config ./controller/controller.json \
-  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' \
-  --output-config ./controller/controller-postgres.json
-asterferry controller run --config ./controller/controller-postgres.json
-```
-
+SQLite and PostgreSQL are fresh-install choices in this development generation.
+There is no in-place schema migration or SQLite-to-PostgreSQL conversion
+command. To change backend, initialize a new Controller and recreate the
+Dashboard resources; v8/v9 databases and pre-v10 backup manifests are rejected.
 The PostgreSQL backup format uses the external `pg_dump` and `pg_restore`
 utilities, so install the PostgreSQL client tools wherever the backup/restore
 CLI is run. SQLite backups continue to use the local database file. In both

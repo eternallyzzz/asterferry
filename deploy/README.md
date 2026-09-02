@@ -28,7 +28,7 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-SQLite schema v9 remains the default. For a production-sized Controller, use
+SQLite schema v10 remains the default. For a production-sized Controller, use
 an external PostgreSQL database:
 
 ```sh
@@ -38,13 +38,12 @@ asterferry controller init --dir /var/lib/asterferry \
   --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
 ```
 
-To migrate an existing SQLite installation, stop the Controller and run
-`controller migrate --dry-run` against an empty PostgreSQL database first;
-the apply command writes a separate config and copies all application/runtime
-tables in one transaction. Older or unknown SQLite generations remain
-incompatible. Keep the original directory and a complete backup for rollback.
-PostgreSQL backup/restore requires `pg_dump`/`pg_restore` installed on the
-machine running the CLI; SQLite backup remains local-file based.
+The development schema is a clean break: there is no in-place migration and no
+`controller migrate` command. To change backend, initialize a new Controller
+and recreate resources in the Dashboard. Older or unknown database generations
+and pre-v10 backup manifests remain incompatible. PostgreSQL backup/restore
+requires `pg_dump`/`pg_restore` installed on the machine running the CLI;
+SQLite backup remains local-file based.
 
 `deploy/asterferry-controller.service` is a single-replica systemd unit; the
 Controller is not advertised as highly available. Nodes retain their encrypted

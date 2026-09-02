@@ -92,10 +92,10 @@ curl -X POST https://controller.example/api/v1/nodes/gateway-b/runtime/actions \
 增加，建议使用带有有界连接池的 PostgreSQL。初始化时通过
 `--database-driver postgres --database-url 'postgres://...'` 选择它。
 
-迁移已有安装时使用 `controller migrate`：先停止 Controller，针对空的
-PostgreSQL 数据库执行 `--dry-run`，确认无误后用 `--output-config` 执行应用
-迁移，再使用新配置启动 Controller。复制过程不会修改源 SQLite 目录，应该
-保留它用于回滚。PostgreSQL 备份/恢复要求执行 CLI 的机器安装
+当前开发 schema 是破坏性契约，不提供 `controller migrate` 或
+SQLite→PostgreSQL 原地转换。需要切换后端或 schema 时，请重新初始化
+Controller，并在 Dashboard 重建资源；v8/v9 数据库和 v10 之前的备份
+manifest 会被拒绝。PostgreSQL 备份/恢复要求执行 CLI 的机器安装
 `pg_dump` 和 `pg_restore`；备份还包含 Controller 配置、master key、CA 和
 TLS 身份。
 

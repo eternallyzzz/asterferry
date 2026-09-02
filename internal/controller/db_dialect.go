@@ -30,15 +30,89 @@ const (
 	databaseBackendPostgres databaseBackend = DatabaseDriverPostgres
 )
 
-// selectForUpdateClause is deliberately backend-specific. SQLite uses the
-// controller's single-writer connection and does not support PostgreSQL's
-// row-lock syntax; PostgreSQL needs it for read/modify/write barriers such as
-// the two-sided assignment acknowledgement.
-func (s *Store) selectForUpdateClause() string {
-	if s != nil && s.backend == databaseBackendPostgres {
-		return " FOR UPDATE"
+// schemaTypes contains the small set of DDL differences between the supported
+// databases. Table definitions stay shared so a new column cannot silently be
+// added to only one backend.
+type schemaTypes struct {
+	integer    string
+	bigInteger string
+	blob       string
+	real       string
+	autoID     string
+}
+
+// databaseDialect is the Controller's internal database contract. Store code
+// continues to use SQLite-style '?' arguments; the PostgreSQL driver adapter
+// binds them at the driver boundary.
+type databaseDialect interface {
+	backend() databaseBackend
+	bind(query string) string
+	forUpdateSuffix() string
+	schemaTypes() schemaTypes
+	relationCountQuery() string
+	tableExistsQuery() string
+	columnExistsQuery() string
+	indexExistsQuery() string
+}
+
+type sqliteDialect struct{}
+
+func (sqliteDialect) backend() databaseBackend { return databaseBackendSQLite }
+func (sqliteDialect) bind(query string) string { return query }
+func (sqliteDialect) forUpdateSuffix() string  { return "" }
+func (sqliteDialect) schemaTypes() schemaTypes {
+	return schemaTypes{integer: "INTEGER", bigInteger: "INTEGER", blob: "BLOB", real: "REAL", autoID: "INTEGER PRIMARY KEY AUTOINCREMENT"}
+}
+func (sqliteDialect) relationCountQuery() string {
+	return `SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`
+}
+func (sqliteDialect) tableExistsQuery() string {
+	return `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`
+}
+func (sqliteDialect) columnExistsQuery() string {
+	return `SELECT count(*) FROM pragma_table_info(?) WHERE name=?`
+}
+func (sqliteDialect) indexExistsQuery() string {
+	return `SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`
+}
+
+type postgresDialect struct{}
+
+func (postgresDialect) backend() databaseBackend { return databaseBackendPostgres }
+func (postgresDialect) bind(query string) string { return bindPostgresPlaceholders(query) }
+func (postgresDialect) forUpdateSuffix() string  { return " FOR UPDATE" }
+func (postgresDialect) schemaTypes() schemaTypes {
+	return schemaTypes{integer: "INTEGER", bigInteger: "BIGINT", blob: "BYTEA", real: "DOUBLE PRECISION", autoID: "BIGSERIAL PRIMARY KEY"}
+}
+func (postgresDialect) relationCountQuery() string {
+	return `SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f')`
+}
+func (postgresDialect) tableExistsQuery() string {
+	return `SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name=?`
+}
+func (postgresDialect) columnExistsQuery() string {
+	return `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? AND column_name=?`
+}
+func (postgresDialect) indexExistsQuery() string {
+	return `SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname=?`
+}
+
+func newDatabaseDialect(backend databaseBackend) databaseDialect {
+	if backend == databaseBackendPostgres {
+		return postgresDialect{}
 	}
-	return ""
+	return sqliteDialect{}
+}
+
+// selectForUpdateClause is deliberately backend-specific. SQLite uses the
+// Controller's single-writer connection and does not support PostgreSQL's row
+// lock syntax; PostgreSQL needs it for read/modify/write barriers such as the
+// two-sided assignment acknowledgement.
+func (s *Store) selectForUpdateClause() string {
+	if s == nil || s.dialect == nil {
+		return ""
+	}
+	return s.dialect.forUpdateSuffix()
 }
 
 func openConfiguredDatabase(ctx context.Context, config Config) (*sql.DB, databaseBackend, error) {
@@ -205,7 +279,7 @@ type questionMarkPostgresConn struct {
 }
 
 func (c *questionMarkPostgresConn) Prepare(query string) (driver.Stmt, error) {
-	return c.inner.Prepare(bindPostgresPlaceholders(query))
+	return c.inner.Prepare((postgresDialect{}).bind(query))
 }
 
 func (c *questionMarkPostgresConn) Close() error { return c.inner.Close() }
@@ -213,7 +287,7 @@ func (c *questionMarkPostgresConn) Close() error { return c.inner.Close() }
 func (c *questionMarkPostgresConn) Begin() (driver.Tx, error) { return c.inner.Begin() }
 
 func (c *questionMarkPostgresConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
-	query = bindPostgresPlaceholders(query)
+	query = (postgresDialect{}).bind(query)
 	if preparer, ok := c.inner.(driver.ConnPrepareContext); ok {
 		return preparer.PrepareContext(ctx, query)
 	}
@@ -225,7 +299,7 @@ func (c *questionMarkPostgresConn) ExecContext(ctx context.Context, query string
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	return execer.ExecContext(ctx, bindPostgresPlaceholders(query), args)
+	return execer.ExecContext(ctx, (postgresDialect{}).bind(query), args)
 }
 
 func (c *questionMarkPostgresConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
@@ -233,7 +307,7 @@ func (c *questionMarkPostgresConn) QueryContext(ctx context.Context, query strin
 	if !ok {
 		return nil, driver.ErrSkip
 	}
-	return queryer.QueryContext(ctx, bindPostgresPlaceholders(query), args)
+	return queryer.QueryContext(ctx, (postgresDialect{}).bind(query), args)
 }
 
 func (c *questionMarkPostgresConn) BeginTx(ctx context.Context, options driver.TxOptions) (driver.Tx, error) {
@@ -276,9 +350,11 @@ func (c *questionMarkPostgresConn) CheckNamedValue(value *driver.NamedValue) err
 	return checker.CheckNamedValue(value)
 }
 
-// bindPostgresPlaceholders converts only question marks in SQL code. Literal
-// strings, quoted identifiers, comments and backtick-quoted SQLite identifiers
-// are left untouched so the adapter cannot corrupt JSON or diagnostic text.
+// bindPostgresPlaceholders converts only bind markers in SQL code. Literal
+// strings, PostgreSQL dollar-quoted bodies, quoted identifiers, comments and
+// backtick-quoted SQLite identifiers are left untouched. PostgreSQL JSON
+// operators are also preserved, so the adapter has a defined boundary instead
+// of relying on every future query author to remember its implementation.
 func bindPostgresPlaceholders(query string) string {
 	var builder strings.Builder
 	builder.Grow(len(query) + 16)
@@ -290,8 +366,10 @@ func bindPostgresPlaceholders(query string) string {
 		backtickState
 		lineCommentState
 		blockCommentState
+		dollarQuoteState
 	)
 	state := normalState
+	dollarDelimiter := ""
 	for index := 0; index < len(query); index++ {
 		value := query[index]
 		switch state {
@@ -326,6 +404,15 @@ func bindPostgresPlaceholders(query string) string {
 				index++
 				state = normalState
 			}
+		case dollarQuoteState:
+			if strings.HasPrefix(query[index:], dollarDelimiter) {
+				builder.WriteString(dollarDelimiter)
+				index += len(dollarDelimiter) - 1
+				state = normalState
+				dollarDelimiter = ""
+			} else {
+				builder.WriteByte(value)
+			}
 		default:
 			switch value {
 			case '\'', '"', '`':
@@ -350,7 +437,20 @@ func bindPostgresPlaceholders(query string) string {
 				} else {
 					builder.WriteByte(value)
 				}
+			case '$':
+				if delimiter, ok := postgresDollarQuoteDelimiter(query, index); ok {
+					builder.WriteString(delimiter)
+					index += len(delimiter) - 1
+					dollarDelimiter = delimiter
+					state = dollarQuoteState
+				} else {
+					builder.WriteByte(value)
+				}
 			case '?':
+				if isPostgresQuestionOperator(query, index) {
+					builder.WriteByte(value)
+					continue
+				}
 				argument++
 				builder.WriteByte('$')
 				builder.WriteString(itoa(argument))
@@ -360,6 +460,57 @@ func bindPostgresPlaceholders(query string) string {
 		}
 	}
 	return builder.String()
+}
+
+func postgresDollarQuoteDelimiter(query string, start int) (string, bool) {
+	if start >= len(query) || query[start] != '$' {
+		return "", false
+	}
+	end := start + 1
+	if end < len(query) && query[end] == '$' {
+		return "$$", true
+	}
+	if end >= len(query) || !isPostgresDollarTagStart(query[end]) {
+		return "", false
+	}
+	end++
+	for end < len(query) && isPostgresDollarTagPart(query[end]) {
+		end++
+	}
+	if end >= len(query) || query[end] != '$' {
+		return "", false
+	}
+	return query[start : end+1], true
+}
+
+func isPostgresDollarTagStart(value byte) bool {
+	return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+}
+
+func isPostgresDollarTagPart(value byte) bool {
+	return isPostgresDollarTagStart(value) || value >= '0' && value <= '9'
+}
+
+func isPostgresQuestionOperator(query string, index int) bool {
+	if index+1 < len(query) && (query[index+1] == '|' || query[index+1] == '&') {
+		return true
+	}
+	previous := index - 1
+	for previous >= 0 && (query[previous] == ' ' || query[previous] == '\t' || query[previous] == '\r' || query[previous] == '\n') {
+		previous--
+	}
+	next := index + 1
+	for next < len(query) && (query[next] == ' ' || query[next] == '\t' || query[next] == '\r' || query[next] == '\n') {
+		next++
+	}
+	if previous < 0 || next >= len(query) {
+		return false
+	}
+	previousValue := query[previous]
+	nextValue := query[next]
+	previousLooksLikeExpression := previousValue == ')' || previousValue == ']' || previousValue == '\'' || previousValue == '"' || previousValue == '`' || previousValue == '_' || previousValue >= '0' && previousValue <= '9' || previousValue >= 'a' && previousValue <= 'z' || previousValue >= 'A' && previousValue <= 'Z'
+	nextLooksLikeOperand := nextValue == '?' || nextValue == '\'' || nextValue == '"' || nextValue == '`' || nextValue == ':' || nextValue == '$' || nextValue == '_' || nextValue >= '0' && nextValue <= '9' || nextValue >= 'a' && nextValue <= 'z' || nextValue >= 'A' && nextValue <= 'Z'
+	return previousLooksLikeExpression && nextLooksLikeOperand
 }
 
 func itoa(value int) string {

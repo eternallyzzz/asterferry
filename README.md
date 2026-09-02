@@ -122,7 +122,7 @@ monotonic generation, schema version and SHA-256 checksum.
 
 ### Controller database lifecycle
 
-SQLite schema v9 remains the zero-dependency default. For a larger deployment,
+SQLite schema v10 remains the zero-dependency default. For a larger deployment,
 initialize directly against PostgreSQL:
 
 ```powershell
@@ -132,26 +132,15 @@ asterferry controller init --dir ./controller `
   --database-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require'
 ```
 
-Existing SQLite installations are migrated explicitly during a maintenance
-window. The target database or schema must be empty; `--dry-run` only validates
-connectivity and counts rows, while the apply form copies all Controller and
-runtime tables in one PostgreSQL transaction and writes a new config:
-
-```powershell
-asterferry controller migrate --config ./controller/controller.json `
-  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' `
-  --dry-run
-asterferry controller migrate --config ./controller/controller.json `
-  --target-url 'postgres://asterferry:<password>@postgres.example.com/asterferry?sslmode=require' `
-  --output-config ./controller/controller-postgres.json
-asterferry controller run --config ./controller/controller-postgres.json
-```
-
-Stop the Controller before migration and keep the original SQLite directory as
-the rollback copy. PostgreSQL backup/restore uses the external `pg_dump` and
-`pg_restore` utilities (custom format); the CLI must run where those tools are
-installed. Both backends' backups include the Controller config, master key,
-CA and TLS identity.
+SQLite and PostgreSQL databases are fresh-install resources in this development
+generation. There is no in-place schema migration and no SQLite-to-PostgreSQL
+conversion command. To change backend, create a new Controller installation and
+recreate the Dashboard resources; do not point a v8/v9 database at this binary.
+Backups are versioned v10 artifacts and older backup manifests are rejected.
+PostgreSQL backup/restore uses the external `pg_dump` and `pg_restore` utilities
+(custom format); the CLI must run where those tools are installed. Both
+backends' backups include the Controller config, master key, CA and TLS
+identity.
 
 ## Node behavior
 

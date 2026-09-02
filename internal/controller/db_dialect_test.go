@@ -25,3 +25,25 @@ func TestBindPostgresPlaceholdersNumbersAllArguments(t *testing.T) {
 		t.Fatalf("bound query = %q, want %q", got, want)
 	}
 }
+
+func TestBindPostgresPlaceholdersSkipsDollarQuotesAndJSONOperators(t *testing.T) {
+	query := `SELECT $$ ? $$, $body$ value ? $body$, E'escaped \? ', payload ? 'name', payload ?| ARRAY['name'], payload ?& ARRAY['name'], payload ? ?, value = ?, value = ?`
+	want := `SELECT $$ ? $$, $body$ value ? $body$, E'escaped \? ', payload ? 'name', payload ?| ARRAY['name'], payload ?& ARRAY['name'], payload ? $1, value = $2, value = $3`
+	if got := bindPostgresPlaceholders(query); got != want {
+		t.Fatalf("bound query = %q, want %q", got, want)
+	}
+}
+
+func TestDatabaseDialectsExposeBackendSpecificSchemaContract(t *testing.T) {
+	sqlite := newDatabaseDialect(databaseBackendSQLite)
+	postgres := newDatabaseDialect(databaseBackendPostgres)
+	if sqlite.forUpdateSuffix() != "" || postgres.forUpdateSuffix() != " FOR UPDATE" {
+		t.Fatalf("unexpected row-lock suffixes: sqlite=%q postgres=%q", sqlite.forUpdateSuffix(), postgres.forUpdateSuffix())
+	}
+	if got := sqlite.schemaTypes(); got.blob != "BLOB" || got.bigInteger != "INTEGER" || got.real != "REAL" || got.autoID != "INTEGER PRIMARY KEY AUTOINCREMENT" {
+		t.Fatalf("unexpected SQLite schema types: %#v", got)
+	}
+	if got := postgres.schemaTypes(); got.blob != "BYTEA" || got.bigInteger != "BIGINT" || got.real != "DOUBLE PRECISION" || got.autoID != "BIGSERIAL PRIMARY KEY" {
+		t.Fatalf("unexpected PostgreSQL schema types: %#v", got)
+	}
+}

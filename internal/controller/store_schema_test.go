@@ -5,13 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
-	"strconv"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
 
-func TestOpenStoreRejectsDatabaseWithoutGenerationMarker(t *testing.T) {
+func TestOpenStoreWithConfigRejectsDatabaseWithoutGenerationMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -34,7 +33,7 @@ func TestOpenStoreRejectsDatabaseWithoutGenerationMarker(t *testing.T) {
 	}
 }
 
-func TestOpenStoreRejectsWrongGenerationFingerprint(t *testing.T) {
+func TestOpenStoreWithConfigRejectsWrongGenerationFingerprint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrong-generation.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -62,22 +61,67 @@ func TestOpenStoreRejectsWrongGenerationFingerprint(t *testing.T) {
 	}
 }
 
-func TestOpenStoreCreatesCurrentGenerationMarker(t *testing.T) {
+func TestOpenStoreWithConfigDoesNotMigrateLegacyGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v9.db")
+	db, err := sql.Open(driverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`INSERT INTO schema_meta(key,value) VALUES ('schema_version','9'),('fingerprint','asterferry-controller-sqlite-v9')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openTestStore(path)
+	if store != nil {
+		_ = store.Close()
+	}
+	if !errors.Is(err, ErrIncompatibleDatabase) {
+		t.Fatalf("expected legacy database to be rejected, got %v", err)
+	}
+	check, err := sql.Open(driverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version string
+	if err := check.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != "9" {
+		t.Fatalf("legacy schema was modified during rejection: version=%q", version)
+	}
+}
+
+func TestOpenStoreWithConfigCreatesCurrentGenerationMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "current.db")
 	store, err := openTestStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	var version, fingerprint string
-	if err := store.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+	var version int64
+	var markerBackend, fingerprint, initializedAt string
+	if err := store.db.QueryRow(`SELECT schema_version, backend, fingerprint, initialized_at FROM schema_meta WHERE singleton=1`).Scan(&version, &markerBackend, &fingerprint, &initializedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
+	if version != currentDBSchema || markerBackend != DatabaseDriverSQLite || fingerprint != dbSchemaFingerprint || initializedAt == "" {
+		t.Fatalf("unexpected schema marker version=%d backend=%q fingerprint=%q initialized_at=%q", version, markerBackend, fingerprint, initializedAt)
+	}
+	var userVersion int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if version != strconv.Itoa(currentDBSchema) || fingerprint != dbSchemaFingerprint {
-		t.Fatalf("unexpected schema marker version=%q fingerprint=%q", version, fingerprint)
+	if userVersion != 0 {
+		t.Fatalf("unexpected legacy SQLite user_version = %d", userVersion)
 	}
 	var pendingTable, pendingIndex int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='node_bootstraps'`).Scan(&pendingTable); err != nil {

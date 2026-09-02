@@ -34,7 +34,7 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := controller.OpenStore(configResult.Config.DatabasePath, masterKey)
+	store, err := controller.OpenStoreWithConfig(configResult.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}

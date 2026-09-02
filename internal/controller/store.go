@@ -13,7 +13,7 @@ import (
 type Store struct {
 	db           *sql.DB
 	path         string
-	backend      databaseBackend
+	dialect      databaseDialect
 	masterKey    [masterKeyBytes]byte
 	metrics      *ControllerMetrics
 	close        sync.Once

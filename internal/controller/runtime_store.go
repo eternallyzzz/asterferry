@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -65,17 +64,9 @@ type runtimeChangeSubscription struct {
 
 var nextRuntimeSubscription atomic.Uint64
 
-func runtimeSchemaStatements(backends ...databaseBackend) []string {
-	backend := databaseBackendSQLite
-	if len(backends) > 0 {
-		backend = backends[0]
-	}
-	autoID := "INTEGER PRIMARY KEY AUTOINCREMENT"
-	if backend == databaseBackendPostgres {
-		autoID = "BIGSERIAL PRIMARY KEY"
-	}
+func runtimeSchemaStatements(types schemaTypes) []string {
 	return []string{
-		`CREATE TABLE IF NOT EXISTS runtime_connections (
+		fmt.Sprintf(`CREATE TABLE runtime_connections (
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
 			id TEXT NOT NULL,
 			type TEXT NOT NULL,
@@ -87,31 +78,31 @@ func runtimeSchemaStatements(backends ...databaseBackend) []string {
 			service_id TEXT NOT NULL DEFAULT '',
 			protocol TEXT NOT NULL DEFAULT '',
 			source_ip TEXT NOT NULL DEFAULT '',
-			source_port BIGINT NOT NULL DEFAULT 0,
+			source_port %s NOT NULL DEFAULT 0,
 			target TEXT NOT NULL DEFAULT '',
 			parent_session_id TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL,
 			last_activity_at TEXT NOT NULL,
 			ended_at TEXT,
 			close_reason TEXT NOT NULL DEFAULT '',
-			bytes_in BIGINT NOT NULL DEFAULT 0,
-			bytes_out BIGINT NOT NULL DEFAULT 0,
-			rate_in DOUBLE PRECISION NOT NULL DEFAULT 0,
-			rate_out DOUBLE PRECISION NOT NULL DEFAULT 0,
-			limit_json BYTEA,
+			bytes_in %s NOT NULL DEFAULT 0,
+			bytes_out %s NOT NULL DEFAULT 0,
+			rate_in %s NOT NULL DEFAULT 0,
+			rate_out %s NOT NULL DEFAULT 0,
+			limit_json %s,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY(node_id,id)
-		)`,
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS runtime_events (
+		)`, types.bigInteger, types.bigInteger, types.bigInteger, types.real, types.real, types.blob),
+		fmt.Sprintf(`CREATE TABLE runtime_events (
 			id %s,
 			event_id TEXT NOT NULL UNIQUE,
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
 			connection_id TEXT NOT NULL DEFAULT '',
 			event_type TEXT NOT NULL,
-			payload_json BYTEA NOT NULL,
+			payload_json %s NOT NULL,
 			created_at TEXT NOT NULL
-		)`, autoID),
-		`CREATE TABLE IF NOT EXISTS runtime_traffic_rollups (
+		)`, types.autoID, types.blob),
+		fmt.Sprintf(`CREATE TABLE runtime_traffic_rollups (
 			bucket_start TEXT NOT NULL,
 			node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
 			gateway_id TEXT NOT NULL DEFAULT '',
@@ -119,26 +110,26 @@ func runtimeSchemaStatements(backends ...databaseBackend) []string {
 			assignment_id TEXT NOT NULL DEFAULT '',
 			service_id TEXT NOT NULL DEFAULT '',
 			protocol TEXT NOT NULL DEFAULT '',
-			bytes_in BIGINT NOT NULL DEFAULT 0,
-			bytes_out BIGINT NOT NULL DEFAULT 0,
-			opened BIGINT NOT NULL DEFAULT 0,
-			closed BIGINT NOT NULL DEFAULT 0,
-			rejected BIGINT NOT NULL DEFAULT 0,
-			rate_limited BIGINT NOT NULL DEFAULT 0,
-			active_max BIGINT NOT NULL DEFAULT 0,
+			bytes_in %s NOT NULL DEFAULT 0,
+			bytes_out %s NOT NULL DEFAULT 0,
+			opened %s NOT NULL DEFAULT 0,
+			closed %s NOT NULL DEFAULT 0,
+			rejected %s NOT NULL DEFAULT 0,
+			rate_limited %s NOT NULL DEFAULT 0,
+			active_max %s NOT NULL DEFAULT 0,
 			PRIMARY KEY(bucket_start,node_id,assignment_id,service_id,protocol)
-		)`,
-		`CREATE TABLE IF NOT EXISTS runtime_settings (
+		)`, types.bigInteger, types.bigInteger, types.bigInteger, types.bigInteger, types.bigInteger, types.bigInteger, types.bigInteger),
+		`CREATE TABLE runtime_settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_connections_node_state ON runtime_connections(node_id,state,last_activity_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_connections_source ON runtime_connections(source_ip,last_activity_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_connections_assignment ON runtime_connections(assignment_id,last_activity_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_events_created ON runtime_events(created_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_events_node_created ON runtime_events(node_id,created_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_rollups_bucket ON runtime_traffic_rollups(bucket_start,node_id)`,
+		`CREATE INDEX idx_runtime_connections_node_state ON runtime_connections(node_id,state,last_activity_at)`,
+		`CREATE INDEX idx_runtime_connections_source ON runtime_connections(source_ip,last_activity_at)`,
+		`CREATE INDEX idx_runtime_connections_assignment ON runtime_connections(assignment_id,last_activity_at)`,
+		`CREATE INDEX idx_runtime_events_created ON runtime_events(created_at)`,
+		`CREATE INDEX idx_runtime_events_node_created ON runtime_events(node_id,created_at)`,
+		`CREATE INDEX idx_runtime_rollups_bucket ON runtime_traffic_rollups(bucket_start,node_id)`,
 	}
 }
 
@@ -147,42 +138,6 @@ func runtimeSchemaIndexes() []string {
 		"idx_runtime_connections_node_state", "idx_runtime_connections_source", "idx_runtime_connections_assignment",
 		"idx_runtime_events_created", "idx_runtime_events_node_created", "idx_runtime_rollups_bucket",
 	}
-}
-
-func migrateV8ToV9(ctx context.Context, db *sql.DB) (bool, error) {
-	var version, fingerprint string
-	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
-		return false, nil
-	}
-	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
-		return false, nil
-	}
-	if version != "8" || fingerprint != "asterferry-controller-sqlite-v8" {
-		return false, nil
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-	for _, statement := range runtimeSchemaStatements(databaseBackendSQLite) {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return false, fmt.Errorf("migrate controller schema to v9: %w", err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='schema_version'`, strconv.Itoa(currentDBSchema)); err != nil {
-		return false, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET value=? WHERE key='fingerprint'`, dbSchemaFingerprint); err != nil {
-		return false, err
-	}
-	if _, err := tx.ExecContext(ctx, `PRAGMA user_version=9`); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 func (s *Store) SubscribeRuntimeChanges() (<-chan string, func()) {
@@ -345,7 +300,7 @@ func (s *Store) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventTy
 	inserted := int64(1)
 	if persistEvent {
 		insertSQL := `INSERT OR IGNORE INTO runtime_events(event_id,node_id,connection_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?)`
-		if s.backend == databaseBackendPostgres {
+		if s.dialect != nil && s.dialect.backend() == databaseBackendPostgres {
 			insertSQL = `INSERT INTO runtime_events(event_id,node_id,connection_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`
 		}
 		result, err := tx.ExecContext(ctx, insertSQL, eventID, nodeID, connectionID, eventType, payload, createdAt.Format(time.RFC3339Nano))

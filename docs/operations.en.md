@@ -110,11 +110,11 @@ uses a bounded connection pool and is the recommended backend as Node count or
 runtime-event volume grows. Select it during `controller init` with
 `--database-driver postgres --database-url 'postgres://...'`.
 
-Move an existing installation with `controller migrate`: stop the Controller,
-run `--dry-run` against an empty PostgreSQL database, then run the apply form
-with `--output-config` and start the Controller using that new config. The
-source SQLite directory is not modified by the copy and should be retained for
-rollback. PostgreSQL backup/restore requires the `pg_dump` and `pg_restore`
+The development schema is a clean-break contract. There is no `controller
+migrate` command and no in-place SQLite-to-PostgreSQL conversion. If the
+backend or schema must change, initialize a new Controller and recreate the
+resources in the Dashboard; v8/v9 databases and pre-v10 backup manifests are
+rejected. PostgreSQL backup/restore requires the `pg_dump` and `pg_restore`
 client utilities on the machine running the CLI; the backup also contains the
 Controller config, master key, CA and TLS identity.
 

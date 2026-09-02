@@ -261,61 +261,6 @@ func openTwoPostgresTestStores(t *testing.T) (*Store, *Store) {
 	return first, second
 }
 
-func TestSQLiteToPostgresMigration(t *testing.T) {
-	baseURL := strings.TrimSpace(os.Getenv("ASTERFERRY_TEST_POSTGRES_URL"))
-	if baseURL == "" {
-		t.Skip("ASTERFERRY_TEST_POSTGRES_URL is not set")
-	}
-	_, targetURL := createPostgresTestSchema(t, baseURL)
-	sourceDir := t.TempDir()
-	initialized, err := Init(context.Background(), InitOptions{Dir: sourceDir, GRPCAdvertise: "127.0.0.1:9443", Password: "a-very-long-admin-password"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := LoadOrCreateMasterKey(initialized.Config.MasterKeyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sourceStore, err := OpenStore(initialized.Config.DatabasePath, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sourceStore.CreateNode(context.Background(), domain.Node{ID: "migration-node", Name: "Migration node", Enabled: true}, WriteOptions{Actor: "migration-test"}); err != nil {
-		sourceStore.Close()
-		t.Fatal(err)
-	}
-	if err := sourceStore.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	outputConfigPath := filepath.Join(t.TempDir(), "controller.json")
-	report, err := MigrateSQLiteToPostgres(context.Background(), SQLiteToPostgresMigrationOptions{SourceConfig: initialized.Config, TargetURL: targetURL, OutputConfigPath: outputConfigPath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.TotalRows == 0 || report.RowsByTable["nodes"] != 1 {
-		t.Fatalf("unexpected migration report: %#v", report)
-	}
-	migratedConfig, err := LoadConfig(outputConfigPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if migratedConfig.DatabaseDriver != DatabaseDriverPostgres || migratedConfig.DatabasePath != "" || migratedConfig.DatabaseURL != targetURL {
-		t.Fatalf("unexpected migrated config: %#v", migratedConfig)
-	}
-	migratedStore, err := OpenStoreWithConfig(migratedConfig, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migratedStore.Close()
-	if _, err := migratedStore.GetNode(context.Background(), "migration-node"); err != nil {
-		t.Fatal(err)
-	}
-	if err := migratedStore.CreateNode(context.Background(), domain.Node{ID: "migration-node-2", Name: "Second migration node", Enabled: true}, WriteOptions{Actor: "migration-test"}); err != nil {
-		t.Fatalf("post-migration audit sequence was not usable: %v", err)
-	}
-}
-
 func TestInitPostgresUsesExternalDatabaseWithoutLocalDatabaseFile(t *testing.T) {
 	baseURL := strings.TrimSpace(os.Getenv("ASTERFERRY_TEST_POSTGRES_URL"))
 	if baseURL == "" {
@@ -400,7 +345,7 @@ func createPostgresTestSchema(t *testing.T, baseURL string) (*sql.DB, string) {
 		adminDB.Close()
 		t.Fatal("test URL did not open PostgreSQL")
 	}
-	quotedSchema := quoteMigrationIdentifier(schema)
+	quotedSchema := quotePostgresIdentifier(schema)
 	if _, err := adminDB.Exec(`CREATE SCHEMA ` + quotedSchema); err != nil {
 		adminDB.Close()
 		t.Fatal(err)
@@ -417,6 +362,10 @@ func createPostgresTestSchema(t *testing.T, baseURL string) (*sql.DB, string) {
 	values.Set("search_path", schema)
 	parsed.RawQuery = values.Encode()
 	return adminDB, parsed.String()
+}
+
+func quotePostgresIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
 func TestPostgresUtilityConnectionRedactsURLPassword(t *testing.T) {

@@ -118,7 +118,8 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 		if err != nil {
 			return InitResult{}, fmt.Errorf("open PostgreSQL initialization target: %w", err)
 		}
-		compatible, empty, inspectErr := inspectDatabase(ctx, database, backend)
+		dialect := newDatabaseDialect(backend)
+		compatible, empty, inspectErr := inspectDatabase(ctx, database, dialect)
 		closeErr := database.Close()
 		if inspectErr != nil {
 			return InitResult{}, fmt.Errorf("inspect PostgreSQL initialization target: %w", inspectErr)

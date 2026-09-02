@@ -20,7 +20,7 @@ import (
 
 func newControllerCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "controller", Short: "run and administer the AsterFerry Controller"}
-	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerBackupCommand(), newControllerRestoreCommand(), newControllerMigrateCommand())
+	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
 	return cmd
 }
 
@@ -166,52 +166,6 @@ func newControllerRestoreCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&source, "source", "s", "", "backup directory")
 	cmd.Flags().StringVar(&destination, "destination", "", "destination Controller data directory")
 	_ = cmd.MarkFlagRequired("source")
-	return cmd
-}
-
-func newControllerMigrateCommand() *cobra.Command {
-	var path, targetURL, outputConfig string
-	var maxOpenConns int
-	var dryRun bool
-	cmd := &cobra.Command{
-		Use:   "migrate",
-		Short: "migrate a stopped SQLite Controller database to PostgreSQL",
-		Long: "Validate a SQLite source and an empty PostgreSQL target, then copy the Controller state in one transaction. " +
-			"Use --dry-run to validate and count rows without changing the target.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			config, err := controller.LoadConfig(path)
-			if err != nil {
-				return err
-			}
-			report, err := controller.MigrateSQLiteToPostgres(cmd.Context(), controller.SQLiteToPostgresMigrationOptions{
-				SourceConfig: config, TargetURL: targetURL, OutputConfigPath: outputConfig,
-				MaxOpenConns: maxOpenConns, DryRun: dryRun,
-			})
-			if err != nil {
-				return err
-			}
-			mode := "migrated"
-			if dryRun {
-				mode = "validated"
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s %d rows across %d tables", mode, report.TotalRows, len(report.RowsByTable))
-			if !dryRun {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "; config: %s", outputConfig)
-			}
-			if err != nil {
-				return err
-			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout())
-			return err
-		},
-	}
-	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "SQLite source Controller JSON configuration")
-	cmd.Flags().StringVar(&targetURL, "target-url", "", "empty PostgreSQL connection URL")
-	cmd.Flags().StringVar(&outputConfig, "output-config", "", "write the PostgreSQL Controller configuration here (required unless --dry-run)")
-	cmd.Flags().IntVar(&maxOpenConns, "database-max-open-conns", 0, "maximum PostgreSQL connections (default 16)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate source/target and count rows without writing")
-	_ = cmd.MarkFlagRequired("target-url")
 	return cmd
 }
 

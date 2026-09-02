@@ -14,9 +14,18 @@ func TestRootExposesOnlyCurrentGenerationCommands(t *testing.T) {
 			t.Fatalf("missing command %q", name)
 		}
 	}
-	for _, name := range []string{"init", "migrate", "up", "down", "config", "supervise", "doctor", "status", "validate"} {
+	for _, name := range []string{"init", "up", "down", "config", "supervise", "doctor", "status", "validate"} {
 		if command, _, err := root.Find([]string{name}); err == nil && command != root {
 			t.Fatalf("retired command %q is still exposed", name)
+		}
+	}
+	controllerCommand, _, err := root.Find([]string{"controller"})
+	if err != nil {
+		t.Fatalf("controller command lookup failed: %v", err)
+	}
+	for _, command := range controllerCommand.Commands() {
+		if command.Name() == "migrate" {
+			t.Fatal("removed controller migrate command is still exposed")
 		}
 	}
 	if command, _, err := root.Find([]string{"controller", "configure"}); err != nil || command == root {

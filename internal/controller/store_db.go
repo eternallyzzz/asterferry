@@ -5,33 +5,26 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	driverName          = "sqlite"
-	currentDBSchema     = 9
-	dbSchemaFingerprint = "asterferry-controller-sqlite-v9"
+	currentDBSchema     = 10
+	dbSchemaFingerprint = "asterferry-controller-v10"
 	maxSnapshotDocument = 16 << 20
 )
 
-// ErrIncompatibleDatabase is returned for unknown database generations. The
-// immediately previous v8 generation has a small additive migration path for
-// the runtime operations tables; older or unmarked files remain fail-closed.
+// ErrIncompatibleDatabase is returned for databases that do not contain the
+// current schema. Development releases intentionally have no in-place schema
+// migration path: initialize a new database and restore only from a v10
+// backup when that is required.
 var ErrIncompatibleDatabase = errors.New("controller database belongs to an incompatible generation")
 
-func OpenStore(path string, masterKey []byte) (*Store, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, errors.New("database path is required")
-	}
-	return OpenStoreWithConfig(Config{DatabaseDriver: DatabaseDriverSQLite, DatabasePath: path}, masterKey)
-}
-
-// OpenStoreWithConfig opens the configured Controller database. The legacy
-// OpenStore(path, key) entry point above deliberately remains SQLite-only so
-// package users and tests built around the original API keep working.
+// OpenStoreWithConfig opens the configured Controller database. Database
+// configuration is explicit so SQLite and PostgreSQL have the same lifecycle
+// and there is no hidden SQLite-only compatibility entry point.
 func OpenStoreWithConfig(config Config, masterKey []byte) (*Store, error) {
 	if len(masterKey) != masterKeyBytes {
 		return nil, errors.New("master key must contain exactly 32 bytes")
@@ -52,7 +45,7 @@ func OpenStoreWithConfig(config Config, masterKey []byte) (*Store, error) {
 	if backend == databaseBackendPostgres {
 		path = strings.TrimSpace(config.DatabaseURL)
 	}
-	store := &Store{db: db, path: path, backend: backend}
+	store := &Store{db: db, path: path, dialect: newDatabaseDialect(backend)}
 	copy(store.masterKey[:], masterKey)
 	if backend == databaseBackendSQLite {
 		if err := store.configure(); err != nil {
@@ -60,7 +53,7 @@ func OpenStoreWithConfig(config Config, masterKey []byte) (*Store, error) {
 			return nil, err
 		}
 	}
-	if err := store.initializeSchema(context.Background(), backend); err != nil {
+	if err := store.initializeSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -75,13 +68,11 @@ func OpenStoreWithConfig(config Config, masterKey []byte) (*Store, error) {
 	return store, nil
 }
 
-func NewStore(path string, masterKey []byte) (*Store, error) { return OpenStore(path, masterKey) }
-
 func (s *Store) Path() string {
 	if s == nil {
 		return ""
 	}
-	if s.backend == databaseBackendPostgres {
+	if s.DatabaseDriver() == DatabaseDriverPostgres {
 		return redactPostgresURL(s.path)
 	}
 	return s.path
@@ -90,10 +81,10 @@ func (s *Store) Path() string {
 // DatabaseDriver returns the configured backend name for metrics and
 // diagnostics. It intentionally does not expose a raw *sql.DB handle.
 func (s *Store) DatabaseDriver() string {
-	if s == nil || s.backend == "" {
+	if s == nil || s.dialect == nil {
 		return DatabaseDriverSQLite
 	}
-	return string(s.backend)
+	return string(s.dialect.backend())
 }
 
 func (s *Store) configure() error {
@@ -122,51 +113,26 @@ func sqliteDSN(path string) string {
 	return path + separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 }
 
-func schemaFingerprint(backend databaseBackend) string {
-	if backend == databaseBackendPostgres {
-		return "asterferry-controller-postgres-v9"
+func (s *Store) initializeSchema(ctx context.Context) error {
+	if s == nil || s.dialect == nil {
+		return errors.New("database dialect is not configured")
 	}
-	return dbSchemaFingerprint
-}
-
-func (s *Store) initializeSchema(ctx context.Context, backends ...databaseBackend) error {
-	backend := s.backend
-	if backend == "" {
-		backend = databaseBackendSQLite
-	}
-	if len(backends) > 0 {
-		backend = backends[0]
-	}
-	compatible, empty, err := inspectDatabase(ctx, s.db, backend)
+	dialect := s.dialect
+	compatible, empty, err := inspectDatabase(ctx, s.db, dialect)
 	if err != nil {
 		return err
 	}
-	if !empty && !compatible && backend == databaseBackendSQLite {
-		migrated, migrateErr := migrateV8ToV9(ctx, s.db)
-		if migrateErr != nil {
-			return migrateErr
-		}
-		if migrated {
-			compatible, empty, err = inspectDatabase(ctx, s.db, backend)
-			if err != nil {
-				return err
-			}
-		}
-		if !empty && !compatible {
-			return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, schemaFingerprint(backend))
-		}
-	}
 	if !empty && !compatible {
-		return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, schemaFingerprint(backend))
+		return fmt.Errorf("%w: expected schema %d (%s)", ErrIncompatibleDatabase, currentDBSchema, dbSchemaFingerprint)
 	}
 	if compatible {
-		if err := validateRequiredTables(ctx, s.db, backend); err != nil {
+		if err := validateRequiredTables(ctx, s.db, dialect); err != nil {
 			return fmt.Errorf("%w: %v", ErrIncompatibleDatabase, err)
 		}
 		return nil
 	}
-	statements := controllerSchemaStatements(backend)
-	statements = append(statements, runtimeSchemaStatements(backend)...)
+	statements := controllerSchemaStatements(dialect.schemaTypes())
+	statements = append(statements, runtimeSchemaStatements(dialect.schemaTypes())...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -174,40 +140,36 @@ func (s *Store) initializeSchema(ctx context.Context, backends ...databaseBacken
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("initialize %s schema: %w", backend, err)
+			return fmt.Errorf("initialize %s schema: %w", dialect.backend(), err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?), ('fingerprint', ?)`, strconv.Itoa(currentDBSchema), schemaFingerprint(backend)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_meta(singleton, schema_version, backend, fingerprint, initialized_at) VALUES (1, ?, ?, ?, ?)`, currentDBSchema, dialect.backend(), dbSchemaFingerprint, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		_ = tx.Rollback()
 		return err
-	}
-	if backend == databaseBackendSQLite {
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=9`); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
 	}
 	return s.commitAndNotify(tx)
 }
 
-func controllerSchemaStatements(backend databaseBackend) []string {
-	autoID := "INTEGER PRIMARY KEY AUTOINCREMENT"
-	if backend == databaseBackendPostgres {
-		autoID = "BIGSERIAL PRIMARY KEY"
-	}
+func controllerSchemaStatements(types schemaTypes) []string {
 	return []string{
-		`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-		`CREATE TABLE users (
+		fmt.Sprintf(`CREATE TABLE schema_meta (
+			singleton %s PRIMARY KEY CHECK (singleton=1),
+			schema_version %s NOT NULL,
+			backend TEXT NOT NULL,
+			fingerprint TEXT NOT NULL,
+			initialized_at TEXT NOT NULL
+		)`, types.integer, types.integer),
+		fmt.Sprintf(`CREATE TABLE users (
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
 			password_hash TEXT NOT NULL,
 			password_changed_at TEXT NOT NULL,
 			role TEXT NOT NULL,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			revision INTEGER NOT NULL DEFAULT 1,
+			enabled %s NOT NULL DEFAULT 1,
+			revision %s NOT NULL DEFAULT 1,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
-		)`,
+		)`, types.integer, types.bigInteger),
 		`CREATE TABLE api_tokens (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -217,29 +179,29 @@ func controllerSchemaStatements(backend databaseBackend) []string {
 			revoked_at TEXT,
 			created_at TEXT NOT NULL
 		)`,
-		`CREATE TABLE nodes (
+		fmt.Sprintf(`CREATE TABLE nodes (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			labels_json BYTEA NOT NULL,
-			enabled BIGINT NOT NULL,
+			labels_json %s NOT NULL,
+			enabled %s NOT NULL,
 			certificate_state TEXT NOT NULL,
 			certificate_serial TEXT,
-			revision BIGINT NOT NULL,
+			revision %s NOT NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE node_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, kind TEXT NOT NULL, document_json BYTEA NOT NULL, revision BIGINT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(node_id))`,
-		`CREATE TABLE services (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BYTEA NOT NULL, revision BIGINT NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE service_bindings (service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, protocol TEXT NOT NULL, bind TEXT NOT NULL, port INTEGER NOT NULL, PRIMARY KEY(service_id), UNIQUE(gateway_id, protocol, bind, port))`,
-		`CREATE TABLE assignments (id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json BYTEA NOT NULL, generation BIGINT NOT NULL, revision BIGINT NOT NULL, updated_at TEXT NOT NULL)`,
+		)`, types.blob, types.bigInteger, types.bigInteger),
+		fmt.Sprintf(`CREATE TABLE node_specs (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, kind TEXT NOT NULL, document_json %s NOT NULL, revision %s NOT NULL, updated_at TEXT NOT NULL, UNIQUE(node_id))`, types.blob, types.bigInteger),
+		fmt.Sprintf(`CREATE TABLE services (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json %s NOT NULL, revision %s NOT NULL, updated_at TEXT NOT NULL)`, types.blob, types.bigInteger),
+		fmt.Sprintf(`CREATE TABLE service_bindings (service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, protocol TEXT NOT NULL, bind TEXT NOT NULL, port %s NOT NULL, PRIMARY KEY(service_id), UNIQUE(gateway_id, protocol, bind, port))`, types.integer),
+		fmt.Sprintf(`CREATE TABLE assignments (id TEXT PRIMARY KEY, gateway_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, document_json %s NOT NULL, generation %s NOT NULL, revision %s NOT NULL, updated_at TEXT NOT NULL)`, types.blob, types.bigInteger, types.bigInteger),
 		`CREATE TABLE assignment_services (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE, PRIMARY KEY(assignment_id,service_id), UNIQUE(service_id))`,
-		`CREATE TABLE assignment_acks (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, generation BIGINT NOT NULL, status TEXT NOT NULL, error_code TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(assignment_id, node_id))`,
-		`CREATE TABLE desired_snapshots (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation BIGINT NOT NULL, checksum TEXT NOT NULL, document_json BYTEA NOT NULL, created_at TEXT NOT NULL)`,
-		`CREATE TABLE observed_states (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation BIGINT NOT NULL, document_json BYTEA NOT NULL, updated_at TEXT NOT NULL)`,
-		fmt.Sprintf(`CREATE TABLE audit_events (id %s, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, resource_id TEXT NOT NULL, revision BIGINT NOT NULL, attributes_json BYTEA, created_at TEXT NOT NULL)`, autoID),
-		`CREATE TABLE idempotency_keys (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, response_json BYTEA NOT NULL, created_at TEXT NOT NULL)`,
+		fmt.Sprintf(`CREATE TABLE assignment_acks (assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE, node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE, generation %s NOT NULL, status TEXT NOT NULL, error_code TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(assignment_id, node_id))`, types.bigInteger),
+		fmt.Sprintf(`CREATE TABLE desired_snapshots (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation %s NOT NULL, checksum TEXT NOT NULL, document_json %s NOT NULL, created_at TEXT NOT NULL)`, types.bigInteger, types.blob),
+		fmt.Sprintf(`CREATE TABLE observed_states (node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, generation %s NOT NULL, document_json %s NOT NULL, updated_at TEXT NOT NULL)`, types.bigInteger, types.blob),
+		fmt.Sprintf(`CREATE TABLE audit_events (id %s, actor TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, resource_id TEXT NOT NULL, revision %s NOT NULL, attributes_json %s, created_at TEXT NOT NULL)`, types.autoID, types.bigInteger, types.blob),
+		fmt.Sprintf(`CREATE TABLE idempotency_keys (key TEXT PRIMARY KEY, request_hash TEXT NOT NULL, response_json %s NOT NULL, created_at TEXT NOT NULL)`, types.blob),
 		`CREATE TABLE enrollment_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
-		`CREATE TABLE node_bootstraps (node_id TEXT PRIMARY KEY, name TEXT NOT NULL, labels_json BYTEA NOT NULL, enabled BIGINT NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, spec_json BYTEA, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		fmt.Sprintf(`CREATE TABLE node_bootstraps (node_id TEXT PRIMARY KEY, name TEXT NOT NULL, labels_json %s NOT NULL, enabled %s NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, spec_json %s, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`, types.blob, types.bigInteger, types.blob),
 		`CREATE INDEX idx_node_specs_kind ON node_specs(kind, node_id)`,
 		`CREATE INDEX idx_services_agent ON services(agent_id)`,
 		`CREATE INDEX idx_assignments_gateway ON assignments(gateway_id)`,
@@ -254,49 +216,42 @@ func controllerSchemaStatements(backend databaseBackend) []string {
 
 // inspectDatabase distinguishes a genuinely new database from an existing
 // database. PostgreSQL may contain unrelated tables in the selected schema;
-// those are intentionally treated as non-empty and incompatible.
-func inspectDatabase(ctx context.Context, db *sql.DB, backends ...databaseBackend) (compatible, empty bool, err error) {
-	backend := databaseBackendSQLite
-	if len(backends) > 0 {
-		backend = backends[0]
+// those are intentionally treated as non-empty and incompatible. A marker
+// from any older generation is therefore a non-empty incompatible database,
+// never a migration candidate.
+func inspectDatabase(ctx context.Context, db *sql.DB, dialect databaseDialect) (compatible, empty bool, err error) {
+	if dialect == nil {
+		return false, false, errors.New("database dialect is not configured")
 	}
 	var count int
-	query := `SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`
-	if backend == databaseBackendPostgres {
-		// information_schema.tables omits views, sequences and foreign tables.
-		// Treat every user relation in the selected schema as occupied so an
-		// initialization or migration can never collide with an unrelated
-		// object after the emptiness check.
-		query = `SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f')`
-	}
-	if err := db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, dialect.relationCountQuery()).Scan(&count); err != nil {
 		return false, false, err
 	}
 	if count == 0 {
 		return false, true, nil
 	}
-	var version, fingerprint string
-	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+	var version int64
+	var markerBackend, fingerprint string
+	if err := db.QueryRowContext(ctx, `SELECT schema_version, backend, fingerprint FROM schema_meta WHERE singleton=1`).Scan(&version, &markerBackend, &fingerprint); err != nil {
 		return false, false, nil
 	}
-	if err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key='fingerprint'`).Scan(&fingerprint); err != nil {
-		return false, false, nil
-	}
-	return version == strconv.Itoa(currentDBSchema) && fingerprint == schemaFingerprint(backend), false, nil
+	return version == currentDBSchema && databaseBackend(markerBackend) == dialect.backend() && fingerprint == dbSchemaFingerprint, false, nil
 }
 
-func validateRequiredTables(ctx context.Context, db *sql.DB, backends ...databaseBackend) error {
-	backend := databaseBackendSQLite
-	if len(backends) > 0 {
-		backend = backends[0]
+func validateRequiredTables(ctx context.Context, db *sql.DB, dialect databaseDialect) error {
+	if dialect == nil {
+		return errors.New("database dialect is not configured")
+	}
+	var markerCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_meta`).Scan(&markerCount); err != nil {
+		return err
+	}
+	if markerCount != 1 {
+		return fmt.Errorf("schema_meta must contain exactly one marker row, got %d", markerCount)
 	}
 	for _, table := range currentSchemaTables() {
 		var count int
-		query := `SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`
-		if backend == databaseBackendPostgres {
-			query = `SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name=?`
-		}
-		if err := db.QueryRowContext(ctx, query, table).Scan(&count); err != nil {
+		if err := db.QueryRowContext(ctx, dialect.tableExistsQuery(), table).Scan(&count); err != nil {
 			return err
 		}
 		if count != 1 {
@@ -305,10 +260,10 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, backends ...databas
 	}
 	// A matching marker alone is not enough to make a database compatible:
 	// database/sql can be pointed at a partially copied or manually edited
-	// file. Validate the columns that are read by the store before accepting
-	// the marker, especially the v5 password invalidation marker.
+	// database. Validate the columns that are read by the store before
+	// accepting the marker.
 	requiredColumns := map[string][]string{
-		"schema_meta":             {"key", "value"},
+		"schema_meta":             {"singleton", "schema_version", "backend", "fingerprint", "initialized_at"},
 		"users":                   {"id", "username", "password_hash", "password_changed_at", "role", "enabled", "revision", "created_at", "updated_at"},
 		"api_tokens":              {"id", "user_id", "token_hash", "name", "expires_at", "revoked_at", "created_at"},
 		"nodes":                   {"id", "name", "labels_json", "enabled", "certificate_state", "certificate_serial", "revision", "created_at", "updated_at"},
@@ -332,13 +287,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, backends ...databas
 	for table, columns := range requiredColumns {
 		for _, column := range columns {
 			var count int
-			query := `SELECT count(*) FROM pragma_table_info(?) WHERE name=?`
-			args := []any{table, column}
-			if backend == databaseBackendPostgres {
-				query = `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? AND column_name=?`
-				args = []any{table, column}
-			}
-			if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+			if err := db.QueryRowContext(ctx, dialect.columnExistsQuery(), table, column).Scan(&count); err != nil {
 				return err
 			}
 			if count != 1 {
@@ -348,11 +297,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, backends ...databas
 	}
 	for _, index := range append([]string{"idx_node_specs_kind", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"}, runtimeSchemaIndexes()...) {
 		var count int
-		query := `SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?`
-		if backend == databaseBackendPostgres {
-			query = `SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname=?`
-		}
-		if err := db.QueryRowContext(ctx, query, index).Scan(&count); err != nil {
+		if err := db.QueryRowContext(ctx, dialect.indexExistsQuery(), index).Scan(&count); err != nil {
 			return err
 		}
 		if count != 1 {

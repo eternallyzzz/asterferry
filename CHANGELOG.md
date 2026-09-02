@@ -7,8 +7,7 @@ architecture.
 
 - Adds the SQLite-backed Controller with RBAC, audit, enrollment, scheduling,
   revision checks and encrypted node snapshots; PostgreSQL is now supported as
-  the production-scale backend with a bounded pool and explicit SQLite
-  migration command.
+  the production-scale backend with a bounded pool.
 - Adds AFDP/2 over QUIC with typed session negotiation, bounded TCP/UDP framing,
   routing, egress and packet obfuscation.
 - Makes Gateway and Agent behavior run through one generic Node identity and
@@ -20,16 +19,17 @@ architecture.
 - Adds payload-free runtime connection metadata, lifecycle events, per-minute
   traffic rollups, node-scoped selectors and an Admin-gated advanced operations
   switch for disconnect/rate-limit controls. Runtime history is retained for
-  30 days; schema v8 receives an additive v9 migration.
+  30 days.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
-  protocol. Existing node configurations must be initialized again. The
-  Controller store is now schema v9; `OpenStore` upgrades the immediately
-  previous v8 generation for the additive runtime tables and rejects older
-  generations instead of rewriting their business data.
+  protocol. Existing node configurations and Controller databases must be
+  initialized again. The Controller store is now a fresh schema v10 with a
+  single canonical schema marker; old databases and backup manifests are
+  rejected without migration.
 - The `node_bootstraps` table stores pending installation intents and
   `node_specs` stores the behavior envelope without pre-creating node
-  identities. Back up/export the old Controller before creating the new
-  generation during the pre-release upgrade window.
+  identities. During this development window, preserve any old Controller
+  backup separately before initializing the new generation; it is not a
+  migration input.
 - Adds Dashboard install-first provisioning: the generated command is the only
   action required on a Node host, and the identity plus any optional initial
   spec are created atomically when the host completes its first enrollment.

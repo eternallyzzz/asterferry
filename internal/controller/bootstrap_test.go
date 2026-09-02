@@ -224,7 +224,7 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStore(initResult.Config.DatabasePath, masterKey)
+	store, err := OpenStoreWithConfig(initResult.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}

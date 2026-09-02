@@ -102,7 +102,7 @@ func openEnrollmentTestController(t *testing.T) (Config, *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStore(result.Config.DatabasePath, masterKey)
+	store, err := OpenStoreWithConfig(result.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
