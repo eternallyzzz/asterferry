@@ -72,13 +72,13 @@ func afdpObfuscationOptions(policy domain.ObfuscationPolicy) afdp.ObfuscationOpt
 		mode = afdp.ObfuscationStandard
 	}
 	return afdp.ObfuscationOptions{
-		Mode:               mode,
-		CurrentKey:         append([]byte(nil), policy.Key...),
-		PreviousKey:        append([]byte(nil), policy.PreviousKey...),
-		HandshakeShaping:   policy.HandshakeShaping,
-		MinFragmentBytes:   512,
-		MaxFragmentBytes:   1200,
-		MaxWirePacketBytes: 1280,
+		Mode:                          mode,
+		CurrentKey:                    append([]byte(nil), policy.Key...),
+		PreviousKey:                   append([]byte(nil), policy.PreviousKey...),
+		HandshakeShaping:              policy.HandshakeShaping,
+		MinFragmentBytes:              512,
+		MaxFragmentBytes:              1200,
+		MaxHandshakeFragmentWireBytes: 1280,
 	}
 }
 

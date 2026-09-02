@@ -76,13 +76,17 @@ const (
 // packet camouflage policy. Keys are supplied by the authenticated node
 // snapshot; persistence/encryption of those keys belongs to the Controller.
 type ObfuscationOptions struct {
-	Mode               string
-	CurrentKey         []byte
-	PreviousKey        []byte
-	HandshakeShaping   bool
-	MinFragmentBytes   int
-	MaxFragmentBytes   int
-	MaxWirePacketBytes int
+	Mode             string
+	CurrentKey       []byte
+	PreviousKey      []byte
+	HandshakeShaping bool
+	MinFragmentBytes int
+	MaxFragmentBytes int
+	// MaxHandshakeFragmentWireBytes is the maximum on-wire size of one
+	// handshake camouflage fragment. Short-header data datagrams may contain
+	// coalesced QUIC packets and intentionally use the separate overall AFDP
+	// datagram limit instead.
+	MaxHandshakeFragmentWireBytes int
 }
 
 type obfuscationPacketConn struct {
@@ -138,10 +142,10 @@ func NewObfuscatingPacketConn(conn *net.UDPConn, opts ObfuscationOptions, metric
 	if opts.MaxFragmentBytes == 0 {
 		opts.MaxFragmentBytes = 1200
 	}
-	if opts.MaxWirePacketBytes == 0 {
-		opts.MaxWirePacketBytes = 1280
+	if opts.MaxHandshakeFragmentWireBytes == 0 {
+		opts.MaxHandshakeFragmentWireBytes = 1280
 	}
-	if opts.MinFragmentBytes < fragmentHeaderBytes+obfuscationSaltBytes+obfuscationTagBytes || opts.MaxFragmentBytes < opts.MinFragmentBytes || opts.MaxWirePacketBytes < opts.MaxFragmentBytes || opts.MaxWirePacketBytes > maxObfuscationDatagram {
+	if opts.MinFragmentBytes < fragmentHeaderBytes+obfuscationSaltBytes+obfuscationTagBytes || opts.MaxFragmentBytes < opts.MinFragmentBytes || opts.MaxHandshakeFragmentWireBytes < opts.MaxFragmentBytes || opts.MaxHandshakeFragmentWireBytes > maxObfuscationDatagram {
 		return nil, errors.New("invalid AFDP obfuscation packet limits")
 	}
 	if opts.Mode == ObfuscationStandard {
@@ -181,7 +185,7 @@ func (c *obfuscationPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	pooled := obfuscationReadPool.Get().(*obfuscationPoolBuffer)
 	buffer := pooled.bytes
-	if required := maxInt(64<<10, int(c.opts.MaxWirePacketBytes)+256); cap(buffer) < required {
+	if required := maxInt(64<<10, int(c.opts.MaxHandshakeFragmentWireBytes)+256); cap(buffer) < required {
 		buffer = make([]byte, required)
 		pooled.bytes = buffer
 	}
@@ -320,8 +324,8 @@ func (c *obfuscationPacketConn) writeFragments(packet []byte, addr net.Addr) err
 		if err != nil {
 			return err
 		}
-		if len(wire) > int(c.opts.MaxWirePacketBytes) {
-			return errors.New("camouflage fragment exceeds max wire packet size")
+		if len(wire) > int(c.opts.MaxHandshakeFragmentWireBytes) {
+			return errors.New("camouflage handshake fragment exceeds max wire packet size")
 		}
 		_, writeErr := c.conn.WriteTo(wire, addr)
 		if writeErr != nil {
@@ -464,7 +468,7 @@ func (c *obfuscationPacketConn) acceptFragment(body []byte, addr net.Addr) ([]by
 	total := body[5]
 	payloadLen := int(binary.BigEndian.Uint16(body[6:8]))
 	paddingLen := int(binary.BigEndian.Uint16(body[8:10]))
-	if total < 2 || total > maxFragmentCount || index >= total || payloadLen == 0 || fragmentHeaderBytes+payloadLen+paddingLen != len(body) || len(body)+obfuscationSaltBytes+obfuscationTagBytes > int(c.opts.MaxWirePacketBytes) {
+	if total < 2 || total > maxFragmentCount || index >= total || payloadLen == 0 || fragmentHeaderBytes+payloadLen+paddingLen != len(body) || len(body)+obfuscationSaltBytes+obfuscationTagBytes > int(c.opts.MaxHandshakeFragmentWireBytes) {
 		if c.metrics != nil {
 			c.metrics.ObfuscationFragmentDropped()
 		}

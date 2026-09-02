@@ -18,7 +18,7 @@ func TestObfuscatingPacketConnRoundTripAndTamperRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := []byte("controller-issued-obfuscation-key-material")
-	options := ObfuscationOptions{Mode: ObfuscationCamouflage, CurrentKey: key, HandshakeShaping: true, MinFragmentBytes: 64, MaxFragmentBytes: 128, MaxWirePacketBytes: 256}
+	options := ObfuscationOptions{Mode: ObfuscationCamouflage, CurrentKey: key, HandshakeShaping: true, MinFragmentBytes: 64, MaxFragmentBytes: 128, MaxHandshakeFragmentWireBytes: 256}
 	l, err := NewObfuscatingPacketConn(left, options)
 	if err != nil {
 		right.Close()
@@ -32,6 +32,7 @@ func TestObfuscatingPacketConnRoundTripAndTamperRejection(t *testing.T) {
 	defer l.Close()
 	defer r.Close()
 	message := bytes.Repeat([]byte("AFDP"), 80)
+	message[0] = 0x80
 	if _, err := l.WriteTo(message, right.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
@@ -72,5 +73,49 @@ func TestObfuscatingPacketConnRoundTripAndTamperRejection(t *testing.T) {
 	_ = r.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 	if n, _, err := r.ReadFrom(make([]byte, 64)); err == nil || n != 0 {
 		t.Fatalf("tampered packet was accepted: n=%d err=%v", n, err)
+	}
+}
+
+func TestObfuscatingDataDatagramsUseOverallLimitNotHandshakeFragmentLimit(t *testing.T) {
+	left, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer left.Close()
+	right, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer right.Close()
+	key := []byte("controller-issued-obfuscation-key-material")
+	const handshakeLimit = 128
+	wrapper, err := NewObfuscatingPacketConn(left, ObfuscationOptions{
+		Mode:                          ObfuscationCamouflage,
+		CurrentKey:                    key,
+		HandshakeShaping:              true,
+		MinFragmentBytes:              64,
+		MaxFragmentBytes:              handshakeLimit,
+		MaxHandshakeFragmentWireBytes: handshakeLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wrapper.Close()
+
+	// This is a short-header data packet. Its sealed wire representation is
+	// intentionally larger than the handshake-fragment cap, but remains below
+	// the overall AFDP datagram limit.
+	payload := append([]byte{0x40}, bytes.Repeat([]byte("data"), 50)...)
+	if _, err := wrapper.WriteTo(payload, right.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	_ = right.SetReadDeadline(time.Now().Add(2 * time.Second))
+	wire := make([]byte, 512)
+	n, _, err := right.ReadFromUDP(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n <= handshakeLimit {
+		t.Fatalf("data datagram wire size = %d, want it to exceed handshake fragment limit %d", n, handshakeLimit)
 	}
 }

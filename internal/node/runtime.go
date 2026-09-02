@@ -252,6 +252,14 @@ func (r *Runtime) applySnapshot(ctx context.Context, snapshot domain.DesiredSnap
 			restoreErr := r.restoreRuntime(ctx, *previous)
 			return errors.Join(err, restoreErr)
 		}
+		// Engine.ApplySnapshot builds its replacement indexes before taking
+		// effect, so a same-kind failure leaves the previous generation intact.
+		// Restore the admission state that existed before this speculative
+		// apply; otherwise a valid last-known-good generation would remain
+		// permanently drained after a rejected update.
+		if !wasDraining {
+			engine.EndDrain()
+		}
 		return err
 	}
 	if err := dataPlane.ApplySnapshot(ctx, snapshot, enginePrevious); err != nil {
