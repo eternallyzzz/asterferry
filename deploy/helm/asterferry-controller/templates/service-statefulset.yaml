@@ -42,10 +42,8 @@ spec:
             - run
             - --config
             - {{ .Values.controller.configPath | quote }}
-{{- if .Values.metrics.enabled }}
             - --metrics-listen
-            - {{ .Values.metrics.listen | quote }}
-{{- end }}
+            - {{ if .Values.metrics.enabled }}{{ .Values.metrics.listen | quote }}{{ else }}""{{ end }}
           ports:
             - name: https
               containerPort: {{ .Values.controller.httpsPort }}

@@ -188,6 +188,10 @@ $expectedImage = "ghcr.io/eternallyzzz/asterferry:$Version"
 if ($LASTEXITCODE -ne 0 -or $nodeTemplate -notmatch [regex]::Escape($expectedImage)) {
     throw "Default Helm image reference did not resolve to the release version"
 }
+$controllerMetricsDisabledTemplate = (& helm template release-check deploy/helm/asterferry-controller | Out-String)
+if ($LASTEXITCODE -ne 0 -or $controllerMetricsDisabledTemplate -notmatch "--metrics-listen" -or $controllerMetricsDisabledTemplate -notmatch 'metrics-listen\r?\n\s+- ""') {
+    throw "Helm default metrics policy must explicitly disable the internal listener"
+}
 $digest = "sha256:" + ("a" * 64)
 foreach ($chart in $chartPaths) {
     $digestTemplate = (& helm template release-check $chart --set image.digest=$digest | Out-String)
