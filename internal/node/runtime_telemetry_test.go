@@ -15,6 +15,19 @@ func testRuntimeConnection(id string) domain.RuntimeConnection {
 	return domain.RuntimeConnection{ID: id, Type: domain.RuntimeConnectionTCP, NodeID: "node-a", PeerNodeID: "node-b", AssignmentID: "assignment-a", ServiceID: "service-a", Protocol: domain.ProtocolTCP, SourceIP: "192.0.2.10", SourcePort: 4000, StartedAt: now, LastActivityAt: now, State: domain.RuntimeStateActive}
 }
 
+func TestCumulativeByteRate(t *testing.T) {
+	started := time.Unix(100, 0).UTC()
+	if got := cumulativeByteRate(100, started, started.Add(2*time.Second)); got != 50 {
+		t.Fatalf("cumulative byte rate = %v, want 50", got)
+	}
+	if got := cumulativeByteRate(0, started, started.Add(2*time.Second)); got != 0 {
+		t.Fatalf("zero-byte cumulative rate = %v, want 0", got)
+	}
+	if got := cumulativeByteRate(100, started, started); got != 100000 {
+		t.Fatalf("sub-millisecond cumulative rate = %v, want 100000", got)
+	}
+}
+
 func TestRuntimeTelemetryLifecycleAndSelector(t *testing.T) {
 	telemetry := newRuntimeTelemetry()
 	var closed atomic.Int32

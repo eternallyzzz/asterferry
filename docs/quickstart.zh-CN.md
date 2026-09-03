@@ -114,6 +114,8 @@ unset ADMIN_PASSWORD
 
 不要把密码直接写在命令行中，以免进入 shell history。初始化完成后应妥善保存密码文件，并按组织策略删除临时文件。
 
+Controller 使用 Argon2id 保存密码，参数固定为 `m=65536,t=3,p=2`。密码哈希中的参数不允许由数据库内容覆盖，以避免异常数据放大登录校验的资源消耗。
+
 ### 3.2 初始化
 
 `--http-listen`、`--grpc-listen` 和 `--grpc-advertise` 应使用稳定的 C 主机名或 IP。初始化时生成的 Controller 证书会把这些地址写入证书 SAN；不要在这个远程部署示例中用 `0.0.0.0` 代替稳定名称。

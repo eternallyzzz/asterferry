@@ -229,23 +229,7 @@ func (g *dataGeneration) close() {
 		_ = listener.Close()
 	}
 	// The generation owns all listeners and is already cancelled above.
-	g.udpMu.Lock()
-	flows := make([]*dataUDPFlow, 0, len(g.udpFlows))
-	for id, flow := range g.udpFlows {
-		delete(g.udpFlows, id)
-		delete(g.udpByKey, flow.key)
-		flows = append(flows, flow)
-	}
-	g.udpMu.Unlock()
-	for _, flow := range flows {
-		if flow.stream != nil {
-			_ = flow.stream.Close()
-			flow.session.ReleaseStream()
-		}
-		if flow.lease != nil {
-			flow.lease.Release()
-		}
-	}
+	g.removeAllUDPFlows(domain.RuntimeCloseGeneration)
 }
 
 func (g *dataGeneration) openRuntime(meta domain.RuntimeConnection, closer func()) *runtimeConnection {
@@ -297,25 +281,7 @@ func (g *dataGeneration) closeSessions() {
 	// A session close does not synchronously run the receive goroutines. Clear
 	// and release flow reservations here so an explicit reconnect cannot leave
 	// stale UDP slots until the old goroutine observes the closed connection.
-	g.udpMu.Lock()
-	flows := make([]*dataUDPFlow, 0, len(g.udpFlows))
-	for id, flow := range g.udpFlows {
-		delete(g.udpFlows, id)
-		delete(g.udpByKey, flow.key)
-		flows = append(flows, flow)
-	}
-	g.udpMu.Unlock()
-	for _, flow := range flows {
-		if flow.stream != nil {
-			_ = flow.stream.Close()
-			if flow.session != nil {
-				flow.session.ReleaseStream()
-			}
-		}
-		if flow.lease != nil {
-			flow.lease.Release()
-		}
-	}
+	g.removeAllUDPFlows(domain.RuntimeCloseSession)
 }
 
 func (g *dataGeneration) setGatewaySessionWithRuntimeID(id string, session *afdp.Session, runtimeID string) {
@@ -387,8 +353,14 @@ func (g *dataGeneration) agentSession(id string) *afdp.Session {
 }
 
 func (g *dataGeneration) addUDPFlow(flow *dataUDPFlow) (*dataUDPFlow, bool) {
+	if g == nil || flow == nil {
+		return nil, false
+	}
 	g.udpMu.Lock()
 	defer g.udpMu.Unlock()
+	if g.closed.Load() {
+		return nil, false
+	}
 	if existing := g.udpByKey[flow.key]; existing != nil {
 		return existing, false
 	}
@@ -412,8 +384,8 @@ func (g *dataGeneration) udpFlowByKey(key string) *dataUDPFlow {
 	return g.udpByKey[key]
 }
 
-func (g *dataGeneration) removeUDPFlow(flow *dataUDPFlow) {
-	if flow == nil {
+func (g *dataGeneration) removeUDPFlow(flow *dataUDPFlow, reason string) {
+	if g == nil || flow == nil {
 		return
 	}
 	g.udpMu.Lock()
@@ -422,14 +394,18 @@ func (g *dataGeneration) removeUDPFlow(flow *dataUDPFlow) {
 		return
 	}
 	delete(g.udpFlows, flow.id)
-	delete(g.udpByKey, flow.key)
+	if g.udpByKey[flow.key] == flow {
+		delete(g.udpByKey, flow.key)
+	}
 	g.udpMu.Unlock()
 	if flow.runtime != nil {
-		flow.runtime.close(domain.RuntimeClosePeer)
+		flow.runtime.close(reason)
 	}
 	if flow.stream != nil {
 		_ = flow.stream.Close()
-		flow.session.ReleaseStream()
+		if flow.session != nil {
+			flow.session.ReleaseStream()
+		}
 	}
 	if flow.lease != nil {
 		flow.lease.Release()
@@ -437,52 +413,39 @@ func (g *dataGeneration) removeUDPFlow(flow *dataUDPFlow) {
 }
 
 func (g *dataGeneration) removeUDPFlowsForSession(session *afdp.Session) {
-	g.udpMu.Lock()
-	flows := make([]*dataUDPFlow, 0)
-	for _, flow := range g.udpFlows {
-		if flow.session == session {
-			delete(g.udpFlows, flow.id)
-			delete(g.udpByKey, flow.key)
-			flows = append(flows, flow)
-		}
-	}
-	g.udpMu.Unlock()
+	flows := g.snapshotUDPFlows(func(flow *dataUDPFlow) bool { return flow.session == session })
 	for _, flow := range flows {
-		if flow.runtime != nil {
-			flow.runtime.close(domain.RuntimeCloseSession)
-		}
-		if flow.stream != nil {
-			_ = flow.stream.Close()
-			flow.session.ReleaseStream()
-		}
-		if flow.lease != nil {
-			flow.lease.Release()
-		}
+		g.removeUDPFlow(flow, domain.RuntimeCloseSession)
 	}
 }
 
 func (g *dataGeneration) expireUDPFlows(socket *net.UDPConn, now time.Time) {
 	cutoff := now.Add(-dataPlaneFlowTTL).UnixNano()
+	flows := g.snapshotUDPFlows(func(flow *dataUDPFlow) bool {
+		return flow.socket == socket && flow.lastUnixNano.Load() < cutoff
+	})
+	for _, flow := range flows {
+		g.removeUDPFlow(flow, domain.RuntimeCloseIdle)
+	}
+}
+
+func (g *dataGeneration) removeAllUDPFlows(reason string) {
+	for _, flow := range g.snapshotUDPFlows(nil) {
+		g.removeUDPFlow(flow, reason)
+	}
+}
+
+func (g *dataGeneration) snapshotUDPFlows(predicate func(*dataUDPFlow) bool) []*dataUDPFlow {
+	if g == nil {
+		return nil
+	}
 	g.udpMu.Lock()
-	flows := make([]*dataUDPFlow, 0)
+	defer g.udpMu.Unlock()
+	flows := make([]*dataUDPFlow, 0, len(g.udpFlows))
 	for _, flow := range g.udpFlows {
-		if flow.socket == socket && flow.lastUnixNano.Load() < cutoff {
-			delete(g.udpFlows, flow.id)
-			delete(g.udpByKey, flow.key)
+		if flow != nil && (predicate == nil || predicate(flow)) {
 			flows = append(flows, flow)
 		}
 	}
-	g.udpMu.Unlock()
-	for _, flow := range flows {
-		if flow.runtime != nil {
-			flow.runtime.close(domain.RuntimeCloseIdle)
-		}
-		if flow.stream != nil {
-			_ = flow.stream.Close()
-			flow.session.ReleaseStream()
-		}
-		if flow.lease != nil {
-			flow.lease.Release()
-		}
-	}
+	return flows
 }

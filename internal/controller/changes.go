@@ -82,32 +82,39 @@ func (s *Store) notifyResourceChangesWithOptions(pendingServices bool, nodeIDs .
 			NodeIDs:         append([]string(nil), ids...),
 			PendingServices: pendingServices,
 		}
+		enqueueResourceChange(sub.ch, change)
+	}
+}
+
+// enqueueResourceChange replaces the queued hint with its union until the
+// merged value is successfully written. The channel consumer does not hold
+// changeMu while receiving, so a non-blocking read followed by a non-blocking
+// write has a race window where the consumer can remove the old hint and the
+// producer can then drop the new one. A select loop keeps the old value in
+// hand and retries the write whenever that window occurs.
+func enqueueResourceChange(ch chan ResourceChange, change ResourceChange) {
+	for {
 		select {
-		case sub.ch <- change:
-		default:
-			// Preserve the union of pending IDs so a second write cannot be
-			// lost while the scheduler is processing the first hint.
-			select {
-			case pending := <-sub.ch:
-				merged := append(pending.NodeIDs, ids...)
-				seen := make(map[string]struct{}, len(merged))
-				coalesced := make([]string, 0, len(merged))
-				for _, nodeID := range merged {
-					if _, ok := seen[nodeID]; ok {
-						continue
-					}
-					seen[nodeID] = struct{}{}
-					coalesced = append(coalesced, nodeID)
-				}
-				select {
-				case sub.ch <- ResourceChange{
-					NodeIDs:         coalesced,
-					PendingServices: pending.PendingServices || pendingServices,
-				}:
-				default:
-				}
-			default:
-			}
+		case ch <- change:
+			return
+		case pending := <-ch:
+			change = mergeResourceChanges(pending, change)
 		}
+	}
+}
+
+func mergeResourceChanges(pending, latest ResourceChange) ResourceChange {
+	merged := make([]string, 0, len(pending.NodeIDs)+len(latest.NodeIDs))
+	seen := make(map[string]struct{}, cap(merged))
+	for _, nodeID := range append(append([]string(nil), pending.NodeIDs...), latest.NodeIDs...) {
+		if _, ok := seen[nodeID]; ok {
+			continue
+		}
+		seen[nodeID] = struct{}{}
+		merged = append(merged, nodeID)
+	}
+	return ResourceChange{
+		NodeIDs:         merged,
+		PendingServices: pending.PendingServices || latest.PendingServices,
 	}
 }

@@ -184,11 +184,46 @@ func insertAudit(ctx context.Context, tx *sql.Tx, actor, action, resource, resou
 type scanner interface{ Scan(dest ...any) error }
 
 func scanNode(row scanner) (domain.Node, error) {
+	return scanNodeRecord(row)
+}
+
+func scanNodeWithSpecKind(row scanner) (domain.Node, error) {
+	var specKind sql.NullString
+	node, err := scanNodeRecord(row, &specKind)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	if specKind.Valid {
+		node.SpecKind = domain.NodeSpecKind(specKind.String)
+	}
+	return node, nil
+}
+
+func scanNodeAndSpec(row scanner) (domain.Node, domain.NodeSpec, error) {
+	var kind string
+	var data []byte
+	var revision int64
+	var updated string
+	node, err := scanNodeRecord(row, &kind, &data, &revision, &updated)
+	if err != nil {
+		return domain.Node{}, domain.NodeSpec{}, err
+	}
+	spec, err := decodeStoredNodeSpec(node.ID, kind, data, revision, updated)
+	if err != nil {
+		return domain.Node{}, domain.NodeSpec{}, err
+	}
+	node.SpecKind = spec.Kind
+	return node, spec, nil
+}
+
+func scanNodeRecord(row scanner, extra ...any) (domain.Node, error) {
 	var node domain.Node
 	var labels []byte
 	var enabled int
 	var created, updated string
-	if err := row.Scan(&node.ID, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated); err != nil {
+	args := []any{&node.ID, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated}
+	args = append(args, extra...)
+	if err := row.Scan(args...); err != nil {
 		return domain.Node{}, err
 	}
 	if len(labels) > 0 {

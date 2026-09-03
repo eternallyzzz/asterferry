@@ -53,8 +53,15 @@ docker compose -f deploy/docker/compose.yaml ps
 ```
 
 The Controller health check is anonymous `/healthz`; readiness and metrics are
-authenticated API endpoints. Nodes reconnect to the Controller and continue
-their last encrypted snapshot while it is unavailable.
+authenticated API endpoints. This is intentional: configure Prometheus with
+a read-only Viewer API token. `/openapi.yaml` and `/api/v1/openapi.yaml` are
+anonymous for client discovery; restrict them at the reverse proxy/network
+layer if required. Browser Cookie sessions are process-local, last 12 hours,
+and are lost on restart or when a request reaches another replica (the example
+is single-replica).
+
+Nodes reconnect to the Controller and continue their last encrypted snapshot
+while it is unavailable.
 
 Stop the stack with `docker compose ... down`. Back up the Controller before
 upgrades using `asterferry controller backup`; restore into a fresh data

@@ -17,7 +17,7 @@ type Server struct {
 	store         *Store
 	config        Config
 	http          *http.Server
-	sessions      sync.Map // opaque session id -> session
+	sessions      sync.Map // process-local opaque session id -> session; not shared or persisted
 	sessionCtx    context.Context
 	sessionCancel context.CancelFunc
 	sessionDone   chan struct{}
@@ -30,6 +30,13 @@ type session struct {
 	CSRF      string
 	ExpiresAt time.Time
 }
+
+const (
+	sessionTTL              = 12 * time.Hour
+	sessionCookieMaxAge     = int(sessionTTL / time.Second)
+	sessionReapInterval     = time.Minute
+	controllerWriteDeadline = 30 * time.Second
+)
 
 func NewServer(config Config, store *Store) (*Server, error) {
 	if store == nil {
@@ -87,7 +94,26 @@ func (s *Server) Handler() http.Handler {
 	if s.config.DashboardEnable {
 		mux.Handle("/dashboard/", http.StripPrefix("/dashboard/", dashboard.Handler()))
 	}
-	return s.metrics.middleware(securityHeaders(mux))
+	return s.metrics.middleware(securityHeaders(httpWriteDeadlineMiddleware(mux)))
+}
+
+// httpWriteDeadlineMiddleware keeps ordinary responses from holding a
+// connection indefinitely while leaving the authenticated runtime SSE stream
+// available for as long as the client remains connected. WriteTimeout stays
+// disabled on the server because it is an absolute connection/request timeout
+// and would terminate a healthy SSE stream.
+func httpWriteDeadlineMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadline := time.Now().Add(controllerWriteDeadline)
+		if r.URL.Path == "/api/v1/runtime/stream" {
+			deadline = time.Time{}
+		}
+		// ResponseController reaches the net/http writer through the metrics
+		// wrapper. Test writers and other adapters may not support deadlines;
+		// the real net/http server does.
+		_ = http.NewResponseController(w).SetWriteDeadline(deadline)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) ListenAndServe() error { return s.http.ListenAndServe() }
@@ -146,8 +172,6 @@ func (s *Server) Close() error {
 	}
 	return s.http.Close()
 }
-
-const sessionReapInterval = time.Minute
 
 func (s *Server) runSessionReaper() {
 	if s == nil {

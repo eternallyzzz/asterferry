@@ -105,14 +105,25 @@ asterferry controller restore --config ./controller/controller.json --source ./b
 HTTPS/gRPC certificates, a 32-byte owner-readable master key, and the first
 Admin account. SQLite runs with WAL, foreign keys and a busy timeout; PostgreSQL
 uses a bounded connection pool for multi-node deployments. Secrets
-are AES-GCM encrypted with the master key, passwords use Argon2id, and API or
+are AES-GCM encrypted with the master key, passwords use Argon2id with fixed
+parameters `m=65536,t=3,p=2`, and API or
 enrollment tokens are stored only as hashes.
 
 The REST API supports login/logout, Cookie sessions with CSRF protection, API
 tokens, fixed Viewer/Operator/Admin roles, unified Node and Node Spec resources,
 typed Gateway/Agent behavior documents, services, assignments, enrollment
-tokens, runtime actions, observed state, events and audit queries. `/healthz` is anonymous; `/readyz` and `/metrics` are protected
-by deployment policy. OpenAPI is served at `/openapi.yaml`.
+tokens, runtime actions, observed state, events and audit queries. The HTTP
+endpoint policy is intentional: `/healthz` is anonymous; `/readyz` and
+`/metrics` require an authenticated Viewer (Bearer API token or Cookie
+session); and `/openapi.yaml` plus `/api/v1/openapi.yaml` remain anonymous for
+client discovery. Configure Prometheus with a read-only Viewer API token, and
+restrict the OpenAPI paths at the ingress/network layer if API metadata must
+not be public.
+
+Cookie sessions are process-local in-memory state with a 12-hour lifetime. A
+Controller restart invalidates them, and multiple Controller replicas cannot
+share them; use persistent API tokens for non-browser clients. Controller HA
+and a shared session store are outside this release.
 
 The Controller scheduler preserves a healthy existing assignment when possible,
 otherwise selects a matching Gateway by labels and capacity. Explicit public
@@ -162,8 +173,9 @@ the configured offline grace period.
 Nodes continuously report payload-free runtime metadata after an authenticated
 control stream is ready: AFDP sessions, TCP connections, UDP flows and egress
 streams include source IP/port, peer, assignment/service, target, protocol,
-state, byte counters and rates. The Controller keeps current state, lifecycle
-events and per-minute traffic rollups for 30 days. No application payload is
+state, byte counters and cumulative average byte rates since each connection
+started. The Controller keeps current state, lifecycle events and per-minute
+traffic rollups for 30 days. No application payload is
 captured or sent to the Controller.
 
 The Dashboard shows this information read-only by default in each Node's
@@ -242,3 +254,24 @@ go test -race ./...
 
 An older MinGW compiler can build ordinary tests but fail to start race
 instrumented binaries with Windows status `0xc0000139`.
+
+## Release preparation
+
+The current Controller/data-plane architecture is prepared as the first public
+`v1.0.0` release. It is a fresh generation: pre-architecture binaries,
+databases and wire protocols are not upgrade inputs. Keep `CHANGELOG.md` as
+`Unreleased` until the release tag is created.
+
+Run the release preflight on Windows before merging the final release commit:
+
+```powershell
+.\scripts\release-check.ps1 -Version 1.0.0 -SkipDocker
+```
+
+The tag workflow repeats the checks on Linux, runs the integration and race
+gates, builds Linux amd64/arm64 and Windows amd64 archives, packages both Helm
+charts, and publishes the install scripts, SHA-256 checksums, source SBOM,
+signed multi-architecture GHCR image and signed OCI charts. After the final
+commit reaches `main`, the maintainer can create and push `v1.0.0` to start
+that workflow. Verify the GitHub assets, both chart digests and an end-to-end
+fresh Controller/Node installation before announcing the release.

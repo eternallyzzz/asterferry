@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -341,10 +343,11 @@ func writeCA(keyPath, certPath string, nowFn func() time.Time) error {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
 	}
+	public := &private.PublicKey
 	serial, err := randomSerial()
 	if err != nil {
 		return err
@@ -384,10 +387,17 @@ func serverCertificatePEM(config Config, nowFn func() time.Time) ([]byte, []byte
 	if err != nil {
 		return nil, nil, err
 	}
-	public, private, err := ed25519.GenerateKey(rand.Reader)
+	// Use an ECDSA P-256 certificate chain for the Controller HTTPS/gRPC
+	// endpoint. Windows browser stacks commonly omit Ed25519 from their TLS
+	// certificate signature schemes, which otherwise causes
+	// ERR_SSL_VERSION_OR_CIPHER_MISMATCH before the browser can even show the
+	// self-signed certificate warning. Node identity certificates remain
+	// Ed25519 and are independent of this server chain.
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
+	public := &private.PublicKey
 	serial, err := randomSerial()
 	if err != nil {
 		return nil, nil, err
@@ -422,7 +432,7 @@ func serverCertificatePEM(config Config, nowFn func() time.Time) ([]byte, []byte
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}), nil
 }
 
-func readCA(certPath, keyPath string) (*x509.Certificate, ed25519.PrivateKey, error) {
+func readCA(certPath, keyPath string) (*x509.Certificate, crypto.Signer, error) {
 	certBytes, err := os.ReadFile(certPath)
 	if err != nil {
 		return nil, nil, err
@@ -447,9 +457,9 @@ func readCA(certPath, keyPath string) (*x509.Certificate, ed25519.PrivateKey, er
 	if err != nil {
 		return nil, nil, err
 	}
-	private, ok := key.(ed25519.PrivateKey)
+	private, ok := key.(crypto.Signer)
 	if !ok {
-		return nil, nil, errors.New("CA key is not Ed25519")
+		return nil, nil, errors.New("CA key is not a supported signing key")
 	}
 	return cert, private, nil
 }

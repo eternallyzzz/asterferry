@@ -95,8 +95,11 @@ func (s *Store) PutAssignment(ctx context.Context, assignment domain.Assignment,
 	var gatewaySpecDocument []byte
 	if err := tx.QueryRowContext(ctx, `SELECT document_json FROM node_specs WHERE node_id=? AND kind=?`, assignment.GatewayID, string(domain.NodeSpecGateway)).Scan(&gatewaySpecDocument); err == nil {
 		var envelope domain.NodeSpec
-		if err := json.Unmarshal(gatewaySpecDocument, &envelope); err != nil || envelope.Gateway == nil {
+		if err := json.Unmarshal(gatewaySpecDocument, &envelope); err != nil {
 			return fmt.Errorf("decode gateway spec: %w", err)
+		}
+		if envelope.Gateway == nil {
+			return errors.New("decode gateway spec: typed gateway document is missing")
 		}
 		gatewaySpec = *envelope.Gateway
 		// The public endpoint is a derived part of the assignment and must be

@@ -220,7 +220,7 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 		return candidate, nil
 	}
 	if previousErr == nil {
-		if previous.Generation == math.MaxUint64 {
+		if previous.Generation >= math.MaxInt64 {
 			return domain.DesiredSnapshot{}, errors.New("desired snapshot generation is exhausted")
 		}
 		nextGeneration := previous.Generation + 1

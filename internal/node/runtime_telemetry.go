@@ -241,6 +241,14 @@ func cloneRuntimeConnection(value domain.RuntimeConnection) domain.RuntimeConnec
 	return clone
 }
 
+func cumulativeByteRate(bytes uint64, startedAt, now time.Time) float64 {
+	elapsed := now.Sub(startedAt)
+	if elapsed < time.Millisecond {
+		elapsed = time.Millisecond
+	}
+	return float64(bytes) / elapsed.Seconds()
+}
+
 func (e *runtimeConnection) touch(in, out uint64) {
 	if e == nil {
 		return
@@ -254,12 +262,8 @@ func (e *runtimeConnection) touch(in, out uint64) {
 	e.meta.BytesIn += in
 	e.meta.BytesOut += out
 	e.meta.LastActivityAt = now
-	elapsed := now.Sub(e.meta.StartedAt).Seconds()
-	if elapsed < 0.001 {
-		elapsed = 0.001
-	}
-	e.meta.RateIn = float64(e.meta.BytesIn) / elapsed
-	e.meta.RateOut = float64(e.meta.BytesOut) / elapsed
+	e.meta.RateIn = cumulativeByteRate(e.meta.BytesIn, e.meta.StartedAt, now)
+	e.meta.RateOut = cumulativeByteRate(e.meta.BytesOut, e.meta.StartedAt, now)
 	e.mu.Unlock()
 }
 

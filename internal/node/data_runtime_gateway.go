@@ -300,7 +300,7 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 				Target:          service.LocalTarget,
 				ParentSessionID: state.gatewaySessionRuntimeID(assignmentID),
 				StartedAt:       time.Now().UTC(),
-			}, func() { state.removeUDPFlow(candidate) })
+			}, func() { state.removeUDPFlow(candidate, domain.RuntimeClosePeer) })
 			existing, added := state.addUDPFlow(candidate)
 			if !added {
 				if candidate.runtime != nil {
@@ -321,7 +321,7 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 		if flow.runtime != nil {
 			if limiter := flow.runtime.limiter("in"); limiter != nil {
 				if err := limiter.wait(n); err != nil {
-					state.removeUDPFlow(flow)
+					state.removeUDPFlow(flow, domain.RuntimeClosePeer)
 					continue
 				}
 			}
@@ -329,7 +329,7 @@ func (d *DataPlaneRuntime) serveGatewayUDP(state *dataGeneration, socket *net.UD
 		sequence := flow.sequence.Add(1) - 1
 		if err := flow.session.SendDatagram(flow.id, sequence, buffer[:n], dataPlaneDatagramMTU); err != nil {
 			d.logger.Warn("data-plane Gateway UDP datagram send failed", "flow_id", flow.id, "sequence", sequence, "error", err)
-			state.removeUDPFlow(flow)
+			state.removeUDPFlow(flow, domain.RuntimeClosePeer)
 		} else if flow.runtime != nil {
 			flow.runtime.touch(uint64(n), 0)
 		}
@@ -365,7 +365,7 @@ func (d *DataPlaneRuntime) receiveGatewayDatagrams(state *dataGeneration, sessio
 		if flow.runtime != nil {
 			if limiter := flow.runtime.limiter("out"); limiter != nil {
 				if err := limiter.wait(len(payload)); err != nil {
-					state.removeUDPFlow(flow)
+					state.removeUDPFlow(flow, domain.RuntimeClosePeer)
 					continue
 				}
 			}

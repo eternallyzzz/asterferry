@@ -16,7 +16,11 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-const postgresDriverName = "asterferry-postgres"
+const (
+	postgresDriverName      = "asterferry-postgres"
+	postgresConnMaxLifetime = 30 * time.Minute
+	postgresConnMaxIdleTime = 5 * time.Minute
+)
 
 var registerPostgresDriverOnce sync.Once
 
@@ -155,6 +159,12 @@ func openConfiguredDatabase(ctx context.Context, config Config) (*sql.DB, databa
 		maxOpen := databasePoolSize(config)
 		db.SetMaxOpenConns(maxOpen)
 		db.SetMaxIdleConns(minInt(4, maxOpen))
+		// Recycle connections before PostgreSQL or an intermediary load
+		// balancer can silently retire a long-lived socket. This bounds both
+		// the age of active connections and the time idle connections remain
+		// available for reuse.
+		db.SetConnMaxLifetime(postgresConnMaxLifetime)
+		db.SetConnMaxIdleTime(postgresConnMaxIdleTime)
 		pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		if err := db.PingContext(pingCtx); err != nil {

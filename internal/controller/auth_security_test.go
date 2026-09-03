@@ -37,6 +37,54 @@ func TestDummyPasswordHashIsValidArgon2id(t *testing.T) {
 	}
 }
 
+func TestVerifyPasswordRejectsNonCanonicalArgon2Parameters(t *testing.T) {
+	hash, err := HashPassword("a-very-long-admin-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyPassword(hash, "a-very-long-admin-password") {
+		t.Fatal("canonical password hash does not verify")
+	}
+	for _, test := range []struct {
+		name string
+		from string
+		to   string
+	}{
+		{name: "memory", from: "m=65536", to: "m=65537"},
+		{name: "time", from: "t=3", to: "t=4"},
+		{name: "threads", from: "p=2", to: "p=3"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			modified := strings.Replace(hash, test.from, test.to, 1)
+			if VerifyPassword(modified, "a-very-long-admin-password") {
+				t.Fatalf("hash with non-canonical %s parameter was accepted: %s", test.name, modified)
+			}
+		})
+	}
+}
+
+func TestVerifyPasswordRejectsNonCanonicalArgon2ParameterList(t *testing.T) {
+	hash, err := HashPassword("a-very-long-admin-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		from string
+		to   string
+	}{
+		{name: "duplicate", from: "m=65536,t=3,p=2", to: "m=65536,m=65536,t=3,p=2"},
+		{name: "unknown", from: "m=65536,t=3,p=2", to: "m=65536,t=3,p=2,x=1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			modified := strings.Replace(hash, test.from, test.to, 1)
+			if VerifyPassword(modified, "a-very-long-admin-password") {
+				t.Fatalf("hash with %s parameter list was accepted: %s", test.name, modified)
+			}
+		})
+	}
+}
+
 func TestPasswordChangeRevokesTokensAndSessions(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {

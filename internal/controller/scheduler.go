@@ -206,7 +206,41 @@ func servicesForAssignment(assignment domain.Assignment, serviceByID map[string]
 	return services
 }
 
+const maxScheduleAttempts = 2
+
 func (s *Store) scheduleAgentAssignment(ctx context.Context, agent domain.Node, agentSpec domain.AgentSpec, services []domain.Service, existing *domain.Assignment, options WriteOptions) (domain.Assignment, error) {
+	for attempt := 0; attempt < maxScheduleAttempts; attempt++ {
+		attemptExisting := existing
+		if attempt > 0 && existing != nil {
+			// A port conflict means the candidate view was stale. Refresh the
+			// assignment too so a concurrent replacement cannot turn the retry
+			// into an avoidable revision conflict.
+			refreshed, err := s.GetAssignment(ctx, existing.ID)
+			switch {
+			case err == nil:
+				attemptExisting = &refreshed
+			case errors.Is(err, sql.ErrNoRows):
+				attemptExisting = nil
+			default:
+				return domain.Assignment{}, err
+			}
+		}
+		assignment, err := s.scheduleAgentAssignmentAttempt(ctx, agent, agentSpec, services, attemptExisting, options)
+		if err == nil {
+			return assignment, nil
+		}
+		var portConflict *PortConflictError
+		if !errors.As(err, &portConflict) || attempt+1 >= maxScheduleAttempts {
+			return domain.Assignment{}, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return domain.Assignment{}, ctxErr
+		}
+	}
+	return domain.Assignment{}, errors.New("scheduling attempts exhausted")
+}
+
+func (s *Store) scheduleAgentAssignmentAttempt(ctx context.Context, agent domain.Node, agentSpec domain.AgentSpec, services []domain.Service, existing *domain.Assignment, options WriteOptions) (domain.Assignment, error) {
 	candidates, err := s.gatewayCandidates(ctx)
 	if err != nil {
 		return domain.Assignment{}, err

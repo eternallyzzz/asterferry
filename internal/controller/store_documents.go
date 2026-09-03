@@ -97,8 +97,38 @@ func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 			return &RevisionConflictError{Resource: "desired_snapshot", Expected: uint64ToRevision(expected), Actual: uint64ToRevision(record.Generation)}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, record.NodeID, record.Generation, record.Checksum, record.Document, record.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+	result, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, record.NodeID, record.Generation, record.Checksum, record.Document, record.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("save snapshot rows affected: %w", err)
+	}
+	if affected == 0 {
+		// Another Controller process may have won the conditional upsert after
+		// this transaction's preflight SELECT. Re-read the committed row so a
+		// true same-content retry remains idempotent while a stale/different
+		// write is reported instead of being acknowledged as persisted.
+		var persistedGeneration uint64
+		var persistedChecksum string
+		if err := tx.QueryRowContext(ctx, `SELECT generation,checksum FROM desired_snapshots WHERE node_id=?`, record.NodeID).Scan(&persistedGeneration, &persistedChecksum); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return &RevisionConflictError{Resource: "desired_snapshot", Expected: uint64ToRevision(record.Generation), Actual: 0}
+			}
+			return err
+		}
+		if record.Generation == persistedGeneration && strings.EqualFold(record.Checksum, persistedChecksum) {
+			return tx.Commit()
+		}
+		expected := persistedGeneration
+		if expected < math.MaxInt64 {
+			expected++
+		}
+		return &RevisionConflictError{Resource: "desired_snapshot", Expected: uint64ToRevision(expected), Actual: uint64ToRevision(record.Generation)}
+	}
+	if affected != 1 {
+		return fmt.Errorf("save snapshot affected %d rows", affected)
 	}
 	return s.commitAndNotify(tx, record.NodeID)
 }
@@ -297,6 +327,9 @@ func (s *Store) GetObserved(ctx context.Context, nodeID string) (domain.Observed
 // Gateway change can never be observed without its corresponding assignment
 // generation.
 func updateAssignmentEndpointsTx(ctx context.Context, tx *sql.Tx, spec domain.GatewaySpec) error {
+	if len(spec.PublicEndpoints) == 0 {
+		return errors.New("gateway spec has no public endpoints")
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,agent_id,document_json,revision,generation FROM assignments WHERE gateway_id=? ORDER BY id`, spec.NodeID)
 	if err != nil {
 		return err

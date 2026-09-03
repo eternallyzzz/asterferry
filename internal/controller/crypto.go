@@ -142,6 +142,9 @@ func HashPassword(password string) (string, error) {
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemory, argonTime, argonThreads, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
+// VerifyPassword accepts only the canonical parameters emitted by
+// HashPassword. The encoded hash is database-controlled data; allowing it to
+// select a larger Argon2 cost would turn database tampering into a login DoS.
 func VerifyPassword(encoded, password string) bool {
 	if len(password) < 12 || len(password) > maxPasswordBytes {
 		return false
@@ -150,10 +153,16 @@ func VerifyPassword(encoded, password string) bool {
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
 		return false
 	}
-	params := map[string]uint32{}
+	params := make(map[string]uint32, 3)
 	for _, part := range strings.Split(parts[3], ",") {
 		pair := strings.SplitN(part, "=", 2)
 		if len(pair) != 2 {
+			return false
+		}
+		if pair[0] != "m" && pair[0] != "t" && pair[0] != "p" {
+			return false
+		}
+		if _, exists := params[pair[0]]; exists {
 			return false
 		}
 		value, err := strconv.ParseUint(pair[1], 10, 32)
@@ -165,7 +174,7 @@ func VerifyPassword(encoded, password string) bool {
 	memory, okM := params["m"]
 	timeCost, okT := params["t"]
 	threads, okP := params["p"]
-	if !okM || !okT || !okP || memory == 0 || timeCost == 0 || threads == 0 || memory > 256*1024 || timeCost > 20 || threads > 16 {
+	if len(params) != 3 || !okM || !okT || !okP || memory != argonMemory || timeCost != argonTime || threads != argonThreads {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

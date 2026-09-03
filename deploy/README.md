@@ -118,8 +118,15 @@ in coordination with the Controller-side release.
 
 ## Operations and verification
 
-The REST API is rooted at `/api/v1`; `/healthz` is anonymous while readiness,
-metrics and resource operations require a Viewer, Operator or Admin role.
+The REST API is rooted at `/api/v1`. The endpoint policy is deliberate:
+`/healthz` is anonymous; `/readyz` and `/metrics` require an authenticated
+Viewer, Operator or Admin (use a read-only Viewer API token for Prometheus);
+and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
+discovery. If the OpenAPI document is considered deployment-sensitive, limit
+those paths with the HTTPS ingress or network policy. Browser Cookie sessions
+are process-local in-memory state with a 12-hour lifetime, so a restart or a
+different Controller replica invalidates them; use API tokens for automated
+clients. Controller HA/shared sessions are outside this release.
 Mutating requests use `If-Match` revisions and may include an `Idempotency-Key`.
 Use the Dashboard only as a Controller client.
 
@@ -145,3 +152,21 @@ go build -tags=dashboard_assets ./cmd/asterferry
 helm lint deploy/helm/asterferry-controller deploy/helm/asterferry-node
 docker compose -f deploy/docker/compose.yaml config
 ```
+
+## Release artifacts
+
+The current architecture uses `v1.0.0` as its first public release version.
+Controller and Node installations must use the same version and must not mix
+these binaries with the pre-architecture generation. A tagged release
+publishes the native archives and `install-node.sh`/`install-node.ps1` to the
+GitHub Release, together with `SHA256SUMS` and a source SBOM. It also publishes
+the multi-architecture image at `ghcr.io/eternallyzzz/asterferry` and the
+`asterferry-controller` and `asterferry-node` charts as separate OCI artifacts
+under `ghcr.io/eternallyzzz/charts`.
+
+Verify the downloaded archive against `SHA256SUMS` before installation. For a
+fresh deployment, initialize the Controller with `--release-version 1.0.0` so
+generated Node installation commands refer to the matching release assets. The
+release manifest records immutable image and Chart digests; set Helm's
+`image.digest` to pin an installation, which takes precedence over
+`image.tag`.

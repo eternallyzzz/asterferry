@@ -78,6 +78,31 @@ if (Test-Path -LiteralPath $output) {
 $null = New-Item -ItemType Directory -Force -Path $output
 Remove-FrontendScratch
 
+$versionSources = [ordered]@{}
+$dashboardPackage = Get-Content -Raw -LiteralPath (Join-Path $root "web/dashboard/package.json") | ConvertFrom-Json
+$dashboardLockText = Get-Content -Raw -LiteralPath (Join-Path $root "web/dashboard/package-lock.json")
+$dashboardLockVersion = [regex]::Match($dashboardLockText, '(?m)^  "version":\s*"([^"]+)"\s*,?\r?$')
+if (-not $dashboardLockVersion.Success) {
+    throw "web/dashboard/package-lock.json does not declare a top-level version"
+}
+$versionSources["web/dashboard/package.json"] = [string]$dashboardPackage.version
+$versionSources["web/dashboard/package-lock.json"] = $dashboardLockVersion.Groups[1].Value
+
+foreach ($openapi in @("api/openapi.yaml", "internal/controller/openapi.yaml")) {
+    $openapiText = Get-Content -Raw -LiteralPath (Join-Path $root $openapi)
+    $openapiVersion = [regex]::Match($openapiText, '(?m)^  version:\s*(\S+)\r?$')
+    if (-not $openapiVersion.Success) {
+        throw "$openapi does not declare info.version"
+    }
+    $versionSources[$openapi] = $openapiVersion.Groups[1].Value
+}
+
+$apiOpenAPI = Get-Content -Raw -LiteralPath (Join-Path $root "api/openapi.yaml")
+$controllerOpenAPI = Get-Content -Raw -LiteralPath (Join-Path $root "internal/controller/openapi.yaml")
+if (($apiOpenAPI -replace "\r\n", "\n") -ne ($controllerOpenAPI -replace "\r\n", "\n")) {
+    throw "API OpenAPI documents are not identical"
+}
+
 $chartPaths = @("deploy/helm/asterferry-controller", "deploy/helm/asterferry-node")
 foreach ($chart in $chartPaths) {
     $chartPath = Join-Path $root "$chart/Chart.yaml"
@@ -87,6 +112,24 @@ foreach ($chart in $chartPaths) {
     if ($chartVersion -ne $Version -or $appVersion -ne $Version) {
         throw "$chart metadata must match $Version; got version=$chartVersion appVersion=$appVersion"
     }
+    $versionSources["$chart/Chart.yaml version"] = $chartVersion
+    $versionSources["$chart/Chart.yaml appVersion"] = $appVersion
+}
+
+$changelog = Get-Content -Raw -LiteralPath (Join-Path $root "CHANGELOG.md")
+$changelogPattern = "(?m)^## \[$([regex]::Escape($Version))\] - (?:Unreleased|\d{4}-\d{2}-\d{2})\r?$"
+if (-not [regex]::IsMatch($changelog, $changelogPattern)) {
+    throw "CHANGELOG.md has no entry for $Version"
+}
+
+$mismatches = @($versionSources.GetEnumerator() | Where-Object { $_.Value -ne $Version })
+if ($mismatches.Count -gt 0) {
+    $details = ($mismatches | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
+    throw "release version $Version is inconsistent: $details"
+}
+$distinctVersions = @($versionSources.GetEnumerator() | ForEach-Object { $_.Value } | Select-Object -Unique)
+if ($distinctVersions.Count -ne 1) {
+    throw "release version sources disagree: $($versionSources | Out-String)"
 }
 
 Invoke-Checked "Go module tidy check" "go" @("mod", "tidy", "-diff")
@@ -107,6 +150,10 @@ if (-not (Test-Path -LiteralPath $dashboardAssetIndex)) {
 if ((Get-Item -LiteralPath $dashboardAssetIndex).Length -eq 0) {
     throw "Dashboard build produced an empty internal/dashboard/dist/index.html"
 }
+$trackedDashboardAssets = @(git ls-files -- internal/dashboard/dist)
+if ($trackedDashboardAssets.Count -gt 0) {
+    throw "generated Dashboard assets must not be tracked: $($trackedDashboardAssets -join ', ')"
+}
 Invoke-Checked "Go module verification" "go" @("mod", "verify")
 
 $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferry/internal/buildinfo.Commit=release-check -X asterferry/internal/buildinfo.BuildDate=release-check"
@@ -125,12 +172,25 @@ if ($LASTEXITCODE -ne 0 -or $nodeTemplate -notmatch [regex]::Escape($expectedIma
     throw "Default Helm image reference did not resolve to the release version"
 }
 $digest = "sha256:" + ("a" * 64)
-$digestTemplate = (& helm template release-check deploy/helm/asterferry-node --set image.digest=$digest | Out-String)
-if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch "ghcr\.io/eternallyzzz/asterferry@$digest") {
-    throw "Helm digest image override did not render correctly"
+foreach ($chart in $chartPaths) {
+    $digestTemplate = (& helm template release-check $chart --set image.digest=$digest | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch [regex]::Escape("ghcr.io/eternallyzzz/asterferry@$digest")) {
+        throw "Helm digest image override did not render correctly for $chart"
+    }
 }
 foreach ($chart in $chartPaths) {
     Invoke-Checked "Helm package $chart" "helm" @("package", $chart, "--destination", $output, "--version", $Version, "--app-version", $Version)
+}
+$expectedCharts = @("asterferry-controller-$Version.tgz", "asterferry-node-$Version.tgz")
+foreach ($chartFile in $expectedCharts) {
+    $chartArtifact = Join-Path $output $chartFile
+    if (-not (Test-Path -LiteralPath $chartArtifact) -or (Get-Item -LiteralPath $chartArtifact).Length -eq 0) {
+        throw "release chart artifact is missing or empty: $chartFile"
+    }
+}
+$actualCharts = @(Get-ChildItem -LiteralPath $output -Filter "*.tgz" -File | Select-Object -ExpandProperty Name | Sort-Object)
+if (($actualCharts -join ";") -ne (($expectedCharts | Sort-Object) -join ";")) {
+    throw "unexpected release chart artifacts: $($actualCharts -join ', ')"
 }
 
 if (-not $SkipDocker) {
@@ -150,7 +210,7 @@ $report = [ordered]@{
     version = $Version
     protocol = "AFDP/2 + control/2"
     windows_binary = $binaryPath
-    charts = @("asterferry-controller-$Version.tgz", "asterferry-node-$Version.tgz")
+    charts = $expectedCharts
     docker_checked = (-not $SkipDocker)
 }
 $report | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $output "report.json")

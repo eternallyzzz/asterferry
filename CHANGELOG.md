@@ -27,9 +27,8 @@ architecture.
   rejected without migration.
 - The `node_bootstraps` table stores pending installation intents and
   `node_specs` stores the behavior envelope without pre-creating node
-  identities. During this development window, preserve any old Controller
-  backup separately before initializing the new generation; it is not a
-  migration input.
+  identities. Before installing this initial public release, preserve any old
+  Controller backup separately; it is not a migration input.
 - Adds Dashboard install-first provisioning: the generated command is the only
   action required on a Node host, and the identity plus any optional initial
   spec are created atomically when the host completes its first enrollment.
@@ -39,3 +38,6 @@ architecture.
 - PostgreSQL backup/restore uses the external `pg_dump`/`pg_restore` client
   utilities. The Controller remains single-replica; PostgreSQL does not add
   Controller HA.
+- Hardens storage error classification, PostgreSQL connection lifetime,
+  idempotency retention, schema probing, joined resource reads and UDP flow
+  cleanup, with regression coverage for the affected paths.

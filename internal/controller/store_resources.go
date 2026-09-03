@@ -75,10 +75,10 @@ func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
 
 func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
 	kind = strings.TrimSpace(kind)
-	query := `SELECT n.id, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at FROM nodes n`
+	query := `SELECT n.id, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at, ns.kind FROM nodes n LEFT JOIN node_specs ns ON ns.node_id=n.id`
 	args := []any{}
 	if kind != "" {
-		query += ` INNER JOIN node_specs ns ON ns.node_id=n.id WHERE ns.kind = ?`
+		query += ` WHERE ns.kind = ?`
 		args = append(args, kind)
 	}
 	query += ` ORDER BY n.id`
@@ -88,7 +88,7 @@ func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, erro
 	}
 	result := []domain.Node{}
 	for rows.Next() {
-		node, err := scanNode(rows)
+		node, err := scanNodeWithSpecKind(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -99,11 +99,6 @@ func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, erro
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-	for index := range result {
-		if err := s.decorateNodeSpecKind(ctx, &result[index]); err != nil {
-			return nil, err
-		}
 	}
 	return result, nil
 }
@@ -120,43 +115,60 @@ type AgentView struct {
 }
 
 func (s *Store) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
-	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecGateway))
+	views, err := s.listNodeSpecViews(ctx, domain.NodeSpecGateway)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]GatewayView, 0, len(nodes))
-	for _, node := range nodes {
-		spec, specErr := s.GetNodeSpec(ctx, node.ID)
-		if specErr != nil {
-			return nil, specErr
-		}
-		if spec.Gateway == nil {
+	result := make([]GatewayView, 0, len(views))
+	for _, view := range views {
+		if view.Spec.Gateway == nil {
 			continue
 		}
-		value := *spec.Gateway
-		value.Revision = spec.Revision
-		result = append(result, GatewayView{Node: node, Spec: &value})
+		value := *view.Spec.Gateway
+		value.Revision = view.Spec.Revision
+		result = append(result, GatewayView{Node: view.Node, Spec: &value})
 	}
 	return result, nil
 }
 
 func (s *Store) ListAgentViews(ctx context.Context) ([]AgentView, error) {
-	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecAgent))
+	views, err := s.listNodeSpecViews(ctx, domain.NodeSpecAgent)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]AgentView, 0, len(nodes))
-	for _, node := range nodes {
-		spec, specErr := s.GetNodeSpec(ctx, node.ID)
-		if specErr != nil {
-			return nil, specErr
-		}
-		if spec.Agent == nil {
+	result := make([]AgentView, 0, len(views))
+	for _, view := range views {
+		if view.Spec.Agent == nil {
 			continue
 		}
-		value := *spec.Agent
-		value.Revision = spec.Revision
-		result = append(result, AgentView{Node: node, Spec: &value})
+		value := *view.Spec.Agent
+		value.Revision = view.Spec.Revision
+		result = append(result, AgentView{Node: view.Node, Spec: &value})
+	}
+	return result, nil
+}
+
+type nodeSpecView struct {
+	Node domain.Node
+	Spec domain.NodeSpec
+}
+
+func (s *Store) listNodeSpecViews(ctx context.Context, kind domain.NodeSpecKind) ([]nodeSpecView, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at, ns.kind, ns.document_json, ns.revision, ns.updated_at FROM nodes n INNER JOIN node_specs ns ON ns.node_id=n.id WHERE ns.kind=? ORDER BY n.id`, string(kind))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]nodeSpecView, 0)
+	for rows.Next() {
+		node, spec, err := scanNodeAndSpec(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, nodeSpecView{Node: node, Spec: spec})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

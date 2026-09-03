@@ -233,7 +233,15 @@ func inspectDatabase(ctx context.Context, db *sql.DB, dialect databaseDialect) (
 	var version int64
 	var markerBackend, fingerprint string
 	if err := db.QueryRowContext(ctx, `SELECT schema_version, backend, fingerprint FROM schema_meta WHERE singleton=1`).Scan(&version, &markerBackend, &fingerprint); err != nil {
-		return false, false, nil
+		if errors.Is(err, sql.ErrNoRows) {
+			// An existing schema without a singleton marker is a legacy or
+			// otherwise incompatible database, but it is not a probe failure.
+			return false, false, nil
+		}
+		// Preserve the incompatibility classification for callers while
+		// retaining the database driver's concrete failure (for example a
+		// missing column or malformed schema_meta table).
+		return false, false, fmt.Errorf("%w: inspect schema_meta: %w", ErrIncompatibleDatabase, err)
 	}
 	return version == currentDBSchema && databaseBackend(markerBackend) == dialect.backend() && fingerprint == dbSchemaFingerprint, false, nil
 }

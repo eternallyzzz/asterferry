@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: AsterFerry Controller API
   version: 1.0.0
-  description: Authoritative control-plane API. Gateway and Agent business traffic never traverses this API.
+  description: Authoritative control-plane API for the AsterFerry v1.0.0 current architecture. Gateway and Agent business traffic never traverses this API.
 servers:
   - url: /api/v1
 tags:
@@ -624,8 +624,8 @@ components:
         close_reason: { type: string }
         bytes_in: { type: integer, format: int64, minimum: 0 }
         bytes_out: { type: integer, format: int64, minimum: 0 }
-        rate_in_bps: { type: number, format: double, minimum: 0 }
-        rate_out_bps: { type: number, format: double, minimum: 0 }
+        rate_in_bps: { type: number, format: double, minimum: 0, description: Cumulative average bytes per second since started_at }
+        rate_out_bps: { type: number, format: double, minimum: 0, description: Cumulative average bytes per second since started_at }
         limit: { $ref: '#/components/schemas/RuntimeRateLimit' }
     RuntimeAction:
       type: object

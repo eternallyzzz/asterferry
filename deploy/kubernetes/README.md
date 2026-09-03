@@ -17,6 +17,15 @@ helm upgrade --install asterferry-controller ./deploy/helm/asterferry-controller
   --set image.repository=ghcr.io/eternallyzzz/asterferry
 ```
 
+After the `v1.0.0` release is published, the same installation can use the
+immutable OCI chart instead of the checked-out path:
+
+```sh
+helm upgrade --install asterferry-controller \
+  oci://ghcr.io/eternallyzzz/charts/asterferry-controller \
+  --version 1.0.0 --namespace asterferry --create-namespace
+```
+
 Run `controller init` once against the mounted data directory (for example in
 a maintenance Job) before starting the StatefulSet. Expose HTTPS `8443` and
 mTLS gRPC `9443` through an internal or external Service according to your
@@ -29,6 +38,16 @@ managed database, and place the resulting `controller.json` plus the CA/TLS
 and master-key files in the Controller volume/Secret according to your secret
 management policy. The chart remains single-replica; PostgreSQL removes the
 SQLite write-connection bottleneck but does not add Controller HA.
+
+The HTTPS endpoint policy is deliberate: `/healthz` is anonymous;
+`/readyz` and `/metrics` require an authenticated Viewer, Operator or Admin;
+and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
+discovery. Configure Prometheus with a read-only Viewer API token and use the
+Service/Ingress network policy to restrict the OpenAPI paths if they should
+not be public. Browser Cookie sessions are process-local in-memory state with
+a 12-hour lifetime, so a restart or another replica invalidates them; use API
+tokens for automated clients. Shared sessions and Controller HA are outside
+this chart.
 
 ## Node releases
 
@@ -47,6 +66,12 @@ helm upgrade --install agent-east ./deploy/helm/asterferry-node \
   --namespace asterferry \
   --set bootstrapSecret=agent-east-bootstrap
 ```
+
+For the published chart, use
+`oci://ghcr.io/eternallyzzz/charts/asterferry-node --version 1.0.0` in place
+of the local chart path. Set `image.digest` from the release manifest when a
+digest-pinned image deployment is required; it takes precedence over the
+chart's tag.
 
 There is no role switch in the chart. Both releases run the same generic Node
 command; select Gateway or Agent behavior in the Dashboard after the Node

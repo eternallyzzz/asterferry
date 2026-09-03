@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -571,8 +572,8 @@ func signNodeCertificate(config Config, nodeID string, publicKey any) (Certifica
 	return signNodeCertificateWithCA(caCert, caKey, caPEM, nodeID, publicKey)
 }
 
-func signNodeCertificateWithCA(caCert *x509.Certificate, caKey ed25519.PrivateKey, caPEM []byte, nodeID string, publicKey any) (Certificate, error) {
-	if caCert == nil || len(caKey) == 0 || len(caPEM) == 0 {
+func signNodeCertificateWithCA(caCert *x509.Certificate, caKey crypto.Signer, caPEM []byte, nodeID string, publicKey any) (Certificate, error) {
+	if caCert == nil || caKey == nil || len(caPEM) == 0 {
 		return Certificate{}, errors.New("CA signing material is incomplete")
 	}
 	serial, err := randomSerial()

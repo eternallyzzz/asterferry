@@ -23,6 +23,10 @@ func (s *Store) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec
 	if err != nil {
 		return domain.NodeSpec{}, err
 	}
+	return decodeStoredNodeSpec(nodeID, kind, data, revision, updated)
+}
+
+func decodeStoredNodeSpec(nodeID, kind string, data []byte, revision int64, updated string) (domain.NodeSpec, error) {
 	var spec domain.NodeSpec
 	if err := json.Unmarshal(data, &spec); err != nil {
 		return domain.NodeSpec{}, fmt.Errorf("decode node spec %q: %w", nodeID, err)
@@ -30,9 +34,11 @@ func (s *Store) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec
 	spec.NodeID = nodeID
 	spec.Kind = domain.NodeSpecKind(kind)
 	spec.Revision = revision
-	if spec.UpdatedAt, err = parseStoredTime("node_spec.updated_at", updated); err != nil {
+	parsed, err := parseStoredTime("node_spec.updated_at", updated)
+	if err != nil {
 		return domain.NodeSpec{}, err
 	}
+	spec.UpdatedAt = parsed
 	if err := spec.Validate(); err != nil {
 		return domain.NodeSpec{}, fmt.Errorf("stored node spec is invalid: %w", err)
 	}

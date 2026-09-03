@@ -16,8 +16,8 @@ payload-free metadata for:
 
 The metadata includes connection ID, type, state, source IP/port when the
 process can observe it, peer Node, Gateway/Agent, Assignment, Service, target,
-protocol, start/last-activity/end timestamps, byte counters and average byte
-rates. It never includes application payload, packet contents, credentials or
+protocol, start/last-activity/end timestamps, byte counters and cumulative
+average byte rates since each connection started. It never includes application payload, packet contents, credentials or
 full request data.
 
 The Node keeps active entries in a bounded in-memory registry. The Controller
@@ -57,10 +57,23 @@ inbound and external-to-Agent traffic is outbound. Every request is audited;
 delivery is best effort and an offline Node does not receive an old operation
 automatically.
 
+## Controller HTTP endpoint policy
+
+The policy is intentional: `/healthz` is anonymous; `/readyz` and `/metrics`
+require an authenticated Viewer, Operator or Admin; and `/openapi.yaml` plus
+`/api/v1/openapi.yaml` are anonymous for client discovery. Prometheus should
+use a read-only Viewer API token. If the OpenAPI document is deployment
+sensitive, restrict those paths at the HTTPS ingress or network layer.
+
+Browser Cookie sessions are process-local in-memory state with a 12-hour
+lifetime. A Controller restart or another replica invalidates them, so use API
+tokens for automated clients. Shared sessions and Controller HA are outside
+this release.
+
 ## REST API
 
-All paths below are under `/api/v1` and require the corresponding Controller
-role:
+All resource paths below are under `/api/v1` and require the corresponding
+Controller role:
 
 | Path | Role | Purpose |
 | --- | --- | --- |

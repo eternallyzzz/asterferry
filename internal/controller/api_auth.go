@@ -52,9 +52,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_failed", "could not create session")
 		return
 	}
-	s.sessions.Store(sessionID, session{User: user, CSRF: csrf, ExpiresAt: time.Now().Add(12 * time.Hour)})
-	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: sessionID, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 12 * 60 * 60})
-	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: 12 * 60 * 60})
+	s.sessions.Store(sessionID, session{User: user, CSRF: csrf, ExpiresAt: time.Now().Add(sessionTTL)})
+	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: sessionID, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: sessionCookieMaxAge})
+	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: sessionCookieMaxAge})
 	writeJSON(w, http.StatusOK, map[string]any{"user": user, "csrf_token": csrf})
 }
 

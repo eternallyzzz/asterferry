@@ -258,19 +258,60 @@ jobs:
             exit 1
           }
           version="${GITHUB_REF_NAME#v}"
-          for chart in deploy/helm/asterferry-controller deploy/helm/asterferry-node; do
-            chart_version="$(sed -n 's/^version:[[:space:]]*//p' "$chart/Chart.yaml")"
-            app_version="$(grep '^appVersion:' "$chart/Chart.yaml" | sed 's/^appVersion:[[:space:]]*//' | tr -d '\"')"
-            [[ "$chart_version" == "$version" && "$app_version" == "$version" ]] || {
-              echo "$chart/Chart.yaml must use version=$version and appVersion=$version" >&2
-              exit 1
-            }
-          done
+          python3 - "$version" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          versions = {}
+
+          for path in (Path("api/openapi.yaml"), Path("internal/controller/openapi.yaml")):
+              text = path.read_text(encoding="utf-8")
+              match = re.search(r"(?m)^  version:\s*(\S+)\r?$", text)
+              if not match:
+                  raise SystemExit(f"{path} does not declare info.version")
+              versions[str(path)] = match.group(1)
+
+          versions["web/dashboard/package.json"] = json.loads(
+              Path("web/dashboard/package.json").read_text(encoding="utf-8")
+          )["version"]
+          versions["web/dashboard/package-lock.json"] = json.loads(
+              Path("web/dashboard/package-lock.json").read_text(encoding="utf-8")
+          )["packages"][""]["version"]
+
+          for chart in ("deploy/helm/asterferry-controller", "deploy/helm/asterferry-node"):
+              path = Path(chart) / "Chart.yaml"
+              text = path.read_text(encoding="utf-8")
+              chart_version = re.search(r"(?m)^version:\s*(\S+)\r?$", text)
+              app_version = re.search(r'(?m)^appVersion:\s*"?([^"\s]+)"?\r?$', text)
+              if not chart_version or not app_version:
+                  raise SystemExit(f"{path} is missing chart version metadata")
+              versions[f"{path} version"] = chart_version.group(1)
+              versions[f"{path} appVersion"] = app_version.group(1)
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heading = rf"(?m)^## \[{re.escape(version)}\] - (?:Unreleased|\d{{4}}-\d{{2}}-\d{{2}})\r?$"
+          if not re.search(heading, changelog):
+              raise SystemExit(f"CHANGELOG.md has no entry for {version}")
+
+          mismatches = {path: value for path, value in versions.items() if value != version}
+          if mismatches:
+              details = ", ".join(f"{path}={value}" for path, value in mismatches.items())
+              raise SystemExit(f"release version {version} is inconsistent: {details}")
+          if len(set(versions.values())) != 1:
+              raise SystemExit(f"release version sources disagree: {versions}")
+          if Path("api/openapi.yaml").read_bytes() != Path("internal/controller/openapi.yaml").read_bytes():
+              raise SystemExit("API OpenAPI documents are not identical")
+          print(f"release version {version} is consistent across source metadata")
+          PY
       - name: Verify dashboard assets
         run: |
           npm --prefix web/dashboard ci
           npm --prefix web/dashboard run build
           test -s internal/dashboard/dist/index.html
+          test -z "$(git ls-files -- internal/dashboard/dist)"
       - name: Build native release archives
         uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0
         with:
@@ -302,13 +343,37 @@ jobs:
           syft-version: v1.51.0
           upload-artifact: false
           upload-release-assets: false
+      - name: Validate release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected_files=(
+            "asterferry_${version}_linux_amd64.tar.gz"
+            "asterferry_${version}_linux_arm64.tar.gz"
+            "asterferry_${version}_windows_amd64.zip"
+            "asterferry-controller-${version}.tgz"
+            "asterferry-node-${version}.tgz"
+            "asterferry-${GITHUB_REF_NAME}-source.spdx.json"
+            "install-node.sh"
+            "install-node.ps1"
+          )
+          for file in "${expected_files[@]}"; do
+            test -s "dist/$file" || { echo "release file missing or empty: $file" >&2; exit 1; }
+          done
+          test "$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)" -eq 2
       - name: Create release checksums
         shell: bash
         run: |
           set -euo pipefail
           cd dist
-          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.tgz' -o -name '*.spdx.json' -o -name '*.sh' -o -name '*.ps1' \) -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          mapfile -t checksum_inputs < <(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.tgz' -o -name '*.spdx.json' -o -name '*.sh' -o -name '*.ps1' \) -printf '%f\n' | sort)
+          ((${#checksum_inputs[@]} > 0)) || { echo "no release files found for checksums" >&2; exit 1; }
+          sha256sum "${checksum_inputs[@]}" > SHA256SUMS
           sha256sum -c SHA256SUMS
+          for file in "${checksum_inputs[@]}"; do
+            grep -Fq "  $file" SHA256SUMS || { echo "release checksum missing: $file" >&2; exit 1; }
+          done
       - name: Upload release build
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -392,7 +457,7 @@ jobs:
           push-to-registry: true
 
   release_publish:
-    name: Publish GitHub Release and Helm Chart
+    name: Publish GitHub Release and Helm Charts
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - release_build
@@ -417,26 +482,54 @@ jobs:
         uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
         with:
           cosign-release: v2.6.5
-      - name: Push and sign Helm Chart
-        id: chart
+      - name: Push and sign Helm Charts
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          chart_file="$(find dist -maxdepth 1 -type f -name '*.tgz' -print -quit)"
-          [[ -n "$chart_file" ]] || { echo "packaged Helm chart not found" >&2; exit 1; }
-          helm push "$chart_file" oci://ghcr.io/eternallyzzz/charts | tee chart-push.log
-          chart_digest="$(sed -n 's/^Digest:[[:space:]]*//p' chart-push.log | tail -n 1)"
-          [[ "$chart_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "Helm push did not return a digest" >&2; exit 1; }
-          echo "digest=$chart_digest" >> "$GITHUB_OUTPUT"
-          cosign sign --yes "ghcr.io/eternallyzzz/charts/asterferry@${chart_digest}"
+          version="${GITHUB_REF_NAME#v}"
+          chart_files=(
+            "dist/asterferry-controller-${version}.tgz"
+            "dist/asterferry-node-${version}.tgz"
+          )
+          for chart_file in "${chart_files[@]}"; do
+            test -s "$chart_file" || { echo "packaged Helm chart missing: $chart_file" >&2; exit 1; }
+          done
+          : > dist/chart-digests.tsv
+          for chart_file in "${chart_files[@]}"; do
+            chart_name="$(basename "$chart_file" "-${version}.tgz")"
+            repository="ghcr.io/eternallyzzz/charts/${chart_name}"
+            push_log="$(helm push "$chart_file" oci://ghcr.io/eternallyzzz/charts 2>&1 | tee /dev/stderr)"
+            chart_digest="$(printf '%s\n' "$push_log" | sed -n 's/^Digest:[[:space:]]*//p' | tail -n 1)"
+            [[ "$chart_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+              echo "Helm push did not return a digest for $chart_name" >&2
+              exit 1
+            }
+            cosign sign --yes "${repository}@${chart_digest}"
+            printf '%s\t%s\t%s\n' "$chart_name" "$repository" "$chart_digest" >> dist/chart-digests.tsv
+          done
+          python3 - "$version" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          charts = []
+          for line in Path("dist/chart-digests.tsv").read_text(encoding="utf-8").splitlines():
+              name, repository, digest = line.split("\t")
+              charts.append({"name": name, "repository": repository, "version": version, "digest": digest})
+          expected = ["asterferry-controller", "asterferry-node"]
+          if [chart["name"] for chart in charts] != expected:
+              raise SystemExit(f"unexpected Helm chart publication set: {charts}")
+          Path("dist/chart-digests.json").write_text(json.dumps(charts, indent=2) + "\n", encoding="utf-8")
+          PY
+          rm -f dist/chart-digests.tsv
       - name: Create release manifest
         shell: bash
         env:
           IMAGE_DIGEST: ${{ needs.release_image.outputs.image_digest }}
-          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -449,27 +542,25 @@ jobs:
           for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
               digest, name = line.split(maxsplit=1)
               artifacts.append({"name": name, "sha256": digest})
+          charts = json.loads((dist / "chart-digests.json").read_text(encoding="utf-8"))
 
           version = os.environ["GITHUB_REF_NAME"][1:]
           manifest = {
               "version": version,
               "tag": os.environ["GITHUB_REF_NAME"],
               "commit": os.environ["GITHUB_SHA"],
-              "protocol": 5,
+              "protocol": "AFDP/2 + control/2",
               "image": {
                   "repository": "ghcr.io/eternallyzzz/asterferry",
                   "digest": os.environ["IMAGE_DIGEST"],
               },
-              "chart": {
-                  "repository": "ghcr.io/eternallyzzz/charts/asterferry",
-                  "version": version,
-                  "digest": os.environ["CHART_DIGEST"],
-              },
+              "charts": charts,
               "artifacts": artifacts,
           }
           (dist / "release-manifest.json").write_text(
               json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
           )
+          (dist / "chart-digests.json").unlink()
           PY
       - name: Attest release files
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3

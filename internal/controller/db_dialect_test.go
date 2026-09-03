@@ -1,6 +1,18 @@
 package controller
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestPostgresConnectionPoolLifecyclePolicy(t *testing.T) {
+	if postgresConnMaxLifetime != 30*time.Minute {
+		t.Fatalf("postgres connection max lifetime = %s, want 30m", postgresConnMaxLifetime)
+	}
+	if postgresConnMaxIdleTime != 5*time.Minute {
+		t.Fatalf("postgres connection max idle time = %s, want 5m", postgresConnMaxIdleTime)
+	}
+}
 
 func TestBindPostgresPlaceholdersSkipsQuotedTextAndComments(t *testing.T) {
 	query := `SELECT ?, '?', 'it''s ?' AS literal, "?" AS identifier, ` + "`?`" + ` AS legacy_identifier, -- ?

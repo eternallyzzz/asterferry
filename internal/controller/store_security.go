@@ -26,11 +26,24 @@ func idempotencyHit(ctx context.Context, tx *sql.Tx, key string, request any) (b
 	if err != nil {
 		return false, err
 	}
-	var stored string
-	err = tx.QueryRowContext(ctx, `SELECT request_hash FROM idempotency_keys WHERE key=?`, key).Scan(&stored)
-	if errors.Is(err, sql.ErrNoRows) {
+	// Reserve the key in the same transaction as the business mutation. On
+	// PostgreSQL, a concurrent INSERT for the same key waits for the first
+	// transaction to commit or roll back, closing the SELECT-then-INSERT TOCTOU
+	// window. The placeholder is never committed without recordIdempotency
+	// because both operations share the caller's transaction.
+	result, err := tx.ExecContext(ctx, `INSERT INTO idempotency_keys(key,request_hash,response_json,created_at) VALUES(?,?,?,?) ON CONFLICT(key) DO NOTHING`, key, hash, []byte(`{}`), time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("reserve idempotency key rows affected: %w", err)
+	}
+	if affected == 1 {
 		return false, nil
 	}
+	var stored string
+	err = tx.QueryRowContext(ctx, `SELECT request_hash FROM idempotency_keys WHERE key=?`, key).Scan(&stored)
 	if err != nil {
 		return false, err
 	}
@@ -56,8 +69,18 @@ func recordIdempotency(ctx context.Context, tx *sql.Tx, key string, request, res
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO idempotency_keys(key,request_hash,response_json,created_at) VALUES(?,?,?,?)`, key, hash, encoded, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	result, err := tx.ExecContext(ctx, `UPDATE idempotency_keys SET response_json=? WHERE key=? AND request_hash=?`, encoded, key, hash)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("record idempotency key rows affected: %w", err)
+	}
+	if affected != 1 {
+		return errors.New("idempotency key reservation was not held")
+	}
+	return nil
 }
 
 func validateIdempotencyKey(key string) error {

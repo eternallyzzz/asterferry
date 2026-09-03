@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -30,6 +31,69 @@ func TestOpenStoreWithConfigRejectsDatabaseWithoutGenerationMarker(t *testing.T)
 	}
 	if !errors.Is(err, ErrIncompatibleDatabase) {
 		t.Fatalf("expected incompatible database error, got %v", err)
+	}
+}
+
+func TestOpenStoreWithConfigPreservesSchemaProbeCause(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "damaged.db")
+	db, err := sql.Open(driverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE legacy_state (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY, backend TEXT NOT NULL, fingerprint TEXT NOT NULL, initialized_at TEXT NOT NULL)`,
+		`INSERT INTO schema_meta(singleton,backend,fingerprint,initialized_at) VALUES (1,'sqlite','wrong','now')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openTestStore(path)
+	if store != nil {
+		_ = store.Close()
+	}
+	if !errors.Is(err, ErrIncompatibleDatabase) {
+		t.Fatalf("expected incompatible database error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "schema_version") {
+		t.Fatalf("schema probe cause was lost: %v", err)
+	}
+}
+
+func TestOpenStoreWithConfigTreatsMissingMarkerRowAsIncompatible(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unmarked.db")
+	db, err := sql.Open(driverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE legacy_state (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL, backend TEXT NOT NULL, fingerprint TEXT NOT NULL, initialized_at TEXT NOT NULL)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openTestStore(path)
+	if store != nil {
+		_ = store.Close()
+	}
+	if !errors.Is(err, ErrIncompatibleDatabase) {
+		t.Fatalf("expected incompatible database error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "inspect schema_meta") {
+		t.Fatalf("missing marker row was reported as probe failure: %v", err)
 	}
 }
 

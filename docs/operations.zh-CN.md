@@ -14,7 +14,7 @@ Node 建立经过认证的 Controller 控制流后，会上报不含载荷的以
 
 元数据包括连接 ID、类型、状态、进程可观察到的来源 IP/端口、对端 Node、
 Gateway/Agent、Assignment、Service、目标地址、协议、开始/最后活动/结束
-时间、累计字节和平均字节速率。不会包含业务载荷、数据包内容、凭证或完整
+时间、累计字节和自连接开始计算的累计平均字节速率。不会包含业务载荷、数据包内容、凭证或完整
 请求数据。
 
 Node 本地使用有上限的内存 registry 保存活动连接。Controller 保存当前/最近
@@ -45,9 +45,21 @@ Service 中，客户端到 Agent 是入站，Agent 到客户端是出站；Gatew
 中，Agent 到外部目标是入站，外部目标到 Agent 是出站。每个请求都会写审计；
 投递是尽力而为，离线 Node 不会自动收到旧的运维操作。
 
+## Controller HTTP 端点策略
+
+端点策略是有意设计的：`/healthz` 完全匿名；`/readyz` 和 `/metrics` 需要
+经过认证的 Viewer、Operator 或 Admin；`/openapi.yaml` 及
+`/api/v1/openapi.yaml` 为便于客户端发现而保持匿名。如果部署环境不应公开
+API 元数据，请在 HTTPS ingress 或网络策略层限制 OpenAPI 路径。Prometheus
+应使用只读 Viewer API Token。
+
+浏览器 Cookie 会话只保存在 Controller 进程内存中，有效期 12 小时；进程重启
+或请求落到另一副本都会使其失效，自动化客户端应使用 API Token。共享会话存储
+和 Controller HA 不在本版本范围内。
+
 ## REST API
 
-以下路径均位于 `/api/v1` 下，并需要对应 Controller 角色：
+以下资源路径均位于 `/api/v1` 下，并需要对应 Controller 角色：
 
 | 路径 | 角色 | 用途 |
 | --- | --- | --- |

@@ -53,29 +53,31 @@ type RuntimeRateLimit struct {
 // RuntimeConnection is the safe, payload-free metadata exposed to operators.
 // It contains addresses, protocol and counters, never application bytes.
 type RuntimeConnection struct {
-	ID              string            `json:"id"`
-	Type            string            `json:"type"`
-	NodeID          string            `json:"node_id"`
-	PeerNodeID      string            `json:"peer_node_id,omitempty"`
-	GatewayID       string            `json:"gateway_id,omitempty"`
-	AgentID         string            `json:"agent_id,omitempty"`
-	AssignmentID    string            `json:"assignment_id,omitempty"`
-	ServiceID       string            `json:"service_id,omitempty"`
-	Protocol        string            `json:"protocol"`
-	SourceIP        string            `json:"source_ip,omitempty"`
-	SourcePort      uint16            `json:"source_port,omitempty"`
-	Target          string            `json:"target,omitempty"`
-	ParentSessionID string            `json:"parent_session_id,omitempty"`
-	StartedAt       time.Time         `json:"started_at"`
-	LastActivityAt  time.Time         `json:"last_activity_at"`
-	EndedAt         *time.Time        `json:"ended_at,omitempty"`
-	State           string            `json:"state"`
-	CloseReason     string            `json:"close_reason,omitempty"`
-	BytesIn         uint64            `json:"bytes_in"`
-	BytesOut        uint64            `json:"bytes_out"`
-	RateIn          float64           `json:"rate_in_bps"`
-	RateOut         float64           `json:"rate_out_bps"`
-	Limit           *RuntimeRateLimit `json:"limit,omitempty"`
+	ID              string     `json:"id"`
+	Type            string     `json:"type"`
+	NodeID          string     `json:"node_id"`
+	PeerNodeID      string     `json:"peer_node_id,omitempty"`
+	GatewayID       string     `json:"gateway_id,omitempty"`
+	AgentID         string     `json:"agent_id,omitempty"`
+	AssignmentID    string     `json:"assignment_id,omitempty"`
+	ServiceID       string     `json:"service_id,omitempty"`
+	Protocol        string     `json:"protocol"`
+	SourceIP        string     `json:"source_ip,omitempty"`
+	SourcePort      uint16     `json:"source_port,omitempty"`
+	Target          string     `json:"target,omitempty"`
+	ParentSessionID string     `json:"parent_session_id,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	LastActivityAt  time.Time  `json:"last_activity_at"`
+	EndedAt         *time.Time `json:"ended_at,omitempty"`
+	State           string     `json:"state"`
+	CloseReason     string     `json:"close_reason,omitempty"`
+	BytesIn         uint64     `json:"bytes_in"`
+	BytesOut        uint64     `json:"bytes_out"`
+	// RateIn and RateOut are cumulative average byte rates since StartedAt,
+	// rather than instantaneous or rolling-window rates.
+	RateIn  float64           `json:"rate_in_bps"`
+	RateOut float64           `json:"rate_out_bps"`
+	Limit   *RuntimeRateLimit `json:"limit,omitempty"`
 }
 
 func (c RuntimeConnection) Validate() error {

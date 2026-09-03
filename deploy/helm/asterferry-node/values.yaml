@@ -1,6 +1,7 @@
 image:
   repository: ghcr.io/eternallyzzz/asterferry
   tag: ""
+  digest: ""
   pullPolicy: IfNotPresent
 bootstrapSecret: asterferry-node-bootstrap
 bootstrapKey: bootstrap.json

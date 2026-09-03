@@ -126,9 +126,11 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller storage is temporarily unavailable")
 		return
 	}
-	// Do not reflect unclassified repository/driver errors. They can contain
-	// SQL statements, filesystem paths, or other implementation details.
-	writeError(w, http.StatusBadRequest, "request_rejected", "request was rejected")
+	// Do not reflect unclassified repository errors. They can contain SQL
+	// statements, filesystem paths, or other implementation details. They are
+	// nevertheless server failures, not malformed client requests.
+	slog.Default().Error("controller store operation failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 }
 
 type sqliteError interface{ Code() int }
