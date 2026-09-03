@@ -25,7 +25,7 @@ func newControllerCommand() *cobra.Command {
 }
 
 func newControllerInitCommand() *cobra.Command {
-	var dir, username, password, passwordFile, httpListen, grpcListen, grpcAdvertise, releaseBaseURL, releaseVersion string
+	var dir, username, password, passwordFile, httpListen, metricsListen, grpcListen, grpcAdvertise, releaseBaseURL, releaseVersion string
 	var databaseDriver, databaseURL string
 	var databaseMaxOpenConns int
 	var force bool
@@ -50,7 +50,7 @@ func newControllerInitCommand() *cobra.Command {
 				}
 				generated = true
 			}
-			result, err := controller.Init(cmd.Context(), controller.InitOptions{Dir: dir, HTTPListen: httpListen, GRPCListen: grpcListen, GRPCAdvertise: grpcAdvertise, ReleaseBaseURL: releaseBaseURL, ReleaseVersion: releaseVersion, DatabaseDriver: databaseDriver, DatabaseURL: databaseURL, DatabaseMaxOpenConns: databaseMaxOpenConns, Username: username, Password: password, Force: force})
+			result, err := controller.Init(cmd.Context(), controller.InitOptions{Dir: dir, HTTPListen: httpListen, MetricsListen: metricsListen, MetricsListenSet: cmd.Flags().Changed("metrics-listen"), GRPCListen: grpcListen, GRPCAdvertise: grpcAdvertise, ReleaseBaseURL: releaseBaseURL, ReleaseVersion: releaseVersion, DatabaseDriver: databaseDriver, DatabaseURL: databaseURL, DatabaseMaxOpenConns: databaseMaxOpenConns, Username: username, Password: password, Force: force})
 			if err != nil {
 				return err
 			}
@@ -67,6 +67,7 @@ func newControllerInitCommand() *cobra.Command {
 	cmd.Flags().StringVar(&password, "password", "", "initial Admin password (prefer --password-file or an interactive secret)")
 	cmd.Flags().StringVar(&passwordFile, "password-file", "", "read the initial Admin password from a protected file")
 	cmd.Flags().StringVar(&httpListen, "http-listen", "", "HTTPS listen address (default :8443)")
+	cmd.Flags().StringVar(&metricsListen, "metrics-listen", "", "internal metrics listen address (default 127.0.0.1:9090; empty disables)")
 	cmd.Flags().StringVar(&grpcListen, "grpc-listen", "", "mTLS gRPC listen address (default :9443)")
 	cmd.Flags().StringVar(&grpcAdvertise, "grpc-advertise", "", "public Controller gRPC address used by generated node install commands")
 	cmd.Flags().StringVar(&releaseBaseURL, "release-base-url", "", "official release download base URL used by generated node install commands")
@@ -104,7 +105,7 @@ func newControllerConfigureCommand() *cobra.Command {
 }
 
 func newControllerRunCommand() *cobra.Command {
-	var path string
+	var path, metricsListen string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "run the HTTPS REST and mTLS gRPC Controller servers",
@@ -113,6 +114,12 @@ func newControllerRunCommand() *cobra.Command {
 			config, err := controller.LoadConfig(path)
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("metrics-listen") {
+				config.MetricsListen = metricsListen
+				if err := config.Validate(); err != nil {
+					return err
+				}
 			}
 			instance, err := controller.New(config)
 			if err != nil {
@@ -126,6 +133,7 @@ func newControllerRunCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
+	cmd.Flags().StringVar(&metricsListen, "metrics-listen", "", "override internal metrics listen address; empty disables")
 	return cmd
 }
 
@@ -275,22 +283,28 @@ func newNodeEnrollCommand() *cobra.Command {
 
 func newNodeRunCommand() *cobra.Command {
 	var bootstrapPath string
+	var geoIPDatabasePath string
 	cmd := &cobra.Command{Use: "run", Short: "run the generic Node daemon", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if strings.TrimSpace(bootstrapPath) == "" {
 			return &codedError{code: 2, err: errors.New("--bootstrap is required; configure behavior in the Controller Dashboard")}
 		}
-		return runNodeBootstrap(cmd.Context(), bootstrapPath, cmd.ErrOrStderr())
+		return runNodeBootstrap(cmd.Context(), bootstrapPath, geoIPDatabasePath, cmd.ErrOrStderr())
 	}}
 	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
+	cmd.Flags().StringVar(&geoIPDatabasePath, "geoip-db", "", "optional externally managed GeoIP database path")
 	return cmd
 }
 
-func runNodeBootstrap(ctx context.Context, path string, errorsOut io.Writer) error {
+func runNodeBootstrap(ctx context.Context, path, geoIPDatabasePath string, errorsOut io.Writer) error {
 	bootstrap, err := node.LoadBootstrap(path)
 	if err != nil {
 		return err
 	}
-	runtime, err := node.NewRuntime(bootstrap, node.RuntimeOptions{BootstrapPath: path, Logger: slog.New(slog.NewTextHandler(errorsOut, &slog.HandlerOptions{Level: slog.LevelInfo}))})
+	runtime, err := node.NewRuntime(bootstrap, node.RuntimeOptions{
+		BootstrapPath:     path,
+		GeoIPDatabasePath: geoIPDatabasePath,
+		Logger:            slog.New(slog.NewTextHandler(errorsOut, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	})
 	if err != nil {
 		return err
 	}

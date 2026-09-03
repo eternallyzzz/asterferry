@@ -27,6 +27,7 @@ const (
 // the zero-dependency default; PostgreSQL is the production-scale backend.
 type Config struct {
 	HTTPListen           string `json:"http_listen"`
+	MetricsListen        string `json:"metrics_listen"`
 	GRPCListen           string `json:"grpc_listen"`
 	GRPCAdvertise        string `json:"grpc_advertise,omitempty"`
 	ReleaseBaseURL       string `json:"release_base_url,omitempty"`
@@ -57,6 +58,7 @@ func DefaultConfig(dir string) Config {
 	dir = filepath.Clean(dir)
 	return Config{
 		HTTPListen:                ":8443",
+		MetricsListen:             "127.0.0.1:9090",
 		GRPCListen:                ":9443",
 		ReleaseBaseURL:            "https://github.com/eternallyzzz/asterferry/releases/download",
 		DatabaseDriver:            DatabaseDriverSQLite,
@@ -76,6 +78,11 @@ func DefaultConfig(dir string) Config {
 func (c Config) Validate() error {
 	if err := validateListenAddress(c.HTTPListen, "http_listen"); err != nil {
 		return err
+	}
+	if strings.TrimSpace(c.MetricsListen) != "" {
+		if err := validateListenAddress(c.MetricsListen, "metrics_listen"); err != nil {
+			return err
+		}
 	}
 	if err := validateListenAddress(c.GRPCListen, "grpc_listen"); err != nil {
 		return err
@@ -151,6 +158,9 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if _, ok := fields["release_base_url"]; !ok {
 			config.ReleaseBaseURL = defaults.ReleaseBaseURL
+		}
+		if _, ok := fields["metrics_listen"]; !ok {
+			config.MetricsListen = defaults.MetricsListen
 		}
 		if _, ok := fields["idempotency_retention_hours"]; !ok {
 			config.IdempotencyRetentionHours = defaults.IdempotencyRetentionHours

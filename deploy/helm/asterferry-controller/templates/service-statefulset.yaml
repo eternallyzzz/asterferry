@@ -13,6 +13,11 @@ spec:
     - name: grpc
       port: {{ .Values.controller.grpcPort }}
       targetPort: grpc
+{{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -32,12 +37,25 @@ spec:
         - name: controller
           image: "{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ default .Chart.AppVersion .Values.image.tag }}{{ end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["controller", "run", "--config", "{{ .Values.controller.configPath }}"]
+          args:
+            - controller
+            - run
+            - --config
+            - {{ .Values.controller.configPath | quote }}
+{{- if .Values.metrics.enabled }}
+            - --metrics-listen
+            - {{ .Values.metrics.listen | quote }}
+{{- end }}
           ports:
             - name: https
               containerPort: {{ .Values.controller.httpsPort }}
             - name: grpc
               containerPort: {{ .Values.controller.grpcPort }}
+{{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+{{- end }}
           volumeMounts:
             - name: data
               mountPath: /var/lib/asterferry

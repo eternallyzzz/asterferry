@@ -28,6 +28,7 @@ paths:
     get:
       operationId: metrics
       servers: [{ url: / }]
+      description: The management HTTPS endpoint requires Viewer authentication. Native deployments may expose the same path on a separate plain-HTTP loopback or restricted scrape listener; that listener is outside this API server's authentication surface.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses: { '200': { description: Prometheus metrics } }
   /openapi.yaml:

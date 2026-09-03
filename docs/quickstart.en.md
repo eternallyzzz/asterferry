@@ -45,7 +45,7 @@ Replace these example values with real addresses:
 
 ## 2. Prepare the binary and network
 
-Use a release package or build from source. Building from source requires Go `1.26.7`; building the Dashboard separately requires Node.js 24 and npm 11+.
+Use a release package or build from source. Building from source requires Go `1.26.7`; building the Dashboard separately uses the release toolchain Node.js `24.19.0` and npm `12.0.2`.
 
 Build from the repository:
 

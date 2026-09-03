@@ -104,6 +104,9 @@ if command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./...
 fi
 go test -count=1 ./...
+go test -tags=integration -count=1 -timeout=5m ./internal/integration
+go test ./internal/afdp -run '^$' -fuzz FuzzDecodeAFDPFrames -fuzztime 10s
+go test ./internal/controlwire -run '^$' -fuzz FuzzControlwireDecoders -fuzztime 10s
 if [[ "$skip_race" != "1" ]]; then
   go test -race -count=1 ./...
 fi

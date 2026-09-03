@@ -42,11 +42,13 @@ const (
 // endpoint; it is useful when the advertised address is a DNS name or a NAT
 // address that cannot be bound locally.
 type DataPlaneOptions struct {
-	Engine        *dataplane.Engine
-	Bootstrap     Bootstrap
-	Logger        *slog.Logger
-	ListenAddress string
-	QUICOptions   afdp.QUICOptions
+	Engine            *dataplane.Engine
+	Bootstrap         Bootstrap
+	Logger            *slog.Logger
+	ListenAddress     string
+	QUICOptions       afdp.QUICOptions
+	GeoIPDatabasePath string
+	GeoIPMaxAge       time.Duration
 }
 
 // DataPlaneRuntime owns listeners and AFDP sessions for one node generation.
@@ -59,6 +61,7 @@ type DataPlaneRuntime struct {
 	logger        *slog.Logger
 	listenAddress string
 	quicOptions   afdp.QUICOptions
+	geoIP         *dataplane.GeoIPResolver
 	serverTLS     *tls.Config
 	clientTLS     *tls.Config
 	tlsMu         sync.RWMutex
@@ -97,6 +100,7 @@ func NewDataPlaneRuntime(options DataPlaneOptions) (*DataPlaneRuntime, error) {
 		logger:        options.Logger,
 		listenAddress: strings.TrimSpace(options.ListenAddress),
 		quicOptions:   options.QUICOptions,
+		geoIP:         dataplane.NewGeoIPResolverWithMaxAge(options.GeoIPDatabasePath, options.GeoIPMaxAge),
 		telemetry:     newRuntimeTelemetry(),
 		serverTLS:     afdp.ServerTLSConfigFromPEM(certificate, pool),
 		clientTLS:     afdp.ClientTLSConfigFromPEM(certificate, pool, ""),
@@ -130,7 +134,7 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 			"active_sessions":    float64(d.engine.ActiveSessions()),
 			"active_egress":      float64(d.engine.ActiveEgress()),
 			"udp_oversize_drops": float64(d.oversizeDatagrams.Load()),
-			"geoip_up":           boolMetric(dataplane.GeoIPAvailable()),
+			"geoip_up":           boolMetric(dataplane.GeoIPAvailable(d.geoIP)),
 		},
 	}
 	runtimeSnapshot := d.telemetry.snapshot(observed.NodeID)
@@ -486,6 +490,7 @@ func (d *DataPlaneRuntime) buildGeneration(parent context.Context, snapshot doma
 		udpFlows:          make(map[uint64]*dataUDPFlow),
 		udpByKey:          make(map[string]*dataUDPFlow),
 		telemetry:         d.telemetry,
+		geoIP:             d.geoIP,
 	}
 	var err error
 	if d.engine.Kind() == domain.NodeSpecGateway {

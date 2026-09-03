@@ -1,0 +1,54 @@
+# Stable release runbook
+
+This is the v1.0 release gate for a single Controller / multi-Node
+self-hosted deployment. It is designed for a solo maintainer, so evidence is
+automated and every exception is recorded in the release issue.
+
+## Before the RC
+
+1. Freeze Go, Node, npm, container base images, Helm dependencies and direct
+   Go/npm versions. Do not mix dependency upgrades into the release candidate.
+2. Run the tracked-file secret scan and remove all local keys, certificates,
+   tokens, databases, binaries and generated Dashboard output from the
+   workspace. Confirm `git ls-files` contains no credential material.
+3. Run the Linux suite: unit tests, PostgreSQL integration, race, vet,
+   staticcheck, govulncheck, Dashboard lint/test/build, OpenAPI generation
+   check, Helm lint/render and the AFDP/2 end-to-end test.
+4. Run AFDP/control-wire fuzz smoke and the protocol benchmark suite. On a PR,
+   the same-runner base/head comparison blocks a default regression above 10%.
+5. Build and smoke-test Linux amd64/arm64, Windows amd64, Docker amd64 and
+   both Helm charts. WSL is compatibility-tested separately; it is not an
+   official support promise.
+6. Test both SQLite and PostgreSQL from fresh initialization, backup, restore,
+   restart and Node reconnect. Record the last verified backup timestamp.
+
+## RC and soak
+
+Create a release candidate tag such as `v1.0.0-rc.1`. The tag workflow marks
+it prerelease and publishes immutable artifacts without changing the stable
+source version. Operate the candidate for at least seven calendar days with:
+
+- Controller restart and graceful shutdown checks;
+- Node reconnect, certificate rotation and offline last-known-good checks;
+- TCP, UDP, reverse-TCP, proxy and egress smoke traffic;
+- metrics scrape from the explicitly exposed metrics listener;
+- backup/restore verification and review of error, readiness and resource
+  metrics; and
+- no unresolved P0/P1 security, data-loss, protocol, or release-integrity
+  issue.
+
+Record benchmark output, supported-platform results, image/chart digests,
+SBOM/attestation links, backup evidence and known limitations in the release
+issue. If the candidate changes, restart the seven-day soak.
+
+## Final publication
+
+After the soak, update `CHANGELOG.md` with the release date, run
+`scripts/release-check.ps1 -Version 1.0.0` (and the Docker-enabled variant),
+merge the final commit to `main`, and create `v1.0.0` from that commit. Verify
+the GitHub release manifest, SHA-256 checksums, signed image/chart digests and
+the Linux/Windows install paths before announcing it.
+
+Do not delete the previous backup or RC artifacts. For a failed release,
+withdraw the announcement, keep the immutable artifacts for forensics, restore
+the last verified backup, and use the recorded RTO/RPO procedure.

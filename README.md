@@ -112,13 +112,16 @@ enrollment tokens are stored only as hashes.
 The REST API supports login/logout, Cookie sessions with CSRF protection, API
 tokens, fixed Viewer/Operator/Admin roles, unified Node and Node Spec resources,
 typed Gateway/Agent behavior documents, services, assignments, enrollment
-tokens, runtime actions, observed state, events and audit queries. The HTTP
-endpoint policy is intentional: `/healthz` is anonymous; `/readyz` and
-`/metrics` require an authenticated Viewer (Bearer API token or Cookie
-session); and `/openapi.yaml` plus `/api/v1/openapi.yaml` remain anonymous for
-client discovery. Configure Prometheus with a read-only Viewer API token, and
-restrict the OpenAPI paths at the ingress/network layer if API metadata must
-not be public.
+tokens, runtime actions, observed state, events and audit queries. The
+management HTTPS endpoint policy is intentional: `/healthz` is anonymous;
+`/readyz` and management `/metrics` require an authenticated Viewer (Bearer API
+token or Cookie session); and `/openapi.yaml` plus `/api/v1/openapi.yaml` remain
+anonymous for client discovery. Native Controller configs also expose a
+separate plain-HTTP `/metrics` listener on `127.0.0.1:9090` by default, which
+can be disabled or bound to an explicitly restricted scrape network. Helm
+keeps that listener disabled until `metrics.enabled=true` is selected and
+network policy is configured. Restrict the OpenAPI paths at the
+ingress/network layer if API metadata must not be public.
 
 Cookie sessions are process-local in-memory state with a 12-hour lifetime. A
 Controller restart invalidates them, and multiple Controller replicas cannot
@@ -159,7 +162,10 @@ Nodes have only bootstrap identity material, Controller address, cache location
 and logging options. Enrollment exchanges a one-time 15-minute token and an
 Ed25519 CSR for a 30-day mTLS certificate. Certificates rotate automatically
 seven days before expiry; revocation closes online streams and is enforced on
-the next connection.
+the next connection. Optional GeoIP routing uses an external, versioned,
+read-only MaxMind-compatible database supplied with `node run --geoip-db`; the
+database is not embedded or downloaded at runtime. See
+[`docs/geoip.md`](docs/geoip.md).
 
 The node reconciler validates a complete snapshot and builds a new data-plane
 index before atomically switching generations. Failed validation, checksum,
@@ -238,8 +244,10 @@ go test -tags=integration -count=1 -timeout=5m ./internal/integration
 
 The Dashboard client bounds each Controller request at 15 seconds and reports
 a localized timeout instead of waiting indefinitely when an HTTPS proxy or
-Controller is unavailable. Additional protocol fuzzing and deployment smoke
-tests should be run before release on Linux, WSL and Windows.
+Controller is unavailable. CI runs protocol fuzz smoke, benchmark regression
+checks, Linux end-to-end coverage and Windows builds/tests. WSL remains a
+compatibility-tested environment rather than an official support target; use
+the local scripts for its deployment smoke coverage.
 
 On Windows, the race detector requires CGO and a recent mingw-w64 toolchain.
 Use GCC 10.3 or newer (or an LLVM MinGW release that provides
@@ -258,9 +266,11 @@ instrumented binaries with Windows status `0xc0000139`.
 ## Release preparation
 
 The current Controller/data-plane architecture is prepared as the first public
-`v1.0.0` release. It is a fresh generation: pre-architecture binaries,
-databases and wire protocols are not upgrade inputs. Keep `CHANGELOG.md` as
-`Unreleased` until the release tag is created.
+`v1.0.0` release. It is a fresh boundary for pre-v1 inputs, while future v1.x
+releases preserve the API, wire and database contracts. Follow the
+[`stable release runbook`](docs/release-runbook.md): publish an RC, soak it for
+seven days, then create the final tag. Keep `CHANGELOG.md` as `Unreleased`
+until the release tag is created.
 
 Run the release preflight on Windows before merging the final release commit:
 

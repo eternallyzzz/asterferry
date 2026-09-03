@@ -55,16 +55,26 @@ function Prepare-FrontendScratch {
     return $path
 }
 
-if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw "Version must be MAJOR.MINOR.PATCH without the leading v"
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?$') {
+    throw "Version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N without the leading v"
 }
+$stableVersion = [regex]::Match($Version, '^[0-9]+\.[0-9]+\.[0-9]+').Value
 
 Require-Command "go"
 Require-Command "node"
 Require-Command "npm"
 Require-Command "helm"
+Require-Command "python"
 if (-not $SkipDocker) {
     Require-Command "docker"
+}
+$nodeVersion = (& node --version).Trim()
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -ne "v24.19.0") {
+    throw "Expected Node v24.19.0, got: $nodeVersion"
+}
+$npmVersion = (& npm --version).Trim()
+if ($LASTEXITCODE -ne 0 -or $npmVersion -ne "12.0.2") {
+    throw "Expected npm 12.0.2, got: $npmVersion"
 }
 
 $tmpRoot = [System.IO.Path]::GetFullPath((Join-Path $root "tmp"))
@@ -109,27 +119,33 @@ foreach ($chart in $chartPaths) {
     $chartText = Get-Content -Raw -LiteralPath $chartPath
     $chartVersion = [regex]::Match($chartText, '(?m)^version:\s*([^\s]+)').Groups[1].Value
     $appVersion = [regex]::Match($chartText, '(?m)^appVersion:\s*["'']?([^"''\s]+)').Groups[1].Value
-    if ($chartVersion -ne $Version -or $appVersion -ne $Version) {
-        throw "$chart metadata must match $Version; got version=$chartVersion appVersion=$appVersion"
+    if ($chartVersion -ne $stableVersion -or $appVersion -ne $stableVersion) {
+        throw "$chart metadata must match $stableVersion; got version=$chartVersion appVersion=$appVersion"
     }
     $versionSources["$chart/Chart.yaml version"] = $chartVersion
     $versionSources["$chart/Chart.yaml appVersion"] = $appVersion
 }
 
 $changelog = Get-Content -Raw -LiteralPath (Join-Path $root "CHANGELOG.md")
-$changelogPattern = "(?m)^## \[$([regex]::Escape($Version))\] - (?:Unreleased|\d{4}-\d{2}-\d{2})\r?$"
+$changelogPattern = "(?m)^## \[$([regex]::Escape($stableVersion))\] - (?:Unreleased|\d{4}-\d{2}-\d{2})\r?$"
 if (-not [regex]::IsMatch($changelog, $changelogPattern)) {
-    throw "CHANGELOG.md has no entry for $Version"
+    throw "CHANGELOG.md has no entry for $stableVersion"
 }
 
-$mismatches = @($versionSources.GetEnumerator() | Where-Object { $_.Value -ne $Version })
+$mismatches = @($versionSources.GetEnumerator() | Where-Object { $_.Value -ne $stableVersion })
 if ($mismatches.Count -gt 0) {
     $details = ($mismatches | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
-    throw "release version $Version is inconsistent: $details"
+    throw "release version $stableVersion is inconsistent: $details"
 }
 $distinctVersions = @($versionSources.GetEnumerator() | ForEach-Object { $_.Value } | Select-Object -Unique)
 if ($distinctVersions.Count -ne 1) {
     throw "release version sources disagree: $($versionSources | Out-String)"
+}
+
+Invoke-Checked "OpenAPI generated copy" "python" @("scripts/sync-openapi.py", "--check")
+Invoke-Checked "Tracked-file secret scan" "python" @((Join-Path $root "scripts/secret-scan.py"))
+if (Test-Path -LiteralPath (Join-Path $root "internal/dataplane/cn.mmdb")) {
+    throw "GeoIP database must be supplied as an external, versioned release resource; it must not be tracked in source"
 }
 
 Invoke-Checked "Go module tidy check" "go" @("mod", "tidy", "-diff")
@@ -155,6 +171,7 @@ if ($trackedDashboardAssets.Count -gt 0) {
     throw "generated Dashboard assets must not be tracked: $($trackedDashboardAssets -join ', ')"
 }
 Invoke-Checked "Go module verification" "go" @("mod", "verify")
+Invoke-Checked "Protocol benchmark smoke" "go" @("test", "./internal/afdp", "./internal/controlwire", "./internal/dataplane", "-run", "^$", "-bench", "^Benchmark", "-benchmem", "-benchtime=1s", "-count=3")
 
 $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferry/internal/buildinfo.Commit=release-check -X asterferry/internal/buildinfo.BuildDate=release-check"
 $binaryPath = Join-Path $output "asterferry.exe"
@@ -166,7 +183,7 @@ if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $
 
 Invoke-Checked "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
 Invoke-Checked "Helm lint Node" "helm" @("lint", "deploy/helm/asterferry-node")
-$nodeTemplate = (& helm template release-check deploy/helm/asterferry-node | Out-String)
+$nodeTemplate = (& helm template release-check deploy/helm/asterferry-node --set image.tag=$Version | Out-String)
 $expectedImage = "ghcr.io/eternallyzzz/asterferry:$Version"
 if ($LASTEXITCODE -ne 0 -or $nodeTemplate -notmatch [regex]::Escape($expectedImage)) {
     throw "Default Helm image reference did not resolve to the release version"
@@ -177,6 +194,14 @@ foreach ($chart in $chartPaths) {
     if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch [regex]::Escape("ghcr.io/eternallyzzz/asterferry@$digest")) {
         throw "Helm digest image override did not render correctly for $chart"
     }
+}
+$controllerMetricsTemplate = (& helm template release-check deploy/helm/asterferry-controller --set metrics.enabled=true --set metrics.listen=:9090 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $controllerMetricsTemplate -notmatch "--metrics-listen" -or $controllerMetricsTemplate -notmatch "name: metrics") {
+    throw "Helm metrics opt-in did not render the dedicated metrics listener and Service port"
+}
+$nodeGeoIPTemplate = (& helm template release-check deploy/helm/asterferry-node --set geoip.enabled=true --set geoip.existingConfigMap=geoip-data | Out-String)
+if ($LASTEXITCODE -ne 0 -or $nodeGeoIPTemplate -notmatch "--geoip-db" -or $nodeGeoIPTemplate -notmatch "name: geoip") {
+    throw "Helm GeoIP opt-in did not render the external database mount"
 }
 foreach ($chart in $chartPaths) {
     Invoke-Checked "Helm package $chart" "helm" @("package", $chart, "--destination", $output, "--version", $Version, "--app-version", $Version)

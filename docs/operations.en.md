@@ -59,11 +59,15 @@ automatically.
 
 ## Controller HTTP endpoint policy
 
-The policy is intentional: `/healthz` is anonymous; `/readyz` and `/metrics`
-require an authenticated Viewer, Operator or Admin; and `/openapi.yaml` plus
-`/api/v1/openapi.yaml` are anonymous for client discovery. Prometheus should
-use a read-only Viewer API token. If the OpenAPI document is deployment
-sensitive, restrict those paths at the HTTPS ingress or network layer.
+The policy is intentional: `/healthz` is anonymous; `/readyz` and the
+management HTTPS `/metrics` require an authenticated Viewer, Operator or Admin;
+and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
+discovery. A native Controller also has a separate plain-HTTP `/metrics`
+listener, loopback-only by default at `127.0.0.1:9090`; bind or expose it only
+for a trusted Prometheus network. Prometheus should use that listener where
+possible, or a read-only Viewer API token for the management endpoint. If the
+OpenAPI document is deployment sensitive, restrict those paths at the HTTPS
+ingress or network layer.
 
 Browser Cookie sessions are process-local in-memory state with a 12-hour
 lifetime. A Controller restart or another replica invalidates them, so use API

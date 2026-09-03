@@ -8,6 +8,12 @@ controller:
   httpsPort: 8443
   grpcPort: 9443
   dataSize: 10Gi
+metrics:
+  # Keep metrics disabled until the operator has selected a trusted in-cluster
+  # Prometheus source and network policy.
+  enabled: false
+  listen: ":9090"
+  port: 9090
 service:
   type: ClusterIP
   annotations: {}
