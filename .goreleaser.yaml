@@ -24,6 +24,7 @@ builds:
         goarch: arm64
     flags:
       - -trimpath
+      - -tags=dashboard_assets
     ldflags:
       - -s -w -X asterferry/internal/buildinfo.Version={{ .Version }} -X asterferry/internal/buildinfo.Commit={{ .FullCommit }} -X asterferry/internal/buildinfo.BuildDate={{ .Date }}
     mod_timestamp: "{{ .CommitTimestamp }}"

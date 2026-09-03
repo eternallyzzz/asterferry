@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asterferry Dashboard assets not built</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #10141c; color: #e8edf5; }
+      main { max-width: 720px; margin: 24px; padding: 28px; border: 1px solid #384354; border-radius: 12px; background: #171e2a; }
+      code { color: #9ed0ff; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Dashboard assets are not embedded</h1>
+      <p>This development binary was built without the generated Vue Dashboard.</p>
+      <p>Build it with <code>npm --prefix web/dashboard run build</code>, then build the Controller with <code>go build -tags=dashboard_assets ./cmd/asterferry</code>.</p>
+      <p>Dashboard 构建产物不提交 Git；发布构建会自动嵌入生成的页面。</p>
+    </main>
+  </body>
+</html>

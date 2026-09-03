@@ -103,8 +103,8 @@ function Build-GoTarget([string]$GoOS, [string]$GoArch, [string]$Name) {
         $suffix = if ($GoOS -eq "windows") { ".exe" } else { "" }
         $asterferryPath = Join-Path $targetDir ("asterferry" + $suffix)
         $benchmarkPath = Join-Path $targetDir ("asterferry-bench" + $suffix)
-        Invoke-Logged "build $GoOS/$GoArch asterferry" "go" @("build", "-trimpath", "-o", $asterferryPath, "./cmd/asterferry")
-        Invoke-Logged "build $GoOS/$GoArch benchmark" "go" @("build", "-trimpath", "-o", $benchmarkPath, "./cmd/asterferry-bench")
+        Invoke-Logged "build $GoOS/$GoArch asterferry" "go" @("build", "-tags=dashboard_assets", "-trimpath", "-o", $asterferryPath, "./cmd/asterferry")
+        Invoke-Logged "build $GoOS/$GoArch benchmark" "go" @("build", "-tags=dashboard_assets", "-trimpath", "-o", $benchmarkPath, "./cmd/asterferry-bench")
     } finally {
         if ($null -eq $oldGoOS) { Remove-Item Env:GOOS -ErrorAction SilentlyContinue } else { $env:GOOS = $oldGoOS }
         if ($null -eq $oldGoArch) { Remove-Item Env:GOARCH -ErrorAction SilentlyContinue } else { $env:GOARCH = $oldGoArch }
@@ -211,7 +211,13 @@ try {
         if ($null -ne $frontendTemp -and (Test-Path -LiteralPath $frontendTemp)) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }
         $frontendTemp = $null
     }
-    Invoke-Logged "Dashboard generated assets check" "git" @("diff", "--exit-code", "--", "internal/dashboard/dist")
+    $dashboardAssetIndex = Join-Path $root "internal/dashboard/dist/index.html"
+    if (-not (Test-Path -LiteralPath $dashboardAssetIndex)) {
+        throw "Dashboard build did not produce internal/dashboard/dist/index.html"
+    }
+    if ((Get-Item -LiteralPath $dashboardAssetIndex).Length -eq 0) {
+        throw "Dashboard build produced an empty internal/dashboard/dist/index.html"
+    }
 
     Invoke-Logged "Go module verification" "go" @("mod", "verify")
     Invoke-Logged "Windows go vet" "go" @("vet", "./...")

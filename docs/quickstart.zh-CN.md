@@ -49,15 +49,27 @@
 
 在源码目录构建：
 
+下面两条命令可在 PowerShell 或 POSIX shell 中执行：
+
+```text
+npm --prefix web/dashboard ci
+npm --prefix web/dashboard run build
+```
+
 ```powershell
 # Windows
-go build -o asterferry.exe ./cmd/asterferry
+go build -tags=dashboard_assets -o asterferry.exe ./cmd/asterferry
 ```
 
 ```sh
 # Linux / WSL
-go build -o asterferry ./cmd/asterferry
+go build -tags=dashboard_assets -o asterferry ./cmd/asterferry
 ```
+
+Dashboard 构建会把生成产物写入 `internal/dashboard/dist/`。该目录已被
+Git 忽略，不应手工修改或提交；发布和 Docker 构建会在带
+`dashboard_assets` 标签的编译前自动生成并嵌入它。只做后端开发时仍可直
+接执行普通的 `go build`，此时二进制会提供一个小型 fallback 页面，而不是完整 Dashboard。
 
 把二进制放到 C、B、A 三台机器，并确保三台机器运行同一版本。当前版本只支持 AFDP/2；AFDP/1 与 AFDP/2 不兼容。
 

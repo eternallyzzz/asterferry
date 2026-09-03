@@ -3,6 +3,7 @@
 *.err
 tmp/
 /dist/
+internal/dashboard/dist/
 node_modules/
 .idea/
 .vscode/

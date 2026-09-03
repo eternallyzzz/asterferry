@@ -204,14 +204,23 @@ command and mounts only its bootstrap/cache directories; its Gateway or Agent
 behavior is selected later by the Node Spec. The Dashboard is static and can
 be disabled in Controller JSON.
 
+Plain Go tests and `go build` use a small source-level fallback page, so backend
+development does not require Node.js. A deployable single binary with the full
+Dashboard is built after generating the ignored assets with
+`-tags=dashboard_assets`. `internal/dashboard/dist/` is generated output: do not
+hand-edit or commit it; Docker and release workflows generate it before the
+tagged build.
+
 Run the core verification suite:
 
 ```powershell
 go test ./...
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 -checks=all,-SA1019 ./...
+npm --prefix web/dashboard ci
 npm --prefix web/dashboard test
 npm --prefix web/dashboard run build
+go build -tags=dashboard_assets ./cmd/asterferry
 go test -tags=integration -count=1 -timeout=5m ./internal/integration
 ```
 

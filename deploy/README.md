@@ -130,11 +130,18 @@ ephemeral, audited and bounded by TTL. See the bilingual
 [runtime operations guide](../docs/operations.en.md) and
 [中文运维指南](../docs/operations.zh-CN.md).
 
+Generated Dashboard assets are intentionally not committed. A source-built
+single binary must generate `internal/dashboard/dist/` first and use the
+`dashboard_assets` build tag; Docker and GoReleaser perform these steps in their
+release pipelines.
+
 ```sh
 go test ./...
 go vet ./...
+npm --prefix web/dashboard ci
 npm --prefix web/dashboard test -- --run
 npm --prefix web/dashboard run build
+go build -tags=dashboard_assets ./cmd/asterferry
 helm lint deploy/helm/asterferry-controller deploy/helm/asterferry-node
 docker compose -f deploy/docker/compose.yaml config
 ```

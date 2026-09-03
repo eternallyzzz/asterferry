@@ -26,7 +26,7 @@ RUN go mod download
 COPY . .
 COPY --from=dashboard-build /src/internal/dashboard/dist ./internal/dashboard/dist
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-	go build -trimpath -ldflags="-s -w -X asterferry/internal/buildinfo.Version=${VERSION} -X asterferry/internal/buildinfo.Commit=${COMMIT} -X asterferry/internal/buildinfo.BuildDate=${BUILD_DATE}" -o /out/asterferry ./cmd/asterferry
+	go build -tags=dashboard_assets -trimpath -ldflags="-s -w -X asterferry/internal/buildinfo.Version=${VERSION} -X asterferry/internal/buildinfo.Commit=${COMMIT} -X asterferry/internal/buildinfo.BuildDate=${BUILD_DATE}" -o /out/asterferry ./cmd/asterferry
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 

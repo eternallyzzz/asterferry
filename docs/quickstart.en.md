@@ -49,15 +49,28 @@ Use a release package or build from source. Building from source requires Go `1.
 
 Build from the repository:
 
+Run these two commands from either PowerShell or a POSIX shell:
+
+```text
+npm --prefix web/dashboard ci
+npm --prefix web/dashboard run build
+```
+
 ```powershell
 # Windows
-go build -o asterferry.exe ./cmd/asterferry
+go build -tags=dashboard_assets -o asterferry.exe ./cmd/asterferry
 ```
 
 ```sh
 # Linux / WSL
-go build -o asterferry ./cmd/asterferry
+go build -tags=dashboard_assets -o asterferry ./cmd/asterferry
 ```
+
+The Dashboard build writes generated assets to `internal/dashboard/dist/`.
+That directory is ignored by Git and must not be edited or committed manually;
+release and Docker builds generate it before embedding it into the binary. A
+plain `go build` is also supported for backend-only development and serves a
+small fallback page instead of the full Dashboard.
 
 Install the binary on C, B and A, and run the same release version on all three hosts. The current release supports AFDP/2 only; AFDP/1 and AFDP/2 are not wire-compatible.
 

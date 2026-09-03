@@ -100,12 +100,18 @@ try {
     if ($null -eq $oldDashboardOut) { Remove-Item Env:ASTERFERRY_DASHBOARD_OUT -ErrorAction SilentlyContinue } else { $env:ASTERFERRY_DASHBOARD_OUT = $oldDashboardOut }
     if (Test-Path -LiteralPath $frontendTemp) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }
 }
-Invoke-Checked "Generated dashboard check" "git" @("diff", "--exit-code", "--", "internal/dashboard/dist")
+$dashboardAssetIndex = Join-Path $root "internal/dashboard/dist/index.html"
+if (-not (Test-Path -LiteralPath $dashboardAssetIndex)) {
+    throw "Dashboard build did not produce internal/dashboard/dist/index.html"
+}
+if ((Get-Item -LiteralPath $dashboardAssetIndex).Length -eq 0) {
+    throw "Dashboard build produced an empty internal/dashboard/dist/index.html"
+}
 Invoke-Checked "Go module verification" "go" @("mod", "verify")
 
 $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferry/internal/buildinfo.Commit=release-check -X asterferry/internal/buildinfo.BuildDate=release-check"
 $binaryPath = Join-Path $output "asterferry.exe"
-Invoke-Checked "Windows amd64 binary" "go" @("build", "-trimpath", "-ldflags=$ldflags", "-o", $binaryPath, "./cmd/asterferry")
+Invoke-Checked "Windows amd64 binary" "go" @("build", "-tags=dashboard_assets", "-trimpath", "-ldflags=$ldflags", "-o", $binaryPath, "./cmd/asterferry")
 $versionOutput = (& $binaryPath version | Out-String)
 if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: AFDP/2 \+ control/2") {
 	throw "Release binary did not report version $Version and AFDP/2: $versionOutput"
