@@ -10,6 +10,7 @@ import {
   parseLabels,
   parseObject,
   prettyJson,
+  redactSensitiveJson,
   splitList,
   stateLabel,
   userRoleLabel,
@@ -84,6 +85,15 @@ describe("json helpers", () => {
     expect(parseObject('{"a":1}', "spec")).toEqual({ a: 1 });
     expect(() => parseObject("{oops", "spec")).toThrow("有效 JSON");
     expect(() => parseObject("[1]", "spec")).toThrow("JSON 对象");
+  });
+
+  it("redacts nested obfuscation material without mutating the source", () => {
+    const source = { gateway: { obfuscation: { key_ciphertext: "cipher", key_id: "id" } }, assignments: [{ previous_key: "secret" }] };
+    const redacted = redactSensitiveJson(source) as { gateway: { obfuscation: { key_ciphertext: string; key_id: string } }; assignments: Array<{ previous_key: string }> };
+    expect(redacted.gateway.obfuscation.key_ciphertext).toBe("[redacted]");
+    expect(redacted.gateway.obfuscation.key_id).toBe("id");
+    expect(redacted.assignments[0].previous_key).toBe("[redacted]");
+    expect(source.gateway.obfuscation.key_ciphertext).toBe("cipher");
   });
 
   it("parses labels with string values only", () => {

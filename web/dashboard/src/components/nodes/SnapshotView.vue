@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import EmptyState from "../ui/EmptyState.vue";
 import Spinner from "../ui/Spinner.vue";
 import { ControllerAPIError, getSnapshot, type ControllerSnapshot } from "../../controller-api";
 import { useNotify } from "../../composables/useNotify";
-import { describeError, prettyJson } from "../../utils/format";
+import { describeError, prettyJson, redactSensitiveJson } from "../../utils/format";
 
 const props = defineProps<{ nodeId: string }>();
 
@@ -12,6 +12,8 @@ const notify = useNotify();
 const loading = ref(true);
 const absent = ref(false);
 const snapshot = ref<ControllerSnapshot | null>(null);
+
+const displaySnapshot = computed(() => snapshot.value ? redactSensitiveJson(snapshot.value) : null);
 
 onMounted(async () => {
   try {
@@ -34,7 +36,7 @@ onMounted(async () => {
       <div><dt>Schema</dt><dd>{{ snapshot.schema_version }}</dd></div>
       <div class="span-2"><dt>Checksum (SHA-256)</dt><dd><code>{{ snapshot.checksum }}</code></dd></div>
     </dl>
-    <pre class="snapshot-json mono">{{ prettyJson(snapshot) }}</pre>
+    <pre class="snapshot-json mono">{{ prettyJson(displaySnapshot) }}</pre>
   </div>
 </template>
 

@@ -46,6 +46,7 @@ function makeNode(id: string): ControllerNode {
     labels: {},
     enabled: true,
     certificate_state: "active",
+    certificate_serial: `serial-${id}`,
     revision: 1,
     created_at: "2026-08-31T00:00:00Z",
     updated_at: "2026-08-31T00:00:00Z",
@@ -88,6 +89,16 @@ describe("NodeDetailDrawer", () => {
     });
 
     expect(buttonFor(wrapper, "观测").classes()).toContain("active");
+    wrapper.unmount();
+  });
+
+  it("shows the certificate serial as read-only node metadata", async () => {
+    const node = makeNode("gw-serial");
+    apiMocks.getNodeSpec.mockResolvedValue({ node_id: node.id, kind: "gateway", gateway: makeSpec(node.id), revision: 1 });
+    const wrapper = mountDrawer(node);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("serial-gw-serial");
     wrapper.unmount();
   });
 

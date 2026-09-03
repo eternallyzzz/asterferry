@@ -467,6 +467,13 @@ paths:
         - { name: protocol, in: query, schema: { type: string, enum: [tcp, udp, quic] } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
       responses: { '200': { description: Current and recently closed connection metadata for one Node } }
+  /nodes/{nodeId}/runtime/connections/{connectionId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        '200': { description: One current or recently closed connection metadata record, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeConnection' } } } }
   /nodes/{nodeId}/runtime/connections/{connectionId}/actions:
     parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string } }]
     post:
@@ -592,6 +599,34 @@ components:
     Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
     EnrollmentTokenRequest: { type: object, properties: { ttl_seconds: { type: integer, minimum: 1, maximum: 900 } } }
     APITokenRequest: { type: object, required: [name], properties: { name: { type: string }, expires_at: { type: string, format: date-time } } }
+    RuntimeRateLimit: { type: object, required: [direction, bytes_per_second, burst_bytes, expires_at], properties: { direction: { type: string, enum: [in, out, both] }, bytes_per_second: { type: integer, format: int64 }, burst_bytes: { type: integer, format: int64 }, expires_at: { type: string, format: date-time } } }
+    RuntimeConnection:
+      type: object
+      required: [id, type, node_id, protocol, started_at, last_activity_at, state, bytes_in, bytes_out, rate_in_bps, rate_out_bps]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [session, tcp, udp_flow, egress] }
+        node_id: { type: string }
+        peer_node_id: { type: string }
+        gateway_id: { type: string }
+        agent_id: { type: string }
+        assignment_id: { type: string }
+        service_id: { type: string }
+        protocol: { type: string, enum: [tcp, udp, quic] }
+        source_ip: { type: string }
+        source_port: { type: integer, minimum: 0, maximum: 65535 }
+        target: { type: string }
+        parent_session_id: { type: string }
+        started_at: { type: string, format: date-time }
+        last_activity_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        state: { type: string, enum: [active, closed, unknown] }
+        close_reason: { type: string }
+        bytes_in: { type: integer, format: int64, minimum: 0 }
+        bytes_out: { type: integer, format: int64, minimum: 0 }
+        rate_in_bps: { type: number, format: double, minimum: 0 }
+        rate_out_bps: { type: number, format: double, minimum: 0 }
+        limit: { $ref: '#/components/schemas/RuntimeRateLimit' }
     RuntimeAction:
       type: object
       required: [action]

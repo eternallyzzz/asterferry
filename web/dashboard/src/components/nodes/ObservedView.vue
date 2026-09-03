@@ -156,7 +156,12 @@ async function clearLimit(connection: RuntimeConnection) {
     </dl>
 
     <div v-if="state.last_error" class="last-error">
-      <span class="error-title">最近错误 · {{ state.last_error.code }}<template v-if="state.last_error.path"> · {{ state.last_error.path }}</template></span>
+      <span class="error-title">
+        最近错误 · {{ state.last_error.code }}<template v-if="state.last_error.path"> · {{ state.last_error.path }}</template>
+        <StatusPill class="error-retryability" :tone="state.last_error.retryable ? 'warn' : 'bad'">
+          {{ state.last_error.retryable ? "可重试" : "需处理" }}
+        </StatusPill>
+      </span>
       <p>{{ state.last_error.message }}</p>
     </div>
 
@@ -309,10 +314,15 @@ async function clearLimit(connection: RuntimeConnection) {
   background: var(--af-red-soft);
 }
 .error-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   color: var(--af-red);
   font-size: 12px;
   font-weight: 600;
 }
+.error-retryability { font-size: 10px; }
 .last-error p {
   margin: 4px 0 0;
   color: var(--af-muted);

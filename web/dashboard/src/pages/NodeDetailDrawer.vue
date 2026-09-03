@@ -17,8 +17,10 @@ import {
   getNodeSpec,
   nodeAction,
 	putNodeSpec,
+	type ControllerAgentSpec,
+	type ControllerGatewaySpecInput,
 	type ControllerNode,
-	type ControllerNodeSpec,
+	type ControllerNodeSpecInput,
 	type EgressPolicy,
 	type NodeBootstrapResponse,
   type NodeSpecKind,
@@ -29,7 +31,11 @@ import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
 import { certificateTone, describeError, formatTime, newIdempotencyKey, parseObject, prettyJson } from "../utils/format";
 
-type SpecDocument = Record<string, unknown>;
+// The editor intentionally keeps the decoded JSON document intact. The type
+// assertion at save time is the boundary where arbitrary editor JSON enters
+// the strongly typed API model, so protected obfuscation fields survive a
+// read/edit/write round trip without being copied into operational summaries.
+type SpecDocument = ControllerGatewaySpecInput | ControllerAgentSpec;
 type Section = "info" | "spec" | "egress" | "proxies" | "routes" | "observed" | "snapshot";
 
 const props = defineProps<{ open: boolean; node: ControllerNode | null }>();
@@ -82,8 +88,14 @@ const sections = computed(() => {
 });
 
 const specEgress = computed(() => specDoc.value?.egress as EgressPolicy | undefined);
-const specProxies = computed(() => (Array.isArray(specDoc.value?.proxies) ? (specDoc.value?.proxies as ProxySpec[]) : []));
-const specRoutes = computed(() => (Array.isArray(specDoc.value?.routes) ? (specDoc.value?.routes as RouteRule[]) : []));
+const specProxies = computed(() => {
+  const document = specDoc.value;
+  return document && "proxies" in document && Array.isArray(document.proxies) ? document.proxies as ProxySpec[] : [];
+});
+const specRoutes = computed(() => {
+  const document = specDoc.value;
+  return document && "routes" in document && Array.isArray(document.routes) ? document.routes as RouteRule[] : [];
+});
 
 function defaultSpec(node: ControllerNode, kind: NodeSpecKind): SpecDocument {
   if (kind === "gateway") {
@@ -134,7 +146,7 @@ async function loadSpec(node: ControllerNode) {
     if (requestVersion !== specRequestVersion || props.node?.id !== node.id) return;
     specKind.value = result.kind;
     selectedKind.value = result.kind;
-    const doc = (result.kind === "gateway" ? result.gateway : result.agent) as SpecDocument | undefined;
+    const doc = result.kind === "gateway" ? result.gateway : result.agent;
     specDoc.value = doc;
     specRevision.value = result.revision;
     specText.value = prettyJson(doc ?? defaultSpec(node, result.kind));
@@ -235,13 +247,13 @@ async function saveSpec() {
   specSaving.value = true;
   specError.value = "";
   try {
-    const document = parseObject(specText.value, "规格");
+    const document = parseObject(specText.value, "规格") as SpecDocument;
     document.node_id = props.node.id;
-    const envelope: ControllerNodeSpec = selectedKind.value === "gateway"
-      ? { node_id: props.node.id, kind: "gateway", gateway: document }
-      : { node_id: props.node.id, kind: "agent", agent: document };
+    const envelope: ControllerNodeSpecInput = selectedKind.value === "gateway"
+      ? { node_id: props.node.id, kind: "gateway", gateway: document as ControllerGatewaySpecInput }
+      : { node_id: props.node.id, kind: "agent", agent: document as ControllerAgentSpec };
     const result = await putNodeSpec(props.node.id, envelope, specRevision.value, undefined, newIdempotencyKey());
-    const doc = (result.kind === "gateway" ? result.gateway : result.agent) as SpecDocument | undefined;
+    const doc = result.kind === "gateway" ? result.gateway : result.agent;
     specKind.value = result.kind;
     selectedKind.value = result.kind;
     specDoc.value = doc;
@@ -306,6 +318,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             <div><dt>Node ID</dt><dd><code>{{ node.id }}</code></dd></div>
             <div><dt>行为规格</dt><dd>{{ specKindLabel(specKind) }}</dd></div>
             <div><dt>证书</dt><dd><StatusPill :tone="certificateTone(node.certificate_state)">{{ node.certificate_state }}</StatusPill></dd></div>
+            <div><dt>证书序列号</dt><dd><code>{{ node.certificate_serial || "—" }}</code></dd></div>
             <div><dt>状态</dt><dd><StatusPill :tone="node.enabled ? 'good' : 'neutral'">{{ node.enabled ? "启用" : "停用" }}</StatusPill></dd></div>
             <div><dt>Revision</dt><dd>{{ node.revision }}</dd></div>
             <div><dt>标签</dt><dd><code class="labels-code">{{ prettyJson(node.labels || {}) }}</code></dd></div>

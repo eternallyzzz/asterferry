@@ -43,6 +43,21 @@ export function prettyJson(value: unknown): string {
   }
 }
 
+const sensitiveJsonKeys = new Set(["key", "previous_key", "key_ciphertext", "previous_key_ciphertext"]);
+
+// Keep secret material out of operational JSON viewers without changing the
+// object used for API writes. This is deliberately recursive because a
+// snapshot can contain obfuscation policies in both node and assignment
+// branches.
+export function redactSensitiveJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactSensitiveJson(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    sensitiveJsonKeys.has(key) ? "[redacted]" : redactSensitiveJson(item),
+  ]));
+}
+
 export function parseObject(value: string, field: string): Record<string, unknown> {
   let parsed: unknown;
   try {

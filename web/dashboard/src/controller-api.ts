@@ -21,27 +21,212 @@ export interface ControllerNode {
   labels?: Record<string, string>;
   enabled: boolean;
   certificate_state: string;
+  certificate_serial?: string;
   revision: number;
   created_at: string;
   updated_at: string;
 }
 
 export type CreateNodeInput = Pick<ControllerNode, "id" | "name" | "labels" | "enabled">;
+export interface ControllerNodePatch {
+  name?: string;
+  labels?: Record<string, string>;
+  enabled?: boolean;
+  certificate_state?: string;
+  certificate_serial?: string;
+}
 
 export type NodeSpecKind = "gateway" | "agent";
-export interface ControllerNodeSpec {
+export interface ControllerSelector {
+  match_labels?: Record<string, string>;
+}
+
+export interface ControllerListener {
+  protocol: string;
+  bind: string;
+  port: number;
+  enabled: boolean;
+}
+
+export interface ControllerCapacity {
+  max_agents: number;
+  max_connections: number;
+  max_services: number;
+}
+
+export interface ControllerPortRange {
+  min: number;
+  max: number;
+}
+
+export interface ControllerPortPool {
+  tcp?: ControllerPortRange[];
+  udp?: ControllerPortRange[];
+}
+
+export interface ControllerTransportPolicy {
+  alpn: string;
+  max_streams: number;
+  max_frame_bytes: number;
+  max_datagram_bytes: number;
+  handshake_timeout_seconds: number;
+  idle_timeout_seconds: number;
+}
+
+// Read models expose only safe obfuscation metadata. Key material is limited
+// to the explicit write/editor type so resource summaries cannot render it.
+export interface ControllerObfuscationMetadata {
+  mode: string;
+  key_id?: string;
+  previous_key_id?: string;
+  max_padding_bytes: number;
+  handshake_shaping: boolean;
+}
+
+export interface ControllerObfuscationWrite extends ControllerObfuscationMetadata {
+  key?: string;
+  previous_key?: string;
+  key_ciphertext?: string;
+  previous_key_ciphertext?: string;
+}
+
+export interface ControllerProxySpec {
+  id: string;
+  protocol: string;
+  bind: string;
+  route: string;
+  enabled: boolean;
+}
+
+export interface ControllerRouteRule {
+  name: string;
+  cidrs?: string[];
+  domains?: string[];
+  geoip?: string[];
+  destination: string;
+  enabled: boolean;
+}
+
+export interface ControllerAgentLimits {
+  max_connections: number;
+  max_streams: number;
+  max_buffer_bytes: number;
+}
+
+export interface ControllerLoggingPolicy {
+  level: string;
+  format: string;
+}
+
+export interface ControllerGatewaySpec {
   node_id: string;
-  kind: NodeSpecKind;
-  gateway?: Record<string, unknown>;
-  agent?: Record<string, unknown>;
+  public_endpoints: string[];
+  listeners?: ControllerListener[];
+  labels?: Record<string, string>;
+  capacity: ControllerCapacity;
+  port_pool: ControllerPortPool;
+  transport: ControllerTransportPolicy;
+  obfuscation: ControllerObfuscationMetadata;
+  egress: EgressPolicy;
+  revision?: number;
+}
+
+export type ControllerGatewaySpecInput = Omit<ControllerGatewaySpec, "obfuscation"> & {
+  obfuscation: ControllerObfuscationWrite;
+};
+
+export interface ControllerAgentSpec {
+  node_id: string;
+  gateway_selector: ControllerSelector;
+  proxies?: ControllerProxySpec[];
+  routes?: ControllerRouteRule[];
+  limits: ControllerAgentLimits;
+  egress: EgressPolicy;
+  logging: ControllerLoggingPolicy;
+  revision?: number;
+}
+
+export type ControllerGatewayNodeSpec = {
+  node_id: string;
+  kind: "gateway";
+  gateway: ControllerGatewaySpec;
   revision?: number;
   updated_at?: string;
+};
+
+export type ControllerAgentNodeSpec = {
+  node_id: string;
+  kind: "agent";
+  agent: ControllerAgentSpec;
+  revision?: number;
+  updated_at?: string;
+};
+
+export type ControllerNodeSpec = ControllerGatewayNodeSpec | ControllerAgentNodeSpec;
+
+export type ControllerGatewayNodeSpecInput = {
+  node_id: string;
+  kind: "gateway";
+  gateway: ControllerGatewaySpecInput;
+};
+
+export type ControllerAgentNodeSpecInput = {
+  node_id: string;
+  kind: "agent";
+  agent: ControllerAgentSpec;
+};
+
+export type ControllerNodeSpecInput = ControllerGatewayNodeSpecInput | ControllerAgentNodeSpecInput;
+
+export interface ControllerService {
+  id: string;
+  agent_id: string;
+  protocol: "tcp" | "udp";
+  local_target: string;
+  public_bind: string;
+  public_port: number;
+  gateway_selector?: ControllerSelector;
+  enabled: boolean;
+  revision: number;
+  updated_at: string;
 }
+
+export type ControllerServiceInput = Omit<ControllerService, "revision" | "updated_at">;
+
+export interface ControllerAssignment {
+  id: string;
+  gateway_id: string;
+  agent_id: string;
+  service_ids: string[];
+  bindings?: Array<{ service_id: string; protocol: "tcp" | "udp"; bind: string; port: number }>;
+  generation: number;
+  revision?: number;
+  state: string;
+  public_endpoint?: string;
+  obfuscation?: ControllerObfuscationMetadata;
+  updated_at: string;
+}
+
+// Assignments are scheduler-owned operational records. Their obfuscation
+// material is intentionally not part of the Dashboard write model; key
+// rotation is performed through the node spec editor.
+export type ControllerAssignmentInput = Omit<ControllerAssignment, "revision" | "updated_at" | "obfuscation">;
+
+export interface ControllerApplyError {
+  code: string;
+  path?: string;
+  message: string;
+  retryable: boolean;
+}
+
+// Legacy names remain exported for the existing agent subresource components.
+export interface ProxySpec extends ControllerProxySpec {}
+export interface RouteRule extends ControllerRouteRule {}
 
 export interface NodeBootstrapRequest {
   platform: "linux" | "windows";
   arch: "amd64" | "arm64";
-  spec?: ControllerNodeSpec;
+  spec?: ControllerNodeSpecInput;
 }
 
 export interface NodeInstallationRequest extends NodeBootstrapRequest {
@@ -72,30 +257,6 @@ export interface PendingNodeInstallation {
   arch: "amd64" | "arm64";
   expires_at: string;
   created_at: string;
-}
-
-export interface ControllerService {
-  id: string;
-  agent_id: string;
-  protocol: "tcp" | "udp";
-  local_target: string;
-  public_bind: string;
-  public_port: number;
-  gateway_selector?: { match_labels?: Record<string, string> };
-  enabled: boolean;
-  revision: number;
-}
-
-export interface ControllerAssignment {
-  id: string;
-  gateway_id: string;
-  agent_id: string;
-  service_ids: string[];
-  bindings?: Array<{ service_id: string; protocol: "tcp" | "udp"; bind: string; port: number }>;
-  generation: number;
-  revision?: number;
-  state: string;
-  public_endpoint?: string;
 }
 
 export interface ControllerAuditRecord {
@@ -183,7 +344,7 @@ export function currentUser(token?: string): Promise<ControllerUser> { return re
 export function listNodes(kind?: NodeSpecKind, token?: string): Promise<{ items: ControllerNode[] }> { return request(`/nodes${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`, {}, token); }
 export function getNode(id: string, token?: string): Promise<ControllerNode> { return request<ControllerNode>(`/nodes/${encodeURIComponent(id)}`, {}, token); }
 export function createNode(node: CreateNodeInput, token?: string, idempotencyKey?: string): Promise<ControllerNode> { return request<ControllerNode>("/nodes", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(node) }, token); }
-export function updateNode(id: string, node: Partial<ControllerNode>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerNode> { return request<ControllerNode>(`/nodes/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(node) }, token); }
+export function updateNode(id: string, node: ControllerNodePatch, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerNode> { return request<ControllerNode>(`/nodes/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(node) }, token); }
 export function deleteNode(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 export function bootstrapNode(id: string, input: NodeBootstrapRequest, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>(`/nodes/${encodeURIComponent(id)}/bootstrap`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
 export function listNodeInstallations(token?: string): Promise<{ items: PendingNodeInstallation[] }> { return request<{ items: PendingNodeInstallation[] }>("/node-installations", {}, token); }
@@ -192,19 +353,19 @@ export function reissueNodeInstallation(id: string, token?: string, idempotencyK
 export function deleteNodeInstallation(id: string, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/node-installations/${encodeURIComponent(id)}`, { method: "DELETE", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function nodeAction(id: string, action: "drain" | "reconnect" | "resync", token?: string, idempotencyKey?: string): Promise<{ state: string }> { return request<{ state: string }>(`/nodes/${encodeURIComponent(id)}/actions/${action}`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function getNodeSpec(id: string, token?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, {}, token); }
-export function putNodeSpec(id: string, spec: ControllerNodeSpec, revision?: number, token?: string, idempotencyKey?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "PUT", headers: { "Content-Type": "application/json", ...(revision !== undefined ? { "If-Match": String(revision) } : {}), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
+export function putNodeSpec(id: string, spec: ControllerNodeSpecInput, revision?: number, token?: string, idempotencyKey?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "PUT", headers: { "Content-Type": "application/json", ...(revision !== undefined ? { "If-Match": String(revision) } : {}), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
 export function deleteNodeSpec(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 export function getNodeEgress(id: string, token?: string): Promise<EgressPolicy> { return request(`/nodes/${encodeURIComponent(id)}/spec/egress`, {}, token); }
 export function updateNodeEgress(id: string, policy: EgressPolicy, revision: number, token?: string, idempotencyKey?: string): Promise<EgressPolicy> { return request<EgressPolicy>(`/nodes/${encodeURIComponent(id)}/spec/egress`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(policy) }, token); }
 export function scheduleNode(id: string, token?: string, idempotencyKey?: string): Promise<{ assignments: ControllerAssignment[] }> { return request<{ assignments: ControllerAssignment[] }>(`/nodes/${encodeURIComponent(id)}/actions/schedule`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function listServices(agentID?: string, token?: string): Promise<{ items: ControllerService[] }> { return request(`/services${agentID ? `?agent_id=${encodeURIComponent(agentID)}` : ""}`, {}, token); }
-export function createService(service: Omit<ControllerService, "revision">, token?: string, idempotencyKey?: string): Promise<ControllerService> { return request<ControllerService>("/services", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(service) }, token); }
-export function updateService(id: string, service: Partial<ControllerService>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerService> { return request<ControllerService>(`/services/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(service) }, token); }
+export function createService(service: ControllerServiceInput, token?: string, idempotencyKey?: string): Promise<ControllerService> { return request<ControllerService>("/services", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(service) }, token); }
+export function updateService(id: string, service: Partial<ControllerServiceInput>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerService> { return request<ControllerService>(`/services/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(service) }, token); }
 export function deleteService(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/services/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 export function listAssignments(token?: string): Promise<{ items: ControllerAssignment[] }> { return request<{ items: ControllerAssignment[] }>("/assignments", {}, token); }
-export function createAssignment(assignment: Omit<ControllerAssignment, "revision">, token?: string, idempotencyKey?: string): Promise<ControllerAssignment> { return request<ControllerAssignment>("/assignments", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(assignment) }, token); }
+export function createAssignment(assignment: ControllerAssignmentInput, token?: string, idempotencyKey?: string): Promise<ControllerAssignment> { return request<ControllerAssignment>("/assignments", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(assignment) }, token); }
 export function getAssignment(id: string, token?: string): Promise<ControllerAssignment> { return request<ControllerAssignment>(`/assignments/${encodeURIComponent(id)}`, {}, token); }
-export function updateAssignment(id: string, assignment: Partial<ControllerAssignment>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerAssignment> { return request<ControllerAssignment>(`/assignments/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(assignment) }, token); }
+export function updateAssignment(id: string, assignment: Partial<ControllerAssignmentInput>, revision: number, token?: string, idempotencyKey?: string): Promise<ControllerAssignment> { return request<ControllerAssignment>(`/assignments/${encodeURIComponent(id)}`, { method: "PUT", headers: { "Content-Type": "application/json", "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(assignment) }, token); }
 export function deleteAssignment(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/assignments/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }
 export function listAudit(limit = 100, token?: string): Promise<{ items: ControllerAuditRecord[] }> { return request<{ items: ControllerAuditRecord[] }>(`/audit?limit=${limit}`, {}, token); }
 // 与后端 EnrollmentToken 对齐：used_at 在未使用/未吊销时整个字段被省略（omitempty）。
@@ -265,7 +426,7 @@ export interface ControllerObservedState {
   applied_generation: number;
   healthy: boolean;
   degraded: boolean;
-  last_error?: { code: string; path: string; message: string };
+  last_error?: ControllerApplyError;
   sessions?: ControllerSessionSummary[];
   listeners?: ControllerListenerState[];
   metrics?: Record<string, number>;
@@ -277,10 +438,10 @@ export interface ControllerSnapshot {
   node_id: string;
   generation: number;
   checksum: string;
-  gateway?: unknown;
-  agent?: unknown;
-  services?: unknown[];
-  assignments?: unknown[];
+  gateway?: ControllerGatewaySpec;
+  agent?: ControllerAgentSpec;
+  services?: ControllerService[];
+  assignments?: ControllerAssignment[];
 }
 
 export function getObserved(id: string, token?: string): Promise<ControllerObservedState> { return request<ControllerObservedState>(`/nodes/${encodeURIComponent(id)}/observed`, {}, token); }
@@ -303,14 +464,6 @@ export interface EgressPolicy {
 // ---------------------------------------------------------------------------
 // Node Agent proxies / routes. These are CAS subresources of the unified
 // node spec and are available only when the node's persisted kind is agent.
-
-export interface ProxySpec {
-  id: string;
-  protocol: string;
-  bind: string;
-  route: string;
-  enabled: boolean;
-}
 
 export interface RuntimeRateLimit {
   direction: "in" | "out" | "both";
@@ -384,6 +537,7 @@ export function listRuntimeConnections(nodeID?: string, query = "", token?: stri
   return request<{ items: RuntimeConnection[] }>(`/runtime/connections${suffix}`, {}, token);
 }
 export function getNodeRuntimeConnections(nodeID: string, token?: string): Promise<{ items: RuntimeConnection[] }> { return listRuntimeConnections(nodeID, "limit=500", token); }
+export function getNodeRuntimeConnection(nodeID: string, connectionID: string, token?: string): Promise<RuntimeConnection> { return request<RuntimeConnection>(`/nodes/${encodeURIComponent(nodeID)}/runtime/connections/${encodeURIComponent(connectionID)}`, {}, token); }
 export function listRuntimeTraffic(nodeID?: string, token?: string): Promise<{ items: RuntimeTrafficRollup[] }> { return request(`/runtime/traffic${nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : ""}`, {}, token); }
 export function listRuntimeEvents(nodeID?: string, token?: string, limit = 100): Promise<{ items: RuntimeEventRecord[] }> { const params = new URLSearchParams({ limit: String(limit) }); if (nodeID) params.set("node_id", nodeID); return request(`/runtime/events?${params.toString()}`, {}, token); }
 export function getRuntimeSettings(token?: string): Promise<RuntimeSettings> { return request<RuntimeSettings>("/runtime/settings", {}, token); }
@@ -399,15 +553,6 @@ export interface RuntimeActionInput {
 export function runtimeAction(nodeID: string, input: RuntimeActionInput, token?: string, idempotencyKey?: string): Promise<{ node_id: string; action: string; state: string }> { return request(`/nodes/${encodeURIComponent(nodeID)}/runtime/actions`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
 export function runtimeConnectionAction(nodeID: string, connectionID: string, input: Omit<RuntimeActionInput, "selector">, token?: string, idempotencyKey?: string): Promise<{ node_id: string; action: string; state: string }> { return request(`/nodes/${encodeURIComponent(nodeID)}/runtime/connections/${encodeURIComponent(connectionID)}/actions`, { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
 export function runtimeStreamURL(nodeID?: string): string { return `/api/v1/runtime/stream${nodeID ? `?node_id=${encodeURIComponent(nodeID)}` : ""}`; }
-
-export interface RouteRule {
-  name: string;
-  cidrs?: string[];
-  domains?: string[];
-  geoip?: string[];
-  destination: string;
-  enabled: boolean;
-}
 
 export async function listNodeProxies(id: string, token?: string): Promise<{ items: ProxySpec[] }> {
   const result = await request<{ items: ProxySpec[] | null }>(`/nodes/${encodeURIComponent(id)}/spec/proxies`, {}, token);
