@@ -1,7 +1,7 @@
 # Stable release runbook
 
-This is the v2.0 release gate for a single Controller / multi-Node
-self-hosted deployment. It is designed for a solo maintainer, so evidence is
+This is the v2.0 release gate for a single- or active/standby Controller /
+multi-Node self-hosted deployment. It is designed for a solo maintainer, so evidence is
 automated and every exception is recorded in the release issue.
 
 ## Before the RC
@@ -19,14 +19,19 @@ automated and every exception is recorded in the release issue.
    state-machine suite, PostgreSQL integration, race, vet,
    staticcheck, govulncheck, Dashboard lint/test/build on the release and
    Node.js 22 compatibility lanes, OpenAPI generation check, Helm lint/render
-   and the AFDP/2 end-to-end test.
+   and the AFDP/2 end-to-end test. Include the PostgreSQL lease/fencing,
+   persisted-session and two-replica failover tests.
 5. Run AFDP/control-wire fuzz smoke and the protocol benchmark suite. On a PR,
    the same-runner base/head comparison blocks a default regression above 10%.
 6. Build and smoke-test Linux amd64/arm64, Windows amd64, Docker amd64 and
    both Helm charts. WSL is compatibility-tested separately; it is not an
    official support promise.
 7. Test both SQLite and PostgreSQL from fresh initialization, backup, restore,
-   restart and Node reconnect. Record the last verified backup timestamp.
+   restart and Node reconnect. For HA, run exactly two PostgreSQL-backed
+   Controllers behind the external routing layer, stop the leader, verify the
+   standby becomes ready within 30 seconds, and verify Nodes reconnect. Confirm
+   restore invalidates browser sessions and resets the lease. Record the last
+   verified backup timestamp.
 
 ## RC and soak
 
@@ -34,10 +39,11 @@ Create a release candidate tag such as `v2.0.0-rc.1`. The tag workflow marks
 it prerelease and publishes immutable artifacts without changing the stable
 source version. Operate the candidate for at least seven calendar days with:
 
-- Controller restart and graceful shutdown checks;
+  - Controller restart, leader loss and graceful shutdown checks;
 - Node reconnect, certificate rotation and offline last-known-good checks;
 - TCP, UDP, reverse-TCP, proxy and egress smoke traffic;
-- metrics scrape from the explicitly exposed metrics listener;
+  - metrics scrape from the explicitly exposed metrics listener;
+  - active/standby readiness routing and the <=30-second failover target;
 - backup/restore verification and review of error, readiness and resource
   metrics; and
 - no unresolved P0/P1 security, data-loss, protocol, or release-integrity

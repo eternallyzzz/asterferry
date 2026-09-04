@@ -115,8 +115,9 @@ tokens, fixed Viewer/Operator/Admin roles, unified Node and Node Spec resources,
 typed Gateway/Agent behavior documents, services, assignments, enrollment
 tokens, runtime actions, observed state, events and audit queries. The
 management HTTPS endpoint policy is intentional: `/healthz` is anonymous;
-`/readyz` and management `/metrics` require an authenticated Viewer (Bearer API
-token or Cookie session); and `/openapi.yaml` plus `/api/v1/openapi.yaml` remain
+`/readyz` is anonymous and returns only a boolean readiness result; management
+`/metrics` requires an authenticated Viewer (Bearer API token or Cookie
+session); and `/openapi.yaml` plus `/api/v1/openapi.yaml` remain
 anonymous for client discovery. Native Controller configs also expose a
 separate plain-HTTP `/metrics` listener on `127.0.0.1:9090` by default, which
 can be disabled or bound to an explicitly restricted scrape network. Helm
@@ -124,10 +125,11 @@ keeps that listener disabled until `metrics.enabled=true` is selected and
 network policy is configured. Restrict the OpenAPI paths at the
 ingress/network layer if API metadata must not be public.
 
-Cookie sessions are process-local in-memory state with a 12-hour lifetime. A
-Controller restart invalidates them, and multiple Controller replicas cannot
-share them; use persistent API tokens for non-browser clients. Controller HA
-and a shared session store are outside this release.
+Cookie sessions are opaque, server-side records with a 12-hour lifetime. They
+survive a process restart and are shared by active/standby replicas when the
+Controller uses PostgreSQL; logout, password changes, expiry and backup restore
+invalidate them. SQLite remains a single-replica deployment, and API tokens
+remain the preferred credential for non-browser clients.
 
 The Controller scheduler preserves a healthy existing assignment when possible,
 otherwise selects a matching Gateway by labels and capacity. Explicit public
@@ -137,7 +139,7 @@ monotonic generation, schema version and SHA-256 checksum.
 
 ### Controller database lifecycle
 
-SQLite database schema v11 remains the zero-dependency default. For a larger deployment,
+SQLite database schema v12 remains the zero-dependency default. For a larger deployment,
 initialize directly against PostgreSQL:
 
 ```powershell
@@ -150,8 +152,8 @@ asterferry controller init --dir ./controller `
 SQLite and PostgreSQL databases are fresh-install resources in this development
 generation. There is no in-place schema migration and no SQLite-to-PostgreSQL
 conversion command. To change backend, create a new Controller installation and
-recreate the Dashboard resources; do not point a pre-v11 database at this binary.
-Backups are versioned v11 artifacts and older backup manifests are rejected.
+recreate the Dashboard resources; do not point a pre-v12 database at this binary.
+Backups are versioned v12 artifacts and older backup manifests are rejected.
 PostgreSQL backup/restore uses the external `pg_dump` and `pg_restore` utilities
 (custom format); the CLI must run where those tools are installed. Both
 backends' backups include the Controller config, master key, CA and TLS
@@ -159,10 +161,20 @@ identity.
 
 The version identifiers are intentionally independent: `/api/v1` is the REST
 route contract, `CurrentControlProtocolVersion = 1` identifies control-wire and
-snapshot payloads, and `CurrentDatabaseSchemaVersion = 11` identifies the
-physical Controller database layout (`asterferry-controller-db-v11-relational`).
+snapshot payloads, and `CurrentDatabaseSchemaVersion = 12` identifies the
+physical Controller database layout (`asterferry-controller-db-v12-relational`).
 Changing the database layout does not silently change the wire or REST
 identifiers.
+
+For active/standby availability, initialize PostgreSQL with
+`--high-availability` and run exactly two Controller processes from the same
+configuration and identity Secret. An external load balancer, Kubernetes
+Service, HAProxy, Envoy, Keepalived or equivalent must route HTTPS/gRPC only
+to the ready leader; the Controller does not provide a VIP or transparent
+connection migration. The lease TTL is 15 seconds and Nodes reconnect with a
+bounded five-second control retry, so the failover target is RTO <=30 seconds
+for committed control data (RPO 0 when PostgreSQL durability is intact).
+SQLite rejects HA mode and remains single-replica.
 
 ## Node behavior
 
@@ -219,13 +231,15 @@ and there is no fallback codec. Upgrade all Node binaries together
 with the Controller-side rollout before opening new data-plane sessions.
 
 The first release supports multiple Gateways only when each has an independent
-reachable public endpoint. Shared VIP takeover, transparent connection
-migration and Controller HA are deliberately out of scope.
+reachable public endpoint. Shared VIP takeover and transparent data-plane
+connection migration remain out of scope; Controller active/standby failover
+is supported through an external routing layer.
 
 ## Deployment and verification
 
-The Controller has standalone Docker, systemd and single-replica StatefulSet
-examples under `deploy/`. Every data-plane host runs the same generic `node`
+The Controller has standalone Docker, systemd and single-replica examples plus
+an optional two-replica PostgreSQL-backed StatefulSet under `deploy/`. Every
+data-plane host runs the same generic `node`
 command and mounts only its bootstrap/cache directories; its Gateway or Agent
 behavior is selected later by the Node Spec. The Dashboard is static and can
 be disabled in Controller JSON.

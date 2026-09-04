@@ -20,6 +20,7 @@ type Controller struct {
 	Repositories    *ControllerRepositories
 	HTTP            *Server
 	metrics         *ControllerMetrics
+	leadership      *leadership
 	Scheduler       *Scheduler
 	grpcListener    net.Listener
 	httpListener    net.Listener
@@ -29,6 +30,10 @@ type Controller struct {
 	httpServeErr    <-chan error
 	metricsServeErr <-chan error
 	reconcileCancel context.CancelFunc
+	leaderMu        sync.Mutex
+	leaderCancel    context.CancelFunc
+	leaderDone      chan struct{}
+	leadershipDone  chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
 	waitOnce        sync.Once
@@ -61,6 +66,12 @@ func New(config Config) (*Controller, error) {
 		return nil, err
 	}
 	controllerMetrics := newControllerMetrics(repositories.Resources.DatabaseDriver())
+	leader, err := newLeadership(repositories.databaseHandle, config.HighAvailability, controllerMetrics)
+	if err != nil {
+		_ = repositories.Close()
+		return nil, err
+	}
+	repositories.SetLeadership(leader)
 	scheduler, err := NewScheduler(repositories.Resources, controllerMetrics)
 	if err != nil {
 		_ = repositories.Close()
@@ -71,7 +82,7 @@ func New(config Config) (*Controller, error) {
 		repositories.Close()
 		return nil, err
 	}
-	return &Controller{Config: config, Repositories: repositories, HTTP: httpServer, metrics: controllerMetrics, Scheduler: scheduler, logger: slog.Default()}, nil
+	return &Controller{Config: config, Repositories: repositories, HTTP: httpServer, metrics: controllerMetrics, leadership: leader, Scheduler: scheduler, logger: slog.Default()}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) error {
@@ -146,10 +157,121 @@ func (c *Controller) Start(ctx context.Context) error {
 			_ = metricsListener.Close()
 		}
 	}()
-	go c.reconcileLoop(runCtx)
-	go c.maintenanceLoop(runCtx)
+	leadershipDone := make(chan struct{})
+	c.leadershipDone = leadershipDone
+	go func() {
+		defer close(leadershipDone)
+		c.runLeadership(runCtx)
+	}()
 	go c.monitorServers(runCtx)
 	return nil
+}
+
+func (c *Controller) runLeadership(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	if c.leadership == nil || !c.leadership.Enabled() {
+		c.startLeader(ctx, 0)
+		<-ctx.Done()
+		c.stopLeader()
+		return
+	}
+	events := make(chan leadershipEvent, 4)
+	unsubscribe := c.leadership.observe(func(event leadershipEvent) {
+		select {
+		case events <- event:
+		default:
+			// The leadership state itself is authoritative; a full notification
+			// queue must not block lease renewal or shutdown.
+		}
+	})
+	leaseDone := make(chan struct{})
+	defer func() {
+		unsubscribe()
+		<-leaseDone
+	}()
+	go func() {
+		defer close(leaseDone)
+		c.leadership.Run(ctx)
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			c.stopLeader()
+			return
+		case event := <-events:
+			if event.Leader {
+				c.startLeader(ctx, event.Epoch)
+			} else {
+				c.stopLeader()
+			}
+		}
+	}
+}
+
+func (c *Controller) startLeader(ctx context.Context, epoch uint64) {
+	if c == nil || ctx == nil {
+		return
+	}
+	c.leaderMu.Lock()
+	if c.leaderCancel != nil {
+		c.leaderMu.Unlock()
+		return
+	}
+	leaderCtx, cancel := context.WithCancel(ctx)
+	leaderDone := make(chan struct{})
+	c.leaderCancel = cancel
+	c.leaderDone = leaderDone
+	c.leaderMu.Unlock()
+	go func() {
+		defer close(leaderDone)
+		if err := c.Repositories.Runtime.MarkAllRuntimeConnectionsUnknown(leaderCtx, time.Now().UTC()); err != nil && leaderCtx.Err() == nil {
+			c.logReconcileFailure(fmt.Errorf("mark runtime connections unknown on leadership epoch %d: %w", epoch, err))
+		}
+		var loops sync.WaitGroup
+		loops.Add(2)
+		go func() {
+			defer loops.Done()
+			c.reconcileLoop(leaderCtx)
+		}()
+		go func() {
+			defer loops.Done()
+			c.maintenanceLoop(leaderCtx)
+		}()
+		loops.Wait()
+	}()
+}
+
+func (c *Controller) stopLeader() {
+	if c == nil {
+		return
+	}
+	c.leaderMu.Lock()
+	cancel := c.leaderCancel
+	done := c.leaderDone
+	c.leaderCancel = nil
+	c.leaderDone = nil
+	c.leaderMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (c *Controller) waitLeadershipShutdown() {
+	if c == nil || c.leadershipDone == nil {
+		return
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-c.leadershipDone:
+	case <-timer.C:
+		c.logServeFailure("leadership", errors.New("leadership shutdown exceeded 3 seconds"))
+	}
 }
 
 // Wait blocks until the Controller is stopped or either control-plane server
@@ -347,6 +469,8 @@ func (c *Controller) Close() error {
 		if c.reconcileCancel != nil {
 			c.reconcileCancel()
 		}
+		c.stopLeader()
+		c.waitLeadershipShutdown()
 		if c.grpcServer != nil {
 			// Connect is a long-lived bidirectional stream.  Waiting for a
 			// graceful gRPC drain here can block forever while a node keeps its

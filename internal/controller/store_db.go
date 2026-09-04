@@ -60,13 +60,15 @@ func OpenControllerRepositoriesWithConfig(config Config, masterKey []byte) (*Con
 		_ = db.Close()
 		return nil, err
 	}
-	// A process restart invalidates the Controller's view of live Node
-	// connections. The next Node snapshot will restore active rows; until then
-	// keep the read-only operations view fail-safe instead of showing stale
-	// connections as live.
-	if err := runtime.markRuntimeConnectionsUnknownOnStartup(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("reset runtime connection liveness: %w", err)
+	// In HA mode a standby must not mutate shared runtime state before it owns
+	// the lease. The active leader performs the same fail-safe reset when it
+	// starts its leader-only loops; SQLite has no standby and keeps the
+	// historical open-time reset.
+	if !config.HighAvailability {
+		if err := runtime.markRuntimeConnectionsUnknownOnStartup(context.Background()); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("reset runtime connection liveness: %w", err)
+		}
 	}
 	return repositories, nil
 }
@@ -150,7 +152,11 @@ func (s *ResourceRepository) initializeSchema(ctx context.Context) error {
 		_ = tx.Rollback()
 		return err
 	}
-	return s.commitAndNotify(tx)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO controller_leases(singleton, owner_id, fencing_epoch, lease_until, updated_at) VALUES (1, '', 0, ?, ?)`, "1970-01-01T00:00:00Z", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return s.commitAndNotify(ctx, tx)
 }
 
 func controllerSchemaStatements(types schemaTypes) []string {
@@ -173,6 +179,21 @@ func controllerSchemaStatements(types schemaTypes) []string {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`, types.integer, types.bigInteger),
+		`CREATE TABLE controller_leases (
+			singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+			owner_id TEXT NOT NULL DEFAULT '',
+			fencing_epoch BIGINT NOT NULL DEFAULT 0,
+			lease_until TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE TABLE web_sessions (
+			session_hash TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			csrf_hash TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			revoked_at TEXT
+		)`,
 		`CREATE TABLE api_tokens (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -301,6 +322,9 @@ func controllerSchemaStatements(types schemaTypes) []string {
 		`CREATE TABLE enrollment_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL)`,
 		fmt.Sprintf(`CREATE TABLE node_bootstraps (node_id TEXT PRIMARY KEY, name TEXT NOT NULL, labels_json %s NOT NULL, enabled %s NOT NULL, platform TEXT NOT NULL, arch TEXT NOT NULL, spec_json %s, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`, types.blob, types.bigInteger, types.blob),
 		`CREATE INDEX idx_node_specs_kind ON node_specs(kind, node_id)`,
+		`CREATE INDEX idx_controller_leases_expiry ON controller_leases(lease_until)`,
+		`CREATE INDEX idx_web_sessions_user ON web_sessions(user_id)`,
+		`CREATE INDEX idx_web_sessions_expiry ON web_sessions(expires_at)`,
 		`CREATE INDEX idx_services_agent ON services(agent_id)`,
 		`CREATE INDEX idx_assignments_gateway ON assignments(gateway_id)`,
 		`CREATE INDEX idx_assignments_agent ON assignments(agent_id)`,
@@ -373,6 +397,8 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, dialect databaseDia
 	requiredColumns := map[string][]string{
 		"schema_meta":             {"singleton", "database_schema_version", "backend", "database_schema_fingerprint", "initialized_at"},
 		"users":                   {"id", "username", "password_hash", "password_changed_at", "role", "enabled", "revision", "created_at", "updated_at"},
+		"controller_leases":       {"singleton", "owner_id", "fencing_epoch", "lease_until", "updated_at"},
+		"web_sessions":            {"session_hash", "user_id", "csrf_hash", "expires_at", "created_at", "revoked_at"},
 		"api_tokens":              {"id", "user_id", "token_hash", "name", "expires_at", "revoked_at", "created_at"},
 		"nodes":                   {"id", "name", "enabled", "certificate_state", "certificate_serial", "revision", "created_at", "updated_at"},
 		"node_labels":             {"node_id", "key", "value"},
@@ -419,7 +445,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, dialect databaseDia
 			}
 		}
 	}
-	for _, index := range append([]string{"idx_node_specs_kind", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_bindings_gateway", "idx_node_labels_value", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"}, runtimeSchemaIndexes()...) {
+	for _, index := range append([]string{"idx_node_specs_kind", "idx_controller_leases_expiry", "idx_web_sessions_user", "idx_web_sessions_expiry", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_bindings_gateway", "idx_node_labels_value", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"}, runtimeSchemaIndexes()...) {
 		var count int
 		if err := db.QueryRowContext(ctx, dialect.indexExistsQuery(), index).Scan(&count); err != nil {
 			return err
@@ -433,7 +459,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, dialect databaseDia
 
 func currentSchemaTables() []string {
 	return []string{
-		"schema_meta", "users", "api_tokens", "nodes", "node_labels", "node_specs",
+		"schema_meta", "users", "controller_leases", "web_sessions", "api_tokens", "nodes", "node_labels", "node_specs",
 		"gateway_specs", "gateway_endpoints", "gateway_labels", "gateway_listeners", "gateway_port_ranges", "gateway_egress_values",
 		"agent_specs", "agent_selector_labels", "agent_proxies", "agent_routes", "agent_route_values", "agent_egress_values",
 		"services", "service_selector_labels", "assignments", "assignment_services", "assignment_bindings", "assignment_acks",

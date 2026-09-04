@@ -20,6 +20,11 @@ import (
 )
 
 func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
+	if s.leadership != nil {
+		if err := s.leadership.RequireLeader(); err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(nodeID) == "" {
 		return errors.New("node id is required")
 	}

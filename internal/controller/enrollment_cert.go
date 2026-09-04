@@ -71,7 +71,7 @@ func (s *ResourceRepository) IssueNodeCertificate(ctx context.Context, config Co
 	if err != nil {
 		return Certificate{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return Certificate{}, storageFailure("begin enrollment transaction", err)
 	}
@@ -122,7 +122,7 @@ func (s *ResourceRepository) IssueNodeCertificate(ctx context.Context, config Co
 	if err := insertAudit(ctx, tx, "system", "enroll", "node_certificate", nodeID, revision+1, map[string]string{"serial": certificate.Serial}); err != nil {
 		return Certificate{}, storageFailure("record enrollment audit", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return Certificate{}, storageFailure("commit enrollment", err)
 	}
 	return certificate, nil
@@ -163,7 +163,7 @@ func (s *ResourceRepository) RenewNodeCertificate(ctx context.Context, config Co
 	if err != nil {
 		return Certificate{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return Certificate{}, storageFailure("begin renewal transaction", err)
 	}
@@ -195,7 +195,7 @@ func (s *ResourceRepository) RenewNodeCertificate(ctx context.Context, config Co
 	if err := insertAudit(ctx, tx, "system", "renew", "node_certificate", nodeID, revision+1, map[string]string{"serial": certificate.Serial}); err != nil {
 		return Certificate{}, storageFailure("record renewal audit", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return Certificate{}, storageFailure("commit renewal", err)
 	}
 	return certificate, nil

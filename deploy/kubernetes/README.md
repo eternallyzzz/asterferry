@@ -29,26 +29,52 @@ helm upgrade --install asterferry-controller \
 Run `controller init` once against the mounted data directory (for example in
 a maintenance Job) before starting the StatefulSet. Expose HTTPS `8443` and
 mTLS gRPC `9443` through an internal or external Service according to your
-deployment policy. Controller HA is outside this release.
+deployment policy. The normal Service selects only the ready leader.
+
+For active/standby HA, use PostgreSQL and prepare one existing Secret shared by
+both Pods. It must contain `controller.json`, `master.key`, `ca.key`,
+`ca.crt`, `controller.key` and `controller.crt`; the config must
+set `database_driver=postgres`, the shared `database_url` and
+`high_availability=true`, with paths under `/etc/asterferry`:
+
+```sh
+kubectl -n asterferry create secret generic asterferry-controller-identity \
+  --from-file=controller.json=./controller-ha/controller.json \
+  --from-file=master.key=./controller-ha/master.key \
+  --from-file=ca.key=./controller-ha/ca.key \
+  --from-file=ca.crt=./controller-ha/ca.crt \
+  --from-file=controller.key=./controller-ha/controller.key \
+  --from-file=controller.crt=./controller-ha/controller.crt
+helm upgrade --install asterferry-controller ./deploy/helm/asterferry-controller \
+  --namespace asterferry \
+  --set controller.replicas=2 \
+  --set controller.highAvailability.enabled=true \
+  --set controller.highAvailability.existingSecret=asterferry-controller-identity
+```
+
+The HA chart does not create a PVC. Its headless Service is for stable Pod
+identity; the normal Service and an external load balancer route HTTPS/gRPC to
+the ready leader. Existing gRPC streams break during takeover and Nodes
+reconnect automatically. SQLite rejects HA mode and remains single-replica.
 
 For a multi-Node or production deployment, use PostgreSQL instead of putting
 the Controller database on the PVC. Run `controller init` with
 `--database-driver postgres --database-url 'postgres://...'` against the
 managed database, and place the resulting `controller.json` plus the CA/TLS
 and master-key files in the Controller volume/Secret according to your secret
-management policy. The chart remains single-replica; PostgreSQL removes the
-SQLite write-connection bottleneck but does not add Controller HA.
+management policy. PostgreSQL is required for the two-replica HA mode.
 
-The HTTPS endpoint policy is deliberate: `/healthz` is anonymous;
-`/readyz` and management `/metrics` require an authenticated Viewer, Operator
-or Admin; and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for
-client discovery. The Controller chart keeps a separate plain-HTTP metrics
+The HTTPS endpoint policy is deliberate: `/healthz` and `/readyz` are
+anonymous; `/readyz` returns only a boolean readiness result; management
+`/metrics` requires an authenticated Viewer, Operator or Admin; and
+`/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
+discovery. The Controller chart keeps a separate plain-HTTP metrics
 listener disabled by default. Set `metrics.enabled=true`, choose the listen
 address, and apply a namespace/network policy before exposing its Service;
 this is the standard unauthenticated Prometheus scrape surface. Browser Cookie
-sessions are process-local in-memory state with a 12-hour lifetime, so a
-restart or another replica invalidates them; use API tokens for automated
-clients. Shared sessions and Controller HA are outside this chart.
+sessions are durable hashed records with a 12-hour lifetime and are shared by
+the PostgreSQL active/standby pair. Logout, password changes, expiry and
+backup restore invalidate them; use API tokens for automated clients.
 
 ## Node releases
 

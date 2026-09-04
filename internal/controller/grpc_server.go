@@ -18,17 +18,19 @@ import (
 
 type ControlServer struct {
 	v1.UnimplementedControlServer
-	resources      *ResourceRepository
-	runtime        *RuntimeRepository
-	changes        *ChangeBus
-	config         Config
-	streams        map[string]*controlStream // node id -> active stream
-	streamMu       sync.Mutex
-	metrics        *ControllerMetrics
-	enrollLimiter  *admissionLimiter
-	connectLimiter *admissionLimiter
-	enrollSlots    chan struct{}
-	connectSlots   chan struct{}
+	resources             *ResourceRepository
+	runtime               *RuntimeRepository
+	changes               *ChangeBus
+	config                Config
+	streams               map[string]*controlStream // node id -> active stream
+	streamMu              sync.Mutex
+	metrics               *ControllerMetrics
+	enrollLimiter         *admissionLimiter
+	connectLimiter        *admissionLimiter
+	enrollSlots           chan struct{}
+	connectSlots          chan struct{}
+	leadership            *leadership
+	unsubscribeLeadership func()
 }
 
 type controlStream struct {
@@ -64,13 +66,22 @@ func NewControlServer(config Config, repositories *ControllerRepositories, metri
 	if controllerMetrics == nil {
 		controllerMetrics = newControllerMetrics(resources.DatabaseDriver())
 	}
-	return &ControlServer{
+	server := &ControlServer{
 		resources: resources, runtime: runtime, changes: changes, config: config, streams: make(map[string]*controlStream), metrics: controllerMetrics,
 		enrollLimiter:  newAdmissionLimiter(6, time.Minute, 4096),
 		connectLimiter: newAdmissionLimiter(30, time.Minute, 4096),
 		enrollSlots:    make(chan struct{}, 16),
 		connectSlots:   make(chan struct{}, 256),
-	}, nil
+		leadership:     repositories.Resources.leadership,
+	}
+	if server.leadership != nil {
+		server.unsubscribeLeadership = server.leadership.observe(func(event leadershipEvent) {
+			if !event.Leader {
+				server.Drain()
+			}
+		})
+	}
+	return server, nil
 }
 
 func (s *ControlServer) Health(context.Context, *emptypb.Empty) (response *v1.Heartbeat, returnErr error) {
@@ -83,7 +94,46 @@ func (s *ControlServer) Health(context.Context, *emptypb.Empty) (response *v1.He
 			s.metrics.observeGRPC("Health", code)
 		}()
 	}
+	if s.leadership != nil {
+		if err := s.leadership.RequireLeader(); err != nil {
+			return nil, status.Error(codes.Unavailable, "controller is not the active leader")
+		}
+	}
 	return &v1.Heartbeat{SentAt: timestamppb.New(time.Now().UTC()), Healthy: true}, nil
+}
+
+// Drain terminates all long-lived Node control streams. A transport close is
+// intentionally used for leadership loss so Nodes treat takeover as a
+// retryable outage rather than as a certificate revocation.
+func (s *ControlServer) Drain() {
+	if s == nil {
+		return
+	}
+	s.streamMu.Lock()
+	streams := make([]*controlStream, 0, len(s.streams))
+	for _, stream := range s.streams {
+		streams = append(streams, stream)
+	}
+	s.streamMu.Unlock()
+	for _, stream := range streams {
+		if stream != nil && stream.cancel != nil {
+			stream.cancel()
+		}
+	}
+}
+
+// Close releases the leadership observer held by the gRPC service. The
+// observer otherwise keeps a stopped server reachable from the process-local
+// leadership object until the Controller itself exits.
+func (s *ControlServer) Close() {
+	if s == nil {
+		return
+	}
+	if s.unsubscribeLeadership != nil {
+		s.unsubscribeLeadership()
+		s.unsubscribeLeadership = nil
+	}
+	s.Drain()
 }
 
 // StartGRPC preserves the small embedding API used by tests and tools. Serve
@@ -113,10 +163,12 @@ func StartGRPCWithErrors(ctx context.Context, config Config, repositories *Contr
 	}
 	tlsConfig, err := loadControlTLS(config)
 	if err != nil {
+		server.Close()
 		return nil, nil, nil, err
 	}
 	listener, err := net.Listen("tcp", config.GRPCListen)
 	if err != nil {
+		server.Close()
 		return nil, nil, nil, err
 	}
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)), grpc.MaxRecvMsgSize(16<<20), grpc.MaxSendMsgSize(16<<20))
@@ -132,6 +184,7 @@ func StartGRPCWithErrors(ctx context.Context, config Config, repositories *Contr
 		_ = listener.Close()
 	}()
 	go func() {
+		defer server.Close()
 		serveErr <- grpcServer.Serve(listener)
 		close(serveErr)
 	}()

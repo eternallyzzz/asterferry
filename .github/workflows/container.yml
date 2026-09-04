@@ -146,6 +146,12 @@ jobs:
         run: helm template node deploy/helm/asterferry-node
       - name: Render Controller chart
         run: helm template controller deploy/helm/asterferry-controller
+      - name: Render Controller HA chart
+        run: |
+          helm template controller deploy/helm/asterferry-controller \
+            --set controller.highAvailability.enabled=true \
+            --set controller.replicas=2 \
+            --set controller.highAvailability.existingSecret=asterferry-controller-identity
       - name: Package Helm chart
         shell: bash
         run: |

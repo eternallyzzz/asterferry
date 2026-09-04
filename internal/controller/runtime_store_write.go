@@ -137,7 +137,7 @@ func (s *RuntimeRepository) PruneRuntimeHistory(ctx context.Context, now time.Ti
 		now = time.Now().UTC()
 	}
 	cutoff := now.Add(-runtimeRetention).Format(time.RFC3339Nano)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -151,5 +151,5 @@ func (s *RuntimeRepository) PruneRuntimeHistory(ctx context.Context, now time.Ti
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_connections WHERE ended_at IS NOT NULL AND ended_at < ?`, cutoff); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }

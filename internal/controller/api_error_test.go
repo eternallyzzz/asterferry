@@ -51,6 +51,19 @@ func TestWriteStoreErrorMapsUnknownErrorToInternalServerError(t *testing.T) {
 	}
 }
 
+func TestWriteStoreErrorMapsLeadershipLossToUnavailable(t *testing.T) {
+	for _, err := range []error{ErrControllerNotLeader, ErrLeadershipLost} {
+		recorder := httptest.NewRecorder()
+		writeStoreError(recorder, err)
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%v status = %d, want %d; body=%s", err, recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), `"code":"controller_standby"`) {
+			t.Fatalf("%v body = %s, missing standby error", err, recorder.Body.String())
+		}
+	}
+}
+
 func containsAll(value string, fragments ...string) bool {
 	for _, fragment := range fragments {
 		if !strings.Contains(value, fragment) {

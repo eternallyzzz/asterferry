@@ -2,15 +2,33 @@ package controller
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestBackupPublishesAndRestoreVerifiesManifest(t *testing.T) {
 	controllerDir := filepath.Join(t.TempDir(), "controller")
 	result, err := Init(context.Background(), InitOptions{Dir: controllerDir, GRPCAdvertise: "127.0.0.1:9443", Password: "a-very-long-admin-password"})
 	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := LoadOrCreateMasterKey(result.Config.MasterKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenControllerRepositoriesWithConfig(result.Config, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Resources.CreateWebSession(context.Background(), result.Admin.ID, "restore-session", "restore-csrf", time.Now().UTC().Add(time.Hour)); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	backupRoot := t.TempDir()
@@ -38,15 +56,32 @@ func TestBackupPublishesAndRestoreVerifiesManifest(t *testing.T) {
 	if restoredConfig.DatabasePath != filepath.Join(destination, "controller.db") || restoredConfig.MasterKeyPath != filepath.Join(destination, "master.key") {
 		t.Fatalf("restored config paths were not rebased: %#v", restoredConfig)
 	}
-	key, err := LoadOrCreateMasterKey(restoredConfig.MasterKeyPath)
+	key, err = LoadOrCreateMasterKey(restoredConfig.MasterKeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenControllerRepositoriesWithConfig(restoredConfig, key)
+	store, err = OpenControllerRepositoriesWithConfig(restoredConfig, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Close()
+	if _, err := store.Resources.GetWebSession(context.Background(), "restore-session"); !errors.Is(err, sql.ErrNoRows) {
+		_ = store.Close()
+		t.Fatalf("restored web session lookup = %v, want sql.ErrNoRows", err)
+	}
+	var owner string
+	var epoch int64
+	var leaseUntil string
+	if err := store.Resources.db.QueryRow(`SELECT owner_id,fencing_epoch,lease_until FROM controller_leases WHERE singleton=1`).Scan(&owner, &epoch, &leaseUntil); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if owner != "" || epoch <= 0 || leaseUntil != "1970-01-01T00:00:00Z" {
+		_ = store.Close()
+		t.Fatalf("restored lease = owner:%q epoch:%d until:%q, want cleared owner, bumped epoch, expired lease", owner, epoch, leaseUntil)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(filepath.Join(backupDir, "controller.json"), []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)

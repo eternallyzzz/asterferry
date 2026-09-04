@@ -166,7 +166,7 @@ func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name
 		Name    string `json:"name"`
 		Payload string `json:"payload"`
 	}{NodeID: nodeID, Name: name, Payload: payload}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -186,7 +186,7 @@ func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name
 		if err := json.Unmarshal(data, &response); err != nil {
 			return false, err
 		}
-		return response.Delivered, tx.Commit()
+		return response.Delivered, s.commitWriteTx(ctx, tx)
 	}
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id=?`, nodeID).Scan(&exists); err != nil {
@@ -204,7 +204,7 @@ func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"action_id": actionID, "delivered": deliveryHint}); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return false, err
 	}
 	delivered := s.ChangeBus().publishAction(nodeID, RuntimeAction{ID: actionID, Name: name, Payload: []byte(payload)})

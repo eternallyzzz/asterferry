@@ -193,6 +193,14 @@ $controllerMetricsDisabledTemplate = (& helm template release-check deploy/helm/
 if ($LASTEXITCODE -ne 0 -or $controllerMetricsDisabledTemplate -notmatch "--metrics-listen" -or $controllerMetricsDisabledTemplate -notmatch 'metrics-listen\r?\n\s+- ""') {
     throw "Helm default metrics policy must explicitly disable the internal listener"
 }
+$controllerHATemplate = (& helm template release-check deploy/helm/asterferry-controller --set controller.highAvailability.enabled=true --set controller.replicas=2 --set controller.highAvailability.existingSecret=asterferry-controller-identity | Out-String)
+if ($LASTEXITCODE -ne 0 -or $controllerHATemplate -notmatch "replicas: 2" -or $controllerHATemplate -notmatch "clusterIP: None" -or $controllerHATemplate -notmatch "path: /readyz" -or $controllerHATemplate -notmatch "secretName: asterferry-controller-identity" -or $controllerHATemplate -notmatch "fsGroup: 10001" -or $controllerHATemplate -notmatch "defaultMode: 0440" -or $controllerHATemplate -match "volumeClaimTemplates:") {
+    throw "Helm Controller HA template did not render the two-replica, readiness-gated, Secret-backed deployment"
+}
+$controllerHAInvalidTemplate = (& helm template release-check deploy/helm/asterferry-controller --set controller.highAvailability.enabled=true --set controller.highAvailability.existingSecret=asterferry-controller-identity 2>$null | Out-String)
+if ($LASTEXITCODE -eq 0) {
+    throw "Helm Controller HA template must reject replicas other than two"
+}
 $digest = "sha256:" + ("a" * 64)
 foreach ($chart in $chartPaths) {
     $digestTemplate = (& helm template release-check $chart --set image.digest=$digest | Out-String)

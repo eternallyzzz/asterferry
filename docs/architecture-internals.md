@@ -74,14 +74,22 @@ tests as one change.
 
 ## Volatile operational facts
 
-Controller HA is out of scope. Login sessions are stored in a process-local
-`sync.Map` for 12 hours; restart or routing a request to another replica
-invalidates the session. The dedicated metrics listener is intentionally a
-separate, deployment-controlled scrape surface, while management metrics and
-readiness use authenticated HTTP handlers. The main HTTP server has no global
-write deadline because runtime SSE is long-lived; read and idle deadlines still
-bound inactive clients. If SSE gets a dedicated server in the future, restore a
-finite write timeout for ordinary handlers.
+HA uses a PostgreSQL `controller_leases` singleton with a 15-second lease,
+five-second renewal cadence and monotonically increasing `fencing_epoch`.
+Only the leader starts reconciliation and accepts business/Node control
+traffic. Leadership loss drains existing gRPC streams and every repository
+write performs a final lease/epoch check before commit. SQLite is deliberately
+single-replica.
+
+Login sessions are opaque, hashed records in `web_sessions` with a 12-hour
+expiry. They are shared by both PostgreSQL replicas and are revoked on logout,
+password changes, expiry and backup restore. The dedicated metrics listener is
+intentionally a separate, deployment-controlled scrape surface; management
+metrics remain authenticated, while `/readyz` is a public boolean probe.
+The main HTTP server has no global write deadline because runtime SSE is
+long-lived; read and idle deadlines still bound inactive clients. If SSE gets a
+dedicated server in the future, restore a finite write timeout for ordinary
+handlers.
 
 ## Change checklist
 

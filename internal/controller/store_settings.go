@@ -25,7 +25,7 @@ func (s *ResourceRepository) AdvancedOperationsEnabled(ctx context.Context) (boo
 }
 
 func (s *ResourceRepository) SetAdvancedOperationsEnabled(ctx context.Context, enabled bool, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -41,7 +41,7 @@ func (s *ResourceRepository) SetAdvancedOperationsEnabled(ctx context.Context, e
 	if err := insertAudit(ctx, tx, options.Actor, "runtime_settings:update", "runtime_settings", "advanced_operations_enabled", 0, map[string]string{"enabled": value}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return err
 	}
 	// Settings changes affect the runtime control stream and are therefore

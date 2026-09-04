@@ -62,7 +62,7 @@ func (s *ResourceRepository) SaveSnapshot(ctx context.Context, record SnapshotRe
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -87,7 +87,7 @@ func (s *ResourceRepository) SaveSnapshot(ctx context.Context, record SnapshotRe
 		}
 		if record.Generation == current {
 			if strings.EqualFold(record.Checksum, currentChecksum) {
-				return tx.Commit()
+				return s.commitWriteTx(ctx, tx)
 			}
 			expected := current
 			if current < math.MaxInt64 {
@@ -118,7 +118,7 @@ func (s *ResourceRepository) SaveSnapshot(ctx context.Context, record SnapshotRe
 			return err
 		}
 		if record.Generation == persistedGeneration && strings.EqualFold(record.Checksum, persistedChecksum) {
-			return tx.Commit()
+			return s.commitWriteTx(ctx, tx)
 		}
 		expected := persistedGeneration
 		if expected < math.MaxInt64 {
@@ -129,7 +129,7 @@ func (s *ResourceRepository) SaveSnapshot(ctx context.Context, record SnapshotRe
 	if affected != 1 {
 		return fmt.Errorf("save snapshot affected %d rows", affected)
 	}
-	return s.commitAndNotify(tx, record.NodeID)
+	return s.commitAndNotify(ctx, tx, record.NodeID)
 }
 
 func (s *ResourceRepository) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {

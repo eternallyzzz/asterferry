@@ -23,8 +23,7 @@ paths:
     get:
       operationId: readyz
       servers: [{ url: / }]
-      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
-      responses: { '200': { description: Controller is ready }, '503': { description: Database unavailable } }
+      responses: { '200': { description: Leader and database are ready }, '503': { description: Controller is not ready } }
   /metrics:
     get:
       operationId: metrics

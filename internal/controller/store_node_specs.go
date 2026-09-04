@@ -59,7 +59,7 @@ func (s *ResourceRepository) putNodeSpecDocument(ctx context.Context, spec domai
 		Spec    domain.NodeSpec `json:"spec"`
 		IfMatch int64           `json:"if_match"`
 	}{Spec: requestSpec, IfMatch: options.IfMatch}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -151,15 +151,15 @@ func (s *ResourceRepository) putNodeSpecDocument(ctx context.Context, spec domai
 		return err
 	}
 	if spec.Kind == domain.NodeSpecGateway {
-		return s.commitAndNotifyPendingServices(tx, affectedNodes...)
+		return s.commitAndNotifyPendingServices(ctx, tx, affectedNodes...)
 	}
-	return s.commitAndNotifyResources(tx, affectedNodes...)
+	return s.commitAndNotifyResources(ctx, tx, affectedNodes...)
 }
 
 func (s *ResourceRepository) DeleteNodeSpec(ctx context.Context, nodeID string, options WriteOptions) error {
 	s.snapshotMu.Lock()
 	defer s.snapshotMu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func (s *ResourceRepository) DeleteNodeSpec(ctx context.Context, nodeID string, 
 	if hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request); err != nil {
 		return err
 	} else if hit {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	var revision int64
 	var kind string
@@ -207,7 +207,7 @@ func (s *ResourceRepository) DeleteNodeSpec(ctx context.Context, nodeID string, 
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"node_id": nodeID, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResources(tx, append(participants, nodeID)...)
+	return s.commitAndNotifyResources(ctx, tx, append(participants, nodeID)...)
 }
 
 func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) (int, error) {

@@ -2,12 +2,16 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
+	v1 "asterferry/internal/controlwire/v1"
 	"asterferry/internal/domain"
 	"asterferry/internal/node"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type closeProbeGRPC struct {
@@ -33,6 +37,16 @@ func TestControllerCloseForcesGRPCStop(t *testing.T) {
 	}
 	if probe.graceful {
 		t.Fatal("controller close unexpectedly waited for a graceful gRPC stop")
+	}
+}
+
+func TestStandbyRejectsGRPCWriteEntrypoints(t *testing.T) {
+	server := &ControlServer{leadership: &leadership{enabled: true}}
+	if _, err := server.Enroll(context.Background(), &v1.EnrollRequest{}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("standby enrollment error = %v, want Unavailable", err)
+	}
+	if err := server.RevokeNode(context.Background(), "node-1"); !errors.Is(err, ErrControllerNotLeader) {
+		t.Fatalf("standby revocation error = %v, want ErrControllerNotLeader", err)
 	}
 }
 

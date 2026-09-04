@@ -26,8 +26,9 @@ type databaseHandle struct {
 // records. Runtime telemetry deliberately lives in RuntimeRepository.
 type ResourceRepository struct {
 	*databaseHandle
-	masterKey [masterKeyBytes]byte
-	changes   *ChangeBus
+	masterKey  [masterKeyBytes]byte
+	changes    *ChangeBus
+	leadership *leadership
 	// Snapshot materialization reads a previous generation and then writes a
 	// replacement. Serialize that check-and-write pair so concurrent control
 	// streams cannot publish the same generation with different content.
@@ -39,7 +40,8 @@ type ResourceRepository struct {
 // ResourceRepository, but has no resource CRUD surface.
 type RuntimeRepository struct {
 	*databaseHandle
-	changes *ChangeBus
+	changes    *ChangeBus
+	leadership *leadership
 }
 
 // ControllerRepositories is the composition root for the two repositories
@@ -50,6 +52,21 @@ type ControllerRepositories struct {
 	Runtime   *RuntimeRepository
 	Changes   *ChangeBus
 	*databaseHandle
+}
+
+// SetLeadership attaches the process-local fencing guard after the database
+// and schema have opened. Initialization and offline administration can keep
+// using repositories before a running Controller owns a lease.
+func (s *ControllerRepositories) SetLeadership(value *leadership) {
+	if s == nil {
+		return
+	}
+	if s.Resources != nil {
+		s.Resources.leadership = value
+	}
+	if s.Runtime != nil {
+		s.Runtime.leadership = value
+	}
 }
 
 func (s *ResourceRepository) ChangeBus() *ChangeBus {

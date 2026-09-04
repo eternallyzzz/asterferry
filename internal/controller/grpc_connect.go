@@ -30,6 +30,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			s.metrics.observeGRPC("Connect", code)
 		}
 	}()
+	if s.leadership != nil {
+		if err := s.leadership.RequireLeader(); err != nil {
+			return status.Error(codes.Unavailable, "controller is not the active leader")
+		}
+	}
 	if allowed, retry := s.connectLimiter.allow(peerAddressKey(stream.Context())); !allowed {
 		return status.Errorf(codes.ResourceExhausted, "control connection rate limit exceeded; retry after %s", retry.Round(time.Second))
 	}
@@ -149,6 +154,15 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	}
 	s.streams[hello.GetNodeId()] = entry
 	s.streamMu.Unlock()
+	// Leadership can change while the handshake is materializing the
+	// snapshot. Re-check after publishing the stream so a loss event that
+	// raced Drain cannot leave a newly admitted standby connection alive.
+	if s.leadership != nil {
+		if err := s.leadership.RequireLeader(); err != nil {
+			cancel()
+			return status.Error(codes.Unavailable, "controller is not the active leader")
+		}
+	}
 	if s.metrics != nil {
 		s.metrics.streams.Inc()
 		defer s.metrics.streams.Dec()
@@ -252,6 +266,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		}
 	}()
 	for {
+		if s.leadership != nil {
+			if err := s.leadership.RequireLeader(); err != nil {
+				return status.Error(codes.Unavailable, "controller is not the active leader")
+			}
+		}
 		var result recvResult
 		var ok bool
 		select {

@@ -2,13 +2,13 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -104,9 +104,11 @@ func TestPasswordChangeRevokesTokensAndSessions(t *testing.T) {
 		t.Fatalf("token was not valid before password change: %v", err)
 	}
 
-	server := &Server{resources: store, sessions: sync.Map{}}
 	cookieValue := "session-before-password-change"
-	server.sessions.Store(cookieValue, session{User: user, ExpiresAt: time.Now().UTC().Add(time.Hour), CSRF: "csrf"})
+	if err := store.CreateWebSession(ctx, user.ID, cookieValue, "csrf", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{resources: store}
 	newPassword := "new-password"
 	if _, err := store.UpdateUser(ctx, user.ID, UserUpdate{Password: &newPassword}, WriteOptions{IfMatch: user.Revision, Actor: "test"}); err != nil {
 		t.Fatal(err)
@@ -124,7 +126,7 @@ func TestPasswordChangeRevokesTokensAndSessions(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("stale session status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
-	if _, ok := server.sessions.Load(cookieValue); ok {
-		t.Fatal("stale session was not removed")
+	if _, err := store.GetWebSession(ctx, cookieValue); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale session lookup = %v, want sql.ErrNoRows", err)
 	}
 }

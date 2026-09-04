@@ -22,6 +22,11 @@ func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (
 			s.metrics.observeGRPC("Enroll", code)
 		}
 	}()
+	if s.leadership != nil {
+		if err := s.leadership.RequireLeader(); err != nil {
+			return nil, status.Error(codes.Unavailable, "controller is not the active leader")
+		}
+	}
 	if request == nil || request.GetToken() == "" || request.GetNodeId() == "" || len(request.GetCsrDer()) == 0 || len(request.GetCsrDer()) > 128<<10 {
 		return nil, status.Error(codes.InvalidArgument, "token, node_id and csr_der are required")
 	}

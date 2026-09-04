@@ -55,7 +55,7 @@ func (s *ResourceRepository) RecordEvent(ctx context.Context, actor, eventID, ev
 	if len(attributes)+2 > 64 {
 		return errors.New("event attributes are too numerous")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (s *ResourceRepository) RecordEvent(ctx context.Context, actor, eventID, ev
 	if err := insertAudit(ctx, tx, actor, "event:"+strings.TrimSpace(eventType), "event", strings.TrimSpace(resourceID), 0, attributesWithMessage(attributes, message, eventID)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }
 
 func attributesWithMessage(attributes map[string]string, message, eventID string) map[string]string {
@@ -110,9 +110,10 @@ func getUserTx(ctx context.Context, tx *sql.Tx, field, value string) (User, erro
 }
 
 /*
-The public User model deliberately does not expose PasswordChangedAt, but
-the controller keeps it on every authenticated copy so in-memory sessions
-can be invalidated without retaining or comparing password material.
+The public User model deliberately does not expose PasswordChangedAt. Password
+changes revoke the durable web_sessions and API-token rows in the same
+transaction, while the controller keeps the timestamp on authenticated copies
+for audit and authorization semantics.
 */
 func scanUser(row scanner) (User, error) {
 	var user User

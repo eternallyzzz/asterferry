@@ -8,6 +8,14 @@ controller:
   httpsPort: 8443
   grpcPort: 9443
   dataSize: 10Gi
+  replicas: 1
+  highAvailability:
+    # HA uses PostgreSQL and two active/standby Controller Pods. The existing
+    # Secret must contain controller.json, master.key, ca.key, ca.crt,
+    # controller.key and controller.crt.
+    enabled: false
+    existingSecret: ""
+    secretMountPath: /etc/asterferry
 metrics:
   # Keep metrics disabled until the operator has selected a trusted in-cluster
   # Prometheus source and network policy.

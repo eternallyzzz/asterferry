@@ -84,32 +84,32 @@ func (b *ChangeBus) notifySnapshotChanges(nodeIDs ...string) {
 	}
 }
 
-func (s *ResourceRepository) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
-	if err := tx.Commit(); err != nil {
+func (s *ResourceRepository) commitAndNotify(ctx context.Context, tx *sql.Tx, nodeIDs ...string) error {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return err
 	}
 	s.ChangeBus().notifySnapshotChanges(nodeIDs...)
 	return nil
 }
 
-func (s *ResourceRepository) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
-	return s.commitAndNotifyResourcesWithOptions(tx, false, nodeIDs...)
+func (s *ResourceRepository) commitAndNotifyResources(ctx context.Context, tx *sql.Tx, nodeIDs ...string) error {
+	return s.commitAndNotifyResourcesWithOptions(ctx, tx, false, nodeIDs...)
 }
 
-func (s *ResourceRepository) commitAndNotifyPendingServices(tx *sql.Tx, nodeIDs ...string) error {
-	return s.commitAndNotifyResourcesWithOptions(tx, true, nodeIDs...)
+func (s *ResourceRepository) commitAndNotifyPendingServices(ctx context.Context, tx *sql.Tx, nodeIDs ...string) error {
+	return s.commitAndNotifyResourcesWithOptions(ctx, tx, true, nodeIDs...)
 }
 
-func (s *ResourceRepository) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
-	if err := s.commitAndNotify(tx, nodeIDs...); err != nil {
+func (s *ResourceRepository) commitAndNotifyResourcesWithOptions(ctx context.Context, tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
+	if err := s.commitAndNotify(ctx, tx, nodeIDs...); err != nil {
 		return err
 	}
 	s.ChangeBus().notifyResourceChangesWithOptions(pendingServices, nodeIDs...)
 	return nil
 }
 
-func (s *ResourceRepository) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error {
-	if err := tx.Commit(); err != nil {
+func (s *ResourceRepository) commitAndNotifyResourceOnly(ctx context.Context, tx *sql.Tx, nodeIDs ...string) error {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return err
 	}
 	s.ChangeBus().notifyResourceChanges(nodeIDs...)

@@ -22,7 +22,7 @@ data-plane architecture.
   30 days.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
   protocol. Existing node configurations and Controller databases must be
-  initialized again. The Controller store is now a fresh database schema v11
+  initialized again. The Controller store is now a fresh database schema v12
   with a relational aggregate layout and a single canonical database marker;
   old databases and backup manifests are
   rejected without migration.
@@ -37,8 +37,9 @@ data-plane architecture.
   breaking changes with no fallback or negotiation. Upgrade Controller and all
   Node binaries as a coordinated rollout.
 - PostgreSQL backup/restore uses the external `pg_dump`/`pg_restore` client
-  utilities. The Controller remains single-replica; PostgreSQL does not add
-  Controller HA.
+  utilities. PostgreSQL active/standby Controller HA is supported with a
+  monotonic lease/fencing epoch, durable web sessions and an external
+  readiness-aware routing layer; SQLite remains single-replica.
 - Hardens storage error classification, PostgreSQL connection lifetime,
   idempotency retention, schema probing, joined resource reads and UDP flow
   cleanup, with behavior contracts for the affected paths.

@@ -54,7 +54,7 @@ func (s *ResourceRepository) saveObserved(ctx context.Context, record ObservedRe
 	if observed.ObservedAt.After(time.Now().UTC().Add(5 * time.Minute)) {
 		return &domain.ApplyError{Code: "invalid_observed_state", Path: "observed_at", Message: "observed timestamp is too far in the future"}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -92,7 +92,7 @@ func (s *ResourceRepository) saveObserved(ctx context.Context, record ObservedRe
 	if err := writeObservedStateTx(ctx, tx, observed, record.UpdatedAt); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResourceOnly(tx, record.NodeID)
+	return s.commitAndNotifyResourceOnly(ctx, tx, record.NodeID)
 }
 
 func (s *ResourceRepository) LoadObserved(ctx context.Context, nodeID string) (ObservedRecord, error) {

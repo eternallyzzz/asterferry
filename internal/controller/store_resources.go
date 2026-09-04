@@ -29,7 +29,7 @@ func (s *ResourceRepository) CreateNode(ctx context.Context, node domain.Node, o
 	now := time.Now().UTC()
 	node.CreatedAt = now
 	node.UpdatedAt = now
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func (s *ResourceRepository) CreateNode(ctx context.Context, node domain.Node, o
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": node.ID, "revision": node.Revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResources(tx, node.ID)
+	return s.commitAndNotifyResources(ctx, tx, node.ID)
 }
 
 func (s *ResourceRepository) GetNode(ctx context.Context, id string) (domain.Node, error) {
@@ -268,7 +268,7 @@ func (s *ResourceRepository) UpdateNode(ctx context.Context, node domain.Node, o
 		IfMatch int64       `json:"if_match"`
 	}{Node: requestNode, IfMatch: options.IfMatch}
 	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -335,7 +335,7 @@ func (s *ResourceRepository) UpdateNode(ctx context.Context, node domain.Node, o
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": node.ID, "revision": node.Revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResources(tx, affectedNodes...)
+	return s.commitAndNotifyResources(ctx, tx, affectedNodes...)
 }
 
 // quarantineAssignmentsForNodeTx moves every placement that references an
@@ -423,7 +423,7 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 }
 
 func (s *ResourceRepository) DeleteNode(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -472,7 +472,7 @@ func (s *ResourceRepository) DeleteNode(ctx context.Context, id string, options 
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	if err := s.commitAndNotifyResources(tx, id); err != nil {
+	if err := s.commitAndNotifyResources(ctx, tx, id); err != nil {
 		return err
 	}
 	return nil

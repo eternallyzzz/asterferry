@@ -53,7 +53,12 @@ func (s *RuntimeRepository) MarkRuntimeConnectionsUnknown(ctx context.Context, n
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE runtime_connections SET state='unknown',updated_at=? WHERE node_id=? AND state='active'`, at.UTC().Format(time.RFC3339Nano), nodeID)
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_connections SET state='unknown',updated_at=? WHERE node_id=? AND state='active'`, at.UTC().Format(time.RFC3339Nano), nodeID)
 	if err != nil {
 		return err
 	}
@@ -61,8 +66,37 @@ func (s *RuntimeRepository) MarkRuntimeConnectionsUnknown(ctx context.Context, n
 	if err != nil {
 		return err
 	}
+	if err := s.commitWriteTx(ctx, tx); err != nil {
+		return err
+	}
 	if changed > 0 {
 		s.ChangeBus().notifyRuntimeChanges(nodeID)
+	}
+	return nil
+}
+
+func (s *RuntimeRepository) MarkAllRuntimeConnectionsUnknown(ctx context.Context, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_connections SET state='unknown',updated_at=? WHERE state='active'`, at.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if err := s.commitWriteTx(ctx, tx); err != nil {
+		return err
+	}
+	if changed > 0 {
+		s.ChangeBus().notifyRuntimeChanges("")
 	}
 	return nil
 }

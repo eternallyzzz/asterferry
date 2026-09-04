@@ -2,6 +2,7 @@ package controller
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -52,7 +53,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_failed", "could not create session")
 		return
 	}
-	s.sessions.Store(sessionID, session{User: user, CSRF: csrf, ExpiresAt: time.Now().Add(sessionTTL)})
+	expiresAt := time.Now().UTC().Add(sessionTTL)
+	if err := s.resources.CreateWebSession(r.Context(), user.ID, sessionID, csrf, expiresAt); err != nil {
+		slog.Default().Error("controller web session storage failure", "user_id", user.ID, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+		return
+	}
 	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: sessionID, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: sessionCookieMaxAge})
 	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: sessionCookieMaxAge})
 	writeJSON(w, http.StatusOK, map[string]any{"user": user, "csrf_token": csrf})
@@ -67,7 +73,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sessionID, err := r.Cookie("af_session"); err == nil {
-		s.sessions.Delete(sessionID.Value)
+		if revokeErr := s.resources.RevokeWebSession(r.Context(), sessionID.Value); revokeErr != nil {
+			slog.Default().Error("controller web session revoke failure", "error", revokeErr)
+			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: "af_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	http.SetCookie(w, &http.Cookie{Name: "af_csrf", Value: "", Path: "/", MaxAge: -1, Secure: true, SameSite: http.SameSiteLaxMode})
@@ -91,47 +101,36 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 			user, err = s.resources.AuthenticateToken(r.Context(), parts[1])
 		}
 	} else if cookie, cookieErr := r.Cookie("af_session"); cookieErr == nil {
-		if value, ok := s.sessions.Load(cookie.Value); ok {
-			sess, valid := value.(session)
-			if !valid {
-				s.sessions.Delete(cookie.Value)
+		sess, lookupErr := s.resources.GetWebSession(r.Context(), cookie.Value)
+		if lookupErr == nil {
+			// Do not let a persisted session outlive an Admin revocation or role
+			// change. The users table remains authoritative after login.
+			fresh, userErr := s.resources.GetUser(r.Context(), sess.UserID)
+			if userErr != nil {
+				if !errors.Is(userErr, sql.ErrNoRows) {
+					slog.Default().Error("controller session user lookup failed", "error", userErr)
+					writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+					return User{}, false
+				}
 				writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
 				return User{}, false
 			}
-			if time.Now().Before(sess.ExpiresAt) {
-				// Do not let an in-memory session outlive an Admin revocation or
-				// role change. The database remains authoritative after login.
-				fresh, lookupErr := s.resources.GetUser(r.Context(), sess.User.ID)
-				if lookupErr != nil {
-					if !errors.Is(lookupErr, sql.ErrNoRows) {
-						slog.Default().Error("controller session lookup failed", "error", lookupErr)
-						writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
-						return User{}, false
-					}
-					s.sessions.Delete(cookie.Value)
-					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
-					return User{}, false
-				}
-				if !fresh.Enabled {
-					s.sessions.Delete(cookie.Value)
-					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
-					return User{}, false
-				}
-				if !fresh.PasswordChangedAt.Equal(sess.User.PasswordChangedAt) {
-					// Password changes invalidate every in-memory session even when
-					// the session itself has not expired.
-					s.sessions.Delete(cookie.Value)
-					writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
-					return User{}, false
-				}
-				user = fresh
-				if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-CSRF-Token") != sess.CSRF {
+			if !fresh.Enabled {
+				writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
+				return User{}, false
+			}
+			user = fresh
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				provided := HashToken(r.Header.Get("X-CSRF-Token"))
+				if subtle.ConstantTimeCompare([]byte(provided), []byte(sess.CSRFHash)) != 1 {
 					writeError(w, http.StatusForbidden, "csrf_failed", "CSRF token is missing or invalid")
 					return User{}, false
 				}
-			} else {
-				s.sessions.Delete(cookie.Value)
 			}
+		} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+			slog.Default().Error("controller session lookup failed", "error", lookupErr)
+			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "authentication service is temporarily unavailable")
+			return User{}, false
 		}
 	}
 	if err != nil {

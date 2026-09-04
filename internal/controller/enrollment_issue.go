@@ -49,7 +49,7 @@ func (s *ResourceRepository) createEnrollmentTokenWithOptions(ctx context.Contex
 	if nodeID != "" {
 		request["node_id"] = nodeID
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return "", EnrollmentToken{}, err
 	}
@@ -91,7 +91,7 @@ func (s *ResourceRepository) createEnrollmentTokenWithOptions(ctx context.Contex
 			}
 			token.UsedAt = &value
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitWriteTx(ctx, tx); err != nil {
 			return "", EnrollmentToken{}, err
 		}
 		return "", token, ErrSecretAlreadyCreated
@@ -130,7 +130,7 @@ func (s *ResourceRepository) createEnrollmentTokenWithOptions(ctx context.Contex
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
 		return "", EnrollmentToken{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return "", EnrollmentToken{}, err
 	}
 	return plain, EnrollmentToken{ID: id, ExpiresAt: expires, CreatedAt: now}, nil

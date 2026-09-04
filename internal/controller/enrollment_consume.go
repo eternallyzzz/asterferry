@@ -14,7 +14,7 @@ func (s *ResourceRepository) RevokeEnrollmentToken(ctx context.Context, id strin
 }
 
 func (s *ResourceRepository) RevokeEnrollmentTokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -25,7 +25,7 @@ func (s *ResourceRepository) RevokeEnrollmentTokenWithOptions(ctx context.Contex
 		return err
 	}
 	if hit {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at=? WHERE id=? AND used_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
@@ -44,7 +44,7 @@ func (s *ResourceRepository) RevokeEnrollmentTokenWithOptions(ctx context.Contex
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }
 
 // consumeEnrollmentToken is a small package-level token-consumption helper;
@@ -57,7 +57,7 @@ func (s *ResourceRepository) consumeEnrollmentToken(ctx context.Context, plain s
 		return errors.New("enrollment token is required")
 	}
 	digest := HashToken(plain)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return storageFailure("begin enrollment token transaction", err)
 	}
@@ -68,7 +68,7 @@ func (s *ResourceRepository) consumeEnrollmentToken(ctx context.Context, plain s
 		}
 		return storageFailure("consume enrollment token", err)
 	}
-	return storageFailure("commit enrollment token", tx.Commit())
+	return storageFailure("commit enrollment token", s.commitWriteTx(ctx, tx))
 }
 
 func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest string) error {

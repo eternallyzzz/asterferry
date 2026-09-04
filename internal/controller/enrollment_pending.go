@@ -38,7 +38,7 @@ func (s *ResourceRepository) issuePendingNodeCertificate(ctx context.Context, co
 		return Certificate{}, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return Certificate{}, storageFailure("begin pending enrollment transaction", err)
 	}
@@ -104,7 +104,7 @@ func (s *ResourceRepository) issuePendingNodeCertificate(ctx context.Context, co
 	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial}); err != nil {
 		return Certificate{}, storageFailure("record pending node enrollment", err)
 	}
-	if err := s.commitAndNotifyResources(tx, nodeID); err != nil {
+	if err := s.commitAndNotifyResources(ctx, tx, nodeID); err != nil {
 		return Certificate{}, storageFailure("commit pending node enrollment", err)
 	}
 	return certificate, nil

@@ -28,7 +28,7 @@ func newControllerInitCommand() *cobra.Command {
 	var dir, username, password, passwordFile, httpListen, metricsListen, grpcListen, grpcAdvertise, releaseBaseURL, releaseVersion string
 	var databaseDriver, databaseURL string
 	var databaseMaxOpenConns int
-	var force bool
+	var highAvailability, force bool
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "initialize Controller CA, database and first Admin account",
@@ -50,7 +50,7 @@ func newControllerInitCommand() *cobra.Command {
 				}
 				generated = true
 			}
-			result, err := controller.Init(cmd.Context(), controller.InitOptions{Dir: dir, HTTPListen: httpListen, MetricsListen: metricsListen, MetricsListenSet: cmd.Flags().Changed("metrics-listen"), GRPCListen: grpcListen, GRPCAdvertise: grpcAdvertise, ReleaseBaseURL: releaseBaseURL, ReleaseVersion: releaseVersion, DatabaseDriver: databaseDriver, DatabaseURL: databaseURL, DatabaseMaxOpenConns: databaseMaxOpenConns, Username: username, Password: password, Force: force})
+			result, err := controller.Init(cmd.Context(), controller.InitOptions{Dir: dir, HTTPListen: httpListen, MetricsListen: metricsListen, MetricsListenSet: cmd.Flags().Changed("metrics-listen"), GRPCListen: grpcListen, GRPCAdvertise: grpcAdvertise, ReleaseBaseURL: releaseBaseURL, ReleaseVersion: releaseVersion, DatabaseDriver: databaseDriver, DatabaseURL: databaseURL, DatabaseMaxOpenConns: databaseMaxOpenConns, HighAvailability: highAvailability, Username: username, Password: password, Force: force})
 			if err != nil {
 				return err
 			}
@@ -75,6 +75,7 @@ func newControllerInitCommand() *cobra.Command {
 	cmd.Flags().StringVar(&databaseDriver, "database-driver", controller.DatabaseDriverSQLite, "Controller database backend (sqlite or postgres)")
 	cmd.Flags().StringVar(&databaseURL, "database-url", "", "PostgreSQL connection URL (required with --database-driver=postgres)")
 	cmd.Flags().IntVar(&databaseMaxOpenConns, "database-max-open-conns", 0, "maximum PostgreSQL connections (default 16; ignored for SQLite)")
+	cmd.Flags().BoolVar(&highAvailability, "high-availability", false, "enable PostgreSQL active/standby Controller leadership")
 	cmd.Flags().BoolVar(&force, "force", false, "initialize an empty or existing directory")
 	_ = cmd.MarkFlagRequired("grpc-advertise")
 	return cmd
