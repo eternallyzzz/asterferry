@@ -39,7 +39,7 @@ password is supplied:
 ```powershell
 asterferry controller init --dir ./controller `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 2.0.0
+  --release-version 1.0.0
 asterferry controller run --config ./controller/controller.json
 ```
 
@@ -55,7 +55,7 @@ asterferry controller configure `
 ```
 
 If the old configuration also has no published `release_version`, append
-`--release-version 2.0.0` (and use `--release-base-url` for a private HTTPS
+`--release-version 1.0.0` (and use `--release-base-url` for a private HTTPS
 mirror).
 
 For a Windows Controller with Nodes running in the local WSL instance, the
@@ -294,22 +294,24 @@ instrumented binaries with Windows status `0xc0000139`.
 ## Release preparation
 
 The normalized Controller/data-plane architecture is prepared as the first
-public `v2.0.0` release. It is a fresh boundary for pre-v2 inputs, while future
-v2.x releases preserve the API, wire and database contracts. Follow the
-[`stable release runbook`](docs/release-runbook.md): publish an RC, soak it for
-seven days, then create the final tag. Keep `CHANGELOG.md` as `Unreleased`
-until the release tag is created.
+public `v1.0.0` release. It is a fresh boundary for all pre-release inputs,
+while future v1.x releases preserve the API, wire and database contracts.
+Follow the [`stable release runbook`](docs/release-runbook.md): publish
+`v1.0.0-rc.1`, soak it for seven days, then create the final tag. Keep
+`CHANGELOG.md` as `Unreleased` until the stable release tag is created.
+During the RC soak, use `--release-version 1.0.0-rc.1` after the RC assets
+are published; use `1.0.0` only after the stable release exists.
 
 Run the release preflight on Windows before merging the final release commit:
 
 ```powershell
-.\scripts\release-check.ps1 -Version 2.0.0 -SkipDocker
+.\scripts\release-check.ps1 -Version 1.0.0 -SkipDocker
 ```
 
 The tag workflow repeats the checks on Linux, runs the integration and race
 gates, builds Linux amd64/arm64 and Windows amd64 archives, packages both Helm
 charts, and publishes the install scripts, SHA-256 checksums, source SBOM,
 signed multi-architecture GHCR image and signed OCI charts. After the final
-commit reaches `main`, the maintainer can create and push `v2.0.0` to start
-that workflow. Verify the GitHub assets, both chart digests and an end-to-end
-fresh Controller/Node installation before announcing the release.
+commit reaches `main`, the maintainer can create and push `v1.0.0-rc.1` to start
+that workflow. Verify the RC GitHub assets, both chart digests and an end-to-end
+fresh Controller/Node installation before beginning the soak.

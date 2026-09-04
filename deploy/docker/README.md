@@ -13,7 +13,7 @@ Build the image and initialize the Controller once on the host:
 ```powershell
 asterferry controller init --dir ./controller `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 2.0.0
+  --release-version 1.0.0
 docker compose -f deploy/docker/compose.yaml build
 ```
 

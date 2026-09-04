@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "2.0.0",
+    [string]$Version = "1.0.0",
     [string]$OutputDirectory = "tmp/release-check",
     [switch]$SkipDocker
 )

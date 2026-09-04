@@ -23,7 +23,7 @@ function Invoke-Sc {
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   throw "run this installer from an elevated PowerShell window"
 }
-if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "version must be X.Y.Z" }
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$') { throw "version must be X.Y.Z or X.Y.Z-rc.N" }
 
 $rawArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 $actualArch = switch ($rawArch.ToUpperInvariant()) {
