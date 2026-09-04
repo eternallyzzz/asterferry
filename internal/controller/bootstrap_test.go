@@ -17,6 +17,19 @@ import (
 	nodepkg "asterferry/internal/node"
 )
 
+func TestReleaseVersionAcceptsStableAndReleaseCandidateTags(t *testing.T) {
+	for _, version := range []string{"1.0.0", "v1.2.3", "1.2.3-rc.4"} {
+		if !validReleaseVersion(version) {
+			t.Fatalf("valid release version %q was rejected", version)
+		}
+	}
+	for _, version := range []string{"dev", "1.2", "1.2.3-beta.1", "1.2.3-rc", "1.2.3-rc.x"} {
+		if validReleaseVersion(version) {
+			t.Fatalf("invalid release version %q was accepted", version)
+		}
+	}
+}
+
 func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 	dir := t.TempDir()
 	config := DefaultConfig(dir)

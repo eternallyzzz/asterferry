@@ -16,17 +16,19 @@ import (
 // Controller wires the authoritative store and the two control-plane
 // listeners. The data-plane engines never import this type.
 type Controller struct {
-	Config       Config
-	Store        *Store
-	HTTP         *Server
-	grpcListener interface{ Close() error }
-	httpListener net.Listener
-	grpcServer   interface {
+	Config          Config
+	Store           *Store
+	HTTP            *Server
+	grpcListener    interface{ Close() error }
+	httpListener    net.Listener
+	metricsListener net.Listener
+	grpcServer      interface {
 		Stop()
 		GracefulStop()
 	}
 	grpcServeErr    <-chan error
 	httpServeErr    <-chan error
+	metricsServeErr <-chan error
 	reconcileCancel context.CancelFunc
 	closeOnce       sync.Once
 	closeErr        error
@@ -98,8 +100,19 @@ func (c *Controller) Start(ctx context.Context) error {
 		cancel()
 		return err
 	}
+	metricsListener, err := c.HTTP.MetricsListener()
+	if err != nil && c.Config.MetricsListen != "" {
+		c.started = false
+		c.HTTP.Close()
+		grpcServer.Stop()
+		_ = listener.Close()
+		_ = httpListener.Close()
+		cancel()
+		return fmt.Errorf("bind controller metrics listener: %w", err)
+	}
 	c.grpcListener, c.grpcServer = listener, grpcServer
 	c.httpListener = httpListener
+	c.metricsListener = metricsListener
 	c.grpcServeErr = grpcServeErr
 	c.waitDone = make(chan struct{})
 	c.reconcileCancel = cancel
@@ -109,12 +122,24 @@ func (c *Controller) Start(ctx context.Context) error {
 		httpServeErr <- c.HTTP.Serve(httpListener)
 		close(httpServeErr)
 	}()
+	var metricsServeErr chan error
+	if metricsListener != nil {
+		metricsServeErr = make(chan error, 1)
+		c.metricsServeErr = metricsServeErr
+		go func() {
+			metricsServeErr <- c.HTTP.ServeMetrics(metricsListener)
+			close(metricsServeErr)
+		}()
+	}
 	// Context cancellation must stop both control-plane listeners. Close is
 	// idempotent, so an explicit caller shutdown can safely race this goroutine.
 	go func() {
 		<-runCtx.Done()
 		_ = c.HTTP.Close()
 		_ = httpListener.Close()
+		if metricsListener != nil {
+			_ = metricsListener.Close()
+		}
 	}()
 	go c.reconcileLoop(runCtx)
 	go c.maintenanceLoop(runCtx)
@@ -182,6 +207,27 @@ func (c *Controller) monitorServers(ctx context.Context) {
 				c.grpcServer.Stop()
 			}
 			finish(fmt.Errorf("HTTP serve failed: %w", err))
+			return
+		case err, ok := <-c.metricsServeErr:
+			if !ok {
+				err = errors.New("metrics server stopped unexpectedly")
+			}
+			if ctx.Err() != nil || isExpectedServerStopError(err) {
+				finish(nil)
+				return
+			}
+			if err == nil {
+				err = errors.New("metrics server stopped unexpectedly")
+			}
+			c.logServeFailure("metrics", err)
+			if c.reconcileCancel != nil {
+				c.reconcileCancel()
+			}
+			if c.grpcServer != nil {
+				c.grpcServer.Stop()
+			}
+			_ = c.HTTP.Close()
+			finish(fmt.Errorf("metrics serve failed: %w", err))
 			return
 		}
 	}
@@ -305,6 +351,9 @@ func (c *Controller) Close() error {
 		}
 		if c.httpListener != nil {
 			_ = c.httpListener.Close()
+		}
+		if c.metricsListener != nil {
+			_ = c.metricsListener.Close()
 		}
 		if c.Store != nil {
 			c.closeErr = c.Store.Close()

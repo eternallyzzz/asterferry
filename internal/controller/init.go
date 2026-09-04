@@ -24,6 +24,8 @@ import (
 type InitOptions struct {
 	Dir                  string
 	HTTPListen           string
+	MetricsListen        string
+	MetricsListenSet     bool
 	GRPCListen           string
 	GRPCAdvertise        string
 	ReleaseBaseURL       string
@@ -68,6 +70,9 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	config := DefaultConfig(dir)
 	if options.HTTPListen != "" {
 		config.HTTPListen = options.HTTPListen
+	}
+	if options.MetricsListenSet || options.MetricsListen != "" {
+		config.MetricsListen = options.MetricsListen
 	}
 	if options.GRPCListen != "" {
 		config.GRPCListen = options.GRPCListen
@@ -148,6 +153,7 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	}()
 	stagedConfig := DefaultConfig(staging)
 	stagedConfig.HTTPListen = config.HTTPListen
+	stagedConfig.MetricsListen = config.MetricsListen
 	stagedConfig.GRPCListen = config.GRPCListen
 	stagedConfig.GRPCAdvertise = config.GRPCAdvertise
 	stagedConfig.ReleaseBaseURL = config.ReleaseBaseURL

@@ -5,7 +5,8 @@ FROM docker.io/library/node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c62
 WORKDIR /src
 
 COPY web/dashboard/package.json web/dashboard/package-lock.json ./web/dashboard/
-RUN npm --prefix web/dashboard ci
+RUN npm install --global npm@12.0.2 \
+	&& npm --prefix web/dashboard ci
 
 COPY web/dashboard ./web/dashboard
 RUN npm --prefix web/dashboard run build
@@ -35,5 +36,5 @@ COPY --from=build /out/asterferry /usr/local/bin/asterferry
 USER 10001:10001
 WORKDIR /etc/asterferry
 
-EXPOSE 8443/tcp 9443/tcp 4433/udp
+EXPOSE 8443/tcp 9443/tcp 9090/tcp 4433/udp
 ENTRYPOINT ["/usr/local/bin/asterferry"]

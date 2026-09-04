@@ -159,8 +159,12 @@ try {
         throw "Expected Go $expectedGoVersion, got: $goVersion"
     }
     $nodeVersion = (& node --version).Trim()
-    if ($nodeVersion -notlike "v24.*") {
-        throw "Expected Node v24.x, got: $nodeVersion"
+    if ($nodeVersion -ne "v24.19.0") {
+        throw "Expected Node v24.19.0, got: $nodeVersion"
+    }
+    $npmVersion = (& npm --version).Trim()
+    if ($npmVersion -ne "12.0.2") {
+        throw "Expected npm 12.0.2, got: $npmVersion"
     }
     $cgoEnabled = (& go env CGO_ENABLED).Trim()
     if (-not $SkipRace -and $cgoEnabled -ne "1") {
@@ -224,6 +228,9 @@ try {
     Invoke-Logged "Windows staticcheck" "staticcheck" @("./...")
     Invoke-Logged "Windows vulnerability check" "govulncheck" @("./...")
     Invoke-Logged "Windows full tests" "go" @("test", "-count=1", "./...")
+    Invoke-Logged "Windows Controller/Gateway/Agent smoke test" "go" @("test", "-tags=integration", "-count=1", "-timeout=5m", "./internal/integration")
+    Invoke-Logged "Windows AFDP decoder fuzz smoke" "go" @("test", "./internal/afdp", "-run", "^$", "-fuzz", "FuzzDecodeAFDPFrames", "-fuzztime", "10s")
+    Invoke-Logged "Windows control-wire decoder fuzz smoke" "go" @("test", "./internal/controlwire", "-run", "^$", "-fuzz", "FuzzControlwireDecoders", "-fuzztime", "10s")
     $controllerSmoke = Join-Path $outputDir "controller-smoke"
     if (Test-Path -LiteralPath $controllerSmoke) {
         Remove-Item -LiteralPath $controllerSmoke -Recurse -Force

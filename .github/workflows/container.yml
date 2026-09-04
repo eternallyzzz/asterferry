@@ -66,9 +66,11 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24.x"
+          node-version: "24.19.0"
           cache: npm
           cache-dependency-path: web/dashboard/package-lock.json
+      - name: Pin npm toolchain
+        run: npm install --global npm@12.0.2
       - name: Verify Dashboard dependencies and build
         run: |
           npm --prefix web/dashboard ci
@@ -77,7 +79,9 @@ jobs:
           npm --prefix web/dashboard run build
           npm --prefix web/dashboard audit --registry=https://registry.npmjs.org --omit=dev --audit-level=high
           test -s internal/dashboard/dist/index.html
-          cmp -s api/openapi.yaml internal/controller/openapi.yaml
+          python3 scripts/sync-openapi.py --check
+      - name: Scan tracked files for release secrets
+        run: python3 scripts/secret-scan.py
       - name: Check patch whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD
@@ -156,8 +160,12 @@ jobs:
           cache: true
       - name: Verify Go modules
         run: go mod verify
+      - name: Scan tracked files for release secrets
+        run: python scripts/secret-scan.py
       - name: Run tests
         run: go test ./...
+      - name: Run Windows Controller/Gateway/Agent smoke test
+        run: go test -tags=integration -count=1 -timeout=5m ./internal/integration
       - name: Run race tests
         run: go test -race ./...
       - name: Run vet
@@ -180,10 +188,48 @@ jobs:
       - name: Run Controller/Gateway/Agent QUIC end-to-end test
         run: go test -tags=integration -count=1 -timeout=5m ./internal/integration
 
+  protocol_fuzz:
+    name: AFDP and control-wire fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.7"
+          cache: true
+      - name: Fuzz AFDP decoders
+        run: go test ./internal/afdp -run '^$' -fuzz FuzzDecodeAFDPFrames -fuzztime 20s
+      - name: Fuzz control-wire decoders
+        run: go test ./internal/controlwire -run '^$' -fuzz FuzzControlwireDecoders -fuzztime 20s
+
+  performance:
+    name: Protocol benchmark regression gate
+    if: github.event_name == 'pull_request'
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.7"
+          cache: true
+      - name: Compare protocol benchmarks with base
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/bench-regression.sh "$GITHUB_BASE_REF"
+
   image:
     name: Build development image
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    needs: [test, e2e]
+    needs: [test, e2e, protocol_fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -222,7 +268,7 @@ jobs:
   release_build:
     name: Build release artifacts
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, e2e]
+    needs: [test, e2e, protocol_fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -240,17 +286,19 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24.x"
+          node-version: "24.19.0"
           cache: npm
           cache-dependency-path: web/dashboard/package-lock.json
+      - name: Pin npm toolchain
+        run: npm install --global npm@12.0.2
       - name: Set up Helm
         uses: azure/setup-helm@bf6a7d304bc2fdb57e0331155b7ebf2c504acf0a # v4
       - name: Validate release tag
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "release tags must match vMAJOR.MINOR.PATCH" >&2
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
+            echo "release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N" >&2
             exit 1
           }
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
@@ -258,13 +306,15 @@ jobs:
             exit 1
           }
           version="${GITHUB_REF_NAME#v}"
-          python3 - "$version" <<'PY'
+          stable_version="${version%%-rc.*}"
+          python3 - "$version" "$stable_version" <<'PY'
           import json
           import re
           import sys
           from pathlib import Path
 
-          version = sys.argv[1]
+          tag_version = sys.argv[1]
+          stable_version = sys.argv[2]
           versions = {}
 
           for path in (Path("api/openapi.yaml"), Path("internal/controller/openapi.yaml")):
@@ -292,19 +342,19 @@ jobs:
               versions[f"{path} appVersion"] = app_version.group(1)
 
           changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          heading = rf"(?m)^## \[{re.escape(version)}\] - (?:Unreleased|\d{{4}}-\d{{2}}-\d{{2}})\r?$"
+          heading = rf"(?m)^## \[{re.escape(stable_version)}\] - (?:Unreleased|\d{{4}}-\d{{2}}-\d{{2}})\r?$"
           if not re.search(heading, changelog):
-              raise SystemExit(f"CHANGELOG.md has no entry for {version}")
+              raise SystemExit(f"CHANGELOG.md has no entry for {stable_version}")
 
-          mismatches = {path: value for path, value in versions.items() if value != version}
+          mismatches = {path: value for path, value in versions.items() if value != stable_version}
           if mismatches:
               details = ", ".join(f"{path}={value}" for path, value in mismatches.items())
-              raise SystemExit(f"release version {version} is inconsistent: {details}")
+              raise SystemExit(f"release version {stable_version} is inconsistent: {details}")
           if len(set(versions.values())) != 1:
               raise SystemExit(f"release version sources disagree: {versions}")
           if Path("api/openapi.yaml").read_bytes() != Path("internal/controller/openapi.yaml").read_bytes():
               raise SystemExit("API OpenAPI documents are not identical")
-          print(f"release version {version} is consistent across source metadata")
+          print(f"release tag {tag_version} is consistent with stable source version {stable_version}")
           PY
       - name: Verify dashboard assets
         run: |
@@ -312,6 +362,8 @@ jobs:
           npm --prefix web/dashboard run build
           test -s internal/dashboard/dist/index.html
           test -z "$(git ls-files -- internal/dashboard/dist)"
+      - name: Run release protocol benchmarks
+        run: go test ./internal/afdp ./internal/controlwire ./internal/dataplane -run '^$' -bench '^Benchmark' -benchmem -benchtime=3s -count=5
       - name: Build native release archives
         uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0
         with:
@@ -417,7 +469,7 @@ jobs:
             type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
       - name: Set build metadata
         id: build-meta
         shell: bash
@@ -550,6 +602,13 @@ jobs:
               "tag": os.environ["GITHUB_REF_NAME"],
               "commit": os.environ["GITHUB_SHA"],
               "protocol": "AFDP/2 + control/2",
+              "optional_resources": {
+                  "geoip": {
+                      "included": False,
+                      "provisioning": "operator-supplied versioned MaxMind-compatible database",
+                      "max_age_days": 180,
+                  }
+              },
               "image": {
                   "repository": "ghcr.io/eternallyzzz/asterferry",
                   "digest": os.environ["IMAGE_DIGEST"],
@@ -580,8 +639,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "AsterFerry $GITHUB_REF_NAME" \
-            --generate-notes \
-            --verify-tag
+          release_flags=(--repo "$GITHUB_REPOSITORY" --title "AsterFerry $GITHUB_REF_NAME" --generate-notes --verify-tag)
+          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* "${release_flags[@]}"

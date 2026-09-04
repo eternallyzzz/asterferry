@@ -70,7 +70,25 @@ func normalizeBootstrapPlatform(platform, arch string) (string, string, error) {
 
 func validReleaseVersion(value string) bool {
 	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
-	parts := strings.Split(value, ".")
+	base, suffix, hasSuffix := strings.Cut(value, "-")
+	if hasSuffix && !strings.HasPrefix(suffix, "rc.") {
+		return false
+	}
+	if hasSuffix {
+		rcNumber := strings.TrimPrefix(suffix, "rc.")
+		if rcNumber == "" {
+			return false
+		}
+		for _, r := range rcNumber {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		if _, err := strconv.ParseUint(rcNumber, 10, 32); err != nil {
+			return false
+		}
+	}
+	parts := strings.Split(base, ".")
 	if len(parts) != 3 {
 		return false
 	}

@@ -27,12 +27,14 @@ import (
 )
 
 type RuntimeOptions struct {
-	Logger        *slog.Logger
-	CachePath     string
-	CacheKeyPath  string
-	BootstrapPath string
-	MaxStreams    int
-	MaxSessions   int
+	Logger            *slog.Logger
+	CachePath         string
+	CacheKeyPath      string
+	BootstrapPath     string
+	MaxStreams        int
+	MaxSessions       int
+	GeoIPDatabasePath string
+	GeoIPMaxAge       time.Duration
 }
 
 type Runtime struct {
@@ -164,7 +166,13 @@ func (r *Runtime) ensureRuntimeKind(kind domain.NodeSpecKind) (*dataplane.Engine
 	if err != nil {
 		return nil, nil, err
 	}
-	dataPlane, err := NewDataPlaneRuntime(DataPlaneOptions{Engine: engine, Bootstrap: r.bootstrapSnapshot(), Logger: r.runtimeOpts.Logger})
+	dataPlane, err := NewDataPlaneRuntime(DataPlaneOptions{
+		Engine:            engine,
+		Bootstrap:         r.bootstrapSnapshot(),
+		Logger:            r.runtimeOpts.Logger,
+		GeoIPDatabasePath: r.runtimeOpts.GeoIPDatabasePath,
+		GeoIPMaxAge:       r.runtimeOpts.GeoIPMaxAge,
+	})
 	if err != nil {
 		_ = engine.Close()
 		return nil, nil, err

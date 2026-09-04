@@ -13,5 +13,9 @@ internal/dashboard/dist/
 *.crt
 *.pem
 *.token
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
 secrets/
 tmp/

@@ -7,9 +7,10 @@ import (
 
 // OpenAPISpec is embedded into the Controller binary so the documented API is
 // available even when the source tree is not present at runtime. The canonical
-// document is api/openapi.yaml; the checked-in copy is refreshed by the build
-// workflow before compiling the binary.
+// document is api/openapi.yaml; refresh the generated copy with
+// `python scripts/sync-openapi.py` (or `go generate ./internal/controller`).
 //
+//go:generate python ../../scripts/sync-openapi.py
 //go:embed openapi.yaml
 var OpenAPISpec string
 

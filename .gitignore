@@ -1,6 +1,18 @@
 *.exe
 *.log
 *.err
+# Local credentials, certificates and database state must never become a
+# tracked release input. Use an explicitly named, reviewed fixture directory
+# for any test material that genuinely needs to be checked in.
+*.key
+*.crt
+*.pem
+*.token
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+secrets/
 tmp/
 /dist/
 internal/dashboard/dist/

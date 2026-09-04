@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type Server struct {
 	store         *Store
 	config        Config
 	http          *http.Server
+	metricsHTTP   *http.Server
 	sessions      sync.Map // process-local opaque session id -> session; not shared or persisted
 	sessionCtx    context.Context
 	sessionCancel context.CancelFunc
@@ -54,8 +56,20 @@ func NewServer(config Config, store *Store) (*Server, error) {
 	// their own bounded read/decode limits; the write deadline must not cut off
 	// a healthy event stream after an absolute 30-second wall clock interval.
 	server.http = &http.Server{Addr: config.HTTPListen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 90 * time.Second}
+	if strings.TrimSpace(config.MetricsListen) != "" {
+		server.metricsHTTP = &http.Server{Addr: config.MetricsListen, Handler: server.metricsOnlyHandler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second}
+	}
 	go server.runSessionReaper()
 	return server, nil
+}
+
+// metricsOnlyHandler is deliberately a separate surface from the management
+// HTTPS handler. It exposes only Prometheus metrics and relies on the bind
+// address plus deployment network policy for access control.
+func (s *Server) metricsOnlyHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", s.internalMetricsHandler)
+	return s.metrics.middleware(securityHeaders(httpWriteDeadlineMiddleware(mux)))
 }
 
 func (s *Server) Handler() http.Handler {
@@ -157,6 +171,28 @@ func (s *Server) Serve(listener net.Listener) error {
 	}
 	return s.http.Serve(listener)
 }
+
+// MetricsListener binds the optional internal metrics endpoint. It is a plain
+// HTTP listener by design: native defaults bind loopback, while Kubernetes
+// deployments must explicitly expose and restrict the metrics Service.
+func (s *Server) MetricsListener() (net.Listener, error) {
+	if s == nil || s.metricsHTTP == nil {
+		return nil, nil
+	}
+	return net.Listen("tcp", s.config.MetricsListen)
+}
+
+// ServeMetrics runs the already-bound internal metrics listener.
+func (s *Server) ServeMetrics(listener net.Listener) error {
+	if s == nil || s.metricsHTTP == nil {
+		return errors.New("controller metrics server is disabled")
+	}
+	if listener == nil {
+		return errors.New("controller metrics listener is required")
+	}
+	return s.metricsHTTP.Serve(listener)
+}
+
 func (s *Server) Close() error {
 	if s == nil {
 		return nil
@@ -168,9 +204,16 @@ func (s *Server) Close() error {
 		}
 	}
 	if s.http == nil {
-		return nil
+		if s.metricsHTTP == nil {
+			return nil
+		}
+		return s.metricsHTTP.Close()
 	}
-	return s.http.Close()
+	mainErr := s.http.Close()
+	if s.metricsHTTP != nil {
+		return errors.Join(mainErr, s.metricsHTTP.Close())
+	}
+	return mainErr
 }
 
 func (s *Server) runSessionReaper() {
@@ -222,6 +265,10 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorize(w, r, RoleViewer); !ok {
 		return
 	}
+	s.internalMetricsHandler(w, r)
+}
+
+func (s *Server) internalMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	s.metrics.refreshDatabase(s.store)
 	s.metrics.Handler().ServeHTTP(w, r)
 }

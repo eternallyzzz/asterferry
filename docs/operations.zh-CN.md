@@ -47,11 +47,13 @@ Service 中，客户端到 Agent 是入站，Agent 到客户端是出站；Gatew
 
 ## Controller HTTP 端点策略
 
-端点策略是有意设计的：`/healthz` 完全匿名；`/readyz` 和 `/metrics` 需要
-经过认证的 Viewer、Operator 或 Admin；`/openapi.yaml` 及
-`/api/v1/openapi.yaml` 为便于客户端发现而保持匿名。如果部署环境不应公开
-API 元数据，请在 HTTPS ingress 或网络策略层限制 OpenAPI 路径。Prometheus
-应使用只读 Viewer API Token。
+端点策略是有意设计的：`/healthz` 完全匿名；管理 HTTPS 上的 `/readyz` 和
+`/metrics` 需要经过认证的 Viewer、Operator 或 Admin；`/openapi.yaml` 及
+`/api/v1/openapi.yaml` 为便于客户端发现而保持匿名。Controller 还可提供
+独立的普通 HTTP `/metrics` 监听，原生默认只绑定 `127.0.0.1:9090`，只有
+在可信 Prometheus 网络中才应改绑或暴露。Prometheus 优先抓取该独立监听，
+否则使用管理端点时应使用只读 Viewer API Token。如果部署环境不应公开 API
+元数据，请在 HTTPS ingress 或网络策略层限制 OpenAPI 路径。
 
 浏览器 Cookie 会话只保存在 Controller 进程内存中，有效期 12 小时；进程重启
 或请求落到另一副本都会使其失效，自动化客户端应使用 API Token。共享会话存储

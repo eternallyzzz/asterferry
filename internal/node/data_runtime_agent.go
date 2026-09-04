@@ -519,7 +519,7 @@ func expirePendingAgentDatagrams(flowMu *sync.RWMutex, pending map[uint64][]pend
 func (d *DataPlaneRuntime) dialProxyTarget(state *dataGeneration, ctx context.Context, target, route string) (net.Conn, error) {
 	selectedRoute := strings.ToLower(strings.TrimSpace(route))
 	if selectedRoute == "" && state.snap.Agent != nil {
-		selectedRoute = selectAgentRoute(*state.snap.Agent, target)
+		selectedRoute = selectAgentRoute(*state.snap.Agent, target, state.geoIP)
 	}
 	if selectedRoute == "gateway" {
 		for _, assignment := range state.snap.Assignments {
@@ -556,6 +556,6 @@ func (d *DataPlaneRuntime) dialProxyTarget(state *dataGeneration, ctx context.Co
 	return &egressConn{Conn: local, release: releaseEgress}, nil
 }
 
-func selectAgentRoute(spec domain.AgentSpec, target string) string {
-	return dataplane.SelectRoute(spec, target)
+func selectAgentRoute(spec domain.AgentSpec, target string, resolver *dataplane.GeoIPResolver) string {
+	return dataplane.SelectRouteWithResolver(spec, target, resolver)
 }

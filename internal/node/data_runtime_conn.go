@@ -20,6 +20,7 @@ type dataGeneration struct {
 	cancel context.CancelFunc
 	engine *dataplane.Engine
 	snap   domain.DesiredSnapshot
+	geoIP  *dataplane.GeoIPResolver
 
 	quicListeners []*quic.Listener
 	quicPackets   []net.PacketConn

@@ -40,14 +40,15 @@ management policy. The chart remains single-replica; PostgreSQL removes the
 SQLite write-connection bottleneck but does not add Controller HA.
 
 The HTTPS endpoint policy is deliberate: `/healthz` is anonymous;
-`/readyz` and `/metrics` require an authenticated Viewer, Operator or Admin;
-and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
-discovery. Configure Prometheus with a read-only Viewer API token and use the
-Service/Ingress network policy to restrict the OpenAPI paths if they should
-not be public. Browser Cookie sessions are process-local in-memory state with
-a 12-hour lifetime, so a restart or another replica invalidates them; use API
-tokens for automated clients. Shared sessions and Controller HA are outside
-this chart.
+`/readyz` and management `/metrics` require an authenticated Viewer, Operator
+or Admin; and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for
+client discovery. The Controller chart keeps a separate plain-HTTP metrics
+listener disabled by default. Set `metrics.enabled=true`, choose the listen
+address, and apply a namespace/network policy before exposing its Service;
+this is the standard unauthenticated Prometheus scrape surface. Browser Cookie
+sessions are process-local in-memory state with a 12-hour lifetime, so a
+restart or another replica invalidates them; use API tokens for automated
+clients. Shared sessions and Controller HA are outside this chart.
 
 ## Node releases
 
@@ -76,6 +77,11 @@ chart's tag.
 There is no role switch in the chart. Both releases run the same generic Node
 command; select Gateway or Agent behavior in the Dashboard after the Node
 connects.
+
+GeoIP routing is disabled by default. To enable it, supply a reviewed,
+versioned MaxMind-compatible database in an operator-owned ConfigMap and set
+`geoip.enabled=true` and `geoip.existingConfigMap=<name>`. The chart mounts it
+read-only; the database is never downloaded by the Node.
 
 The node chart copies the Secret into its private state PVC so certificate
 rotation can atomically update the bootstrap file. Configured Gateway data

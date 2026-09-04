@@ -41,3 +41,9 @@ architecture.
 - Hardens storage error classification, PostgreSQL connection lifetime,
   idempotency retention, schema probing, joined resource reads and UDP flow
   cleanup, with regression coverage for the affected paths.
+- Adds an opt-in, separately bound Prometheus listener with a loopback default;
+  management HTTPS metrics remain authenticated. GeoIP routing is now an
+  optional external, freshness-checked resource instead of a repository or
+  image binary.
+- Adds release-candidate tagging, seven-day soak guidance, tracked-secret
+  scanning, protocol fuzz smoke and same-runner benchmark regression gates.
