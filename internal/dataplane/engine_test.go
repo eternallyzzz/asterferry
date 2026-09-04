@@ -14,7 +14,7 @@ func TestEngineEgressPolicyResolvesAndLimitsTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-egress",
 		Generation:    1,
 		Agent: &domain.AgentSpec{
@@ -63,7 +63,7 @@ func TestEngineEgressPolicyRequiresSpecialUseException(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-special",
 		Generation:    1,
 		Agent: &domain.AgentSpec{
@@ -88,7 +88,7 @@ func TestEngineEgressLimitAppliesWhenFilteringIsDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-unrestricted",
 		Generation:    1,
 		Agent: &domain.AgentSpec{
@@ -118,7 +118,7 @@ func TestGatewayEngineAuthorizesEgressWithoutService(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "gateway-egress",
 		Generation:    1,
 		Gateway: &domain.GatewaySpec{
@@ -161,7 +161,7 @@ func TestEngineAppliesAtomicallyAndBoundsAdmissions(t *testing.T) {
 	}
 	service := domain.Service{ID: "svc-1", AgentID: "agent-1", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "127.0.0.1", Enabled: true}
 	assignment := domain.Assignment{ID: "as-1", GatewayID: "gw-1", AgentID: "agent-1", ServiceIDs: []string{"svc-1"}, Generation: 1}
-	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1"}, Services: []domain.Service{service}, Assignments: []domain.Assignment{assignment}}).WithChecksum()
+	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1"}, Services: []domain.Service{service}, Assignments: []domain.Assignment{assignment}}).WithChecksum()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestEngineAppliesAgentConnectionLimit(t *testing.T) {
 	}
 	service := domain.Service{ID: "svc", AgentID: "agent-connections", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "127.0.0.1", Enabled: true}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-connections",
 		Generation:    1,
 		Agent:         &domain.AgentSpec{NodeID: "agent-connections", Limits: domain.AgentLimits{MaxConnections: 1, MaxBufferBytes: 4096}},
@@ -226,7 +226,7 @@ func TestEngineLocalProxyUsesConnectionLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-local",
 		Generation:    1,
 		Agent: &domain.AgentSpec{
@@ -259,7 +259,7 @@ func TestEngineResetSnapshotClearsSpeculativeGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-reset",
 		Generation:    7,
 		Agent:         &domain.AgentSpec{NodeID: "agent-reset"},
@@ -294,7 +294,7 @@ func TestEngineOpenLeaseIsGenerationScoped(t *testing.T) {
 	}
 	service := domain.Service{ID: "svc", AgentID: "agent-lease", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "127.0.0.1", Enabled: true}
 	first, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-lease",
 		Generation:    1,
 		Agent:         &domain.AgentSpec{NodeID: "agent-lease"},
@@ -345,7 +345,7 @@ func TestEngineSnapshotStreamLimitCanBeRelaxed(t *testing.T) {
 	}
 	service := domain.Service{ID: "svc", AgentID: "agent-limit-reset", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "127.0.0.1", Enabled: true}
 	first, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-limit-reset",
 		Generation:    1,
 		Agent:         &domain.AgentSpec{NodeID: "agent-limit-reset", Limits: domain.AgentLimits{MaxStreams: 1}},

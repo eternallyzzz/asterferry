@@ -5,17 +5,22 @@ import (
 	"testing"
 	"time"
 
+	"asterferry/internal/afdp"
 	"asterferry/internal/domain"
 )
 
 func newTestDataGeneration() *dataGeneration {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &dataGeneration{
-		ctx:       ctx,
-		cancel:    cancel,
-		udpFlows:  make(map[uint64]*dataUDPFlow),
-		udpByKey:  make(map[string]*dataUDPFlow),
-		telemetry: newRuntimeTelemetry(),
+		ctx:               ctx,
+		cancel:            cancel,
+		gatewaySessions:   make(map[string]*afdp.Session),
+		agentSessions:     make(map[string]*afdp.Session),
+		gatewaySessionIDs: make(map[string]string),
+		agentSessionIDs:   make(map[string]string),
+		udpFlows:          make(map[uint64]*dataUDPFlow),
+		udpByKey:          make(map[string]*dataUDPFlow),
+		telemetry:         newRuntimeTelemetry(),
 	}
 }
 

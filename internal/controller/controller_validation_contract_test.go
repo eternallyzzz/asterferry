@@ -11,7 +11,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-func TestBuildDesiredSnapshotRejectsMaxInt64Generation(t *testing.T) {
+func TestDesiredSnapshotRejectsExhaustedGenerationContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func TestBuildDesiredSnapshotRejectsMaxInt64Generation(t *testing.T) {
 	}
 }
 
-func TestUpdateAssignmentEndpointsRejectsEmptyPublicEndpoints(t *testing.T) {
+func TestAssignmentEndpointValidationRejectsEmptyPublicEndpointsContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)

@@ -61,7 +61,7 @@ func TestOpenStoreWithConfigPreservesSchemaProbeCause(t *testing.T) {
 	if !errors.Is(err, ErrIncompatibleDatabase) {
 		t.Fatalf("expected incompatible database error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "schema_version") {
+	if !strings.Contains(err.Error(), "database_schema_version") {
 		t.Fatalf("schema probe cause was lost: %v", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestOpenStoreWithConfigTreatsMissingMarkerRowAsIncompatible(t *testing.T) {
 	}
 	for _, statement := range []string{
 		`CREATE TABLE legacy_state (id TEXT PRIMARY KEY)`,
-		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL, backend TEXT NOT NULL, fingerprint TEXT NOT NULL, initialized_at TEXT NOT NULL)`,
+		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), database_schema_version INTEGER NOT NULL, backend TEXT NOT NULL, database_schema_fingerprint TEXT NOT NULL, initialized_at TEXT NOT NULL)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			_ = db.Close()
@@ -174,10 +174,10 @@ func TestOpenStoreWithConfigCreatesCurrentGenerationMarker(t *testing.T) {
 	defer store.Close()
 	var version int64
 	var markerBackend, fingerprint, initializedAt string
-	if err := store.db.QueryRow(`SELECT schema_version, backend, fingerprint, initialized_at FROM schema_meta WHERE singleton=1`).Scan(&version, &markerBackend, &fingerprint, &initializedAt); err != nil {
+	if err := store.db.QueryRow(`SELECT database_schema_version, backend, database_schema_fingerprint, initialized_at FROM schema_meta WHERE singleton=1`).Scan(&version, &markerBackend, &fingerprint, &initializedAt); err != nil {
 		t.Fatal(err)
 	}
-	if version != currentDBSchema || markerBackend != DatabaseDriverSQLite || fingerprint != dbSchemaFingerprint || initializedAt == "" {
+	if version != int64(CurrentDatabaseSchemaVersion) || markerBackend != DatabaseDriverSQLite || fingerprint != DatabaseSchemaFingerprint() || initializedAt == "" {
 		t.Fatalf("unexpected schema marker version=%d backend=%q fingerprint=%q initialized_at=%q", version, markerBackend, fingerprint, initializedAt)
 	}
 	var userVersion int
@@ -196,6 +196,111 @@ func TestOpenStoreWithConfigCreatesCurrentGenerationMarker(t *testing.T) {
 	}
 	if pendingTable != 1 || pendingIndex != 1 {
 		t.Fatalf("pending bootstrap schema objects = table:%d index:%d", pendingTable, pendingIndex)
+	}
+}
+
+func TestOpenStoreWithConfigRejectsCurrentMarkerWithMissingTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "partial-current.db")
+	store, err := openTestStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE node_labels`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = openTestStore(path)
+	if store != nil {
+		_ = store.Close()
+	}
+	if !errors.Is(err, ErrIncompatibleDatabase) {
+		t.Fatalf("expected partially copied current database to be rejected, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `required table "node_labels" is missing`) {
+		t.Fatalf("missing required table was not reported, got %v", err)
+	}
+}
+
+func TestOpenStoreWithConfigRejectsExplicitV10MarkerWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v10-marker.db")
+	db, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), database_schema_version INTEGER NOT NULL, backend TEXT NOT NULL, database_schema_fingerprint TEXT NOT NULL, initialized_at TEXT NOT NULL)`,
+		`INSERT INTO schema_meta(singleton,database_schema_version,backend,database_schema_fingerprint,initialized_at) VALUES (1,10,'sqlite','asterferry-controller-db-v10-json','now')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openTestStore(path)
+	if store != nil {
+		_ = store.Close()
+	}
+	if !errors.Is(err, ErrIncompatibleDatabase) {
+		t.Fatalf("expected v10 database to be rejected, got %v", err)
+	}
+	check, err := sql.Open(driverName, sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version int64
+	var fingerprint string
+	if err := check.QueryRow(`SELECT database_schema_version,database_schema_fingerprint FROM schema_meta WHERE singleton=1`).Scan(&version, &fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if version != 10 || fingerprint != "asterferry-controller-db-v10-json" {
+		t.Fatalf("legacy marker was modified during rejection: version=%d fingerprint=%q", version, fingerprint)
+	}
+}
+
+func TestCurrentSchemaStoresBusinessAggregatesRelationally(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "relational.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, table := range []string{"nodes", "node_specs", "services", "assignments", "observed_states"} {
+		var oldJSONColumns int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='document_json'`, table).Scan(&oldJSONColumns); err != nil {
+			t.Fatalf("inspect %s: %v", table, err)
+		}
+		if oldJSONColumns != 0 {
+			t.Fatalf("normalized table %s still exposes document_json", table)
+		}
+	}
+	for _, table := range []string{
+		"node_labels", "gateway_specs", "gateway_endpoints", "gateway_listeners", "gateway_port_ranges",
+		"agent_specs", "agent_proxies", "agent_routes", "services", "service_selector_labels",
+		"assignment_services", "assignment_bindings", "assignment_acks", "observed_sessions", "observed_listeners",
+	} {
+		var present int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&present); err != nil {
+			t.Fatalf("inspect table %s: %v", table, err)
+		}
+		if present != 1 {
+			t.Fatalf("normalized relation table %s is missing", table)
+		}
 	}
 }
 

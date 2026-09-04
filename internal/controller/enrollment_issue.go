@@ -12,11 +12,11 @@ import (
 	"time"
 )
 
-func (s *Store) CreateEnrollmentToken(ctx context.Context, ttl time.Duration) (string, EnrollmentToken, error) {
+func (s *Repository) CreateEnrollmentToken(ctx context.Context, ttl time.Duration) (string, EnrollmentToken, error) {
 	return s.CreateEnrollmentTokenWithOptions(ctx, ttl, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+func (s *Repository) CreateEnrollmentTokenWithOptions(ctx context.Context, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
 	return s.createEnrollmentTokenWithOptions(ctx, "", ttl, options)
 }
 
@@ -25,18 +25,18 @@ func (s *Store) CreateEnrollmentTokenWithOptions(ctx context.Context, ttl time.D
 // in the one-time plaintext token and is covered by the stored token hash, so
 // this feature does not require a schema change to the generic enrollment
 // token table.
-func (s *Store) CreateNodeEnrollmentToken(ctx context.Context, nodeID string, ttl time.Duration) (string, EnrollmentToken, error) {
+func (s *Repository) CreateNodeEnrollmentToken(ctx context.Context, nodeID string, ttl time.Duration) (string, EnrollmentToken, error) {
 	return s.CreateNodeEnrollmentTokenWithOptions(ctx, nodeID, ttl, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) CreateNodeEnrollmentTokenWithOptions(ctx context.Context, nodeID string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+func (s *Repository) CreateNodeEnrollmentTokenWithOptions(ctx context.Context, nodeID string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return "", EnrollmentToken{}, err
 	}
 	return s.createEnrollmentTokenWithOptions(ctx, nodeID, ttl, options)
 }
 
-func (s *Store) createEnrollmentTokenWithOptions(ctx context.Context, nodeID string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
+func (s *Repository) createEnrollmentTokenWithOptions(ctx context.Context, nodeID string, ttl time.Duration, options WriteOptions) (string, EnrollmentToken, error) {
 	if ttl <= 0 {
 		ttl = EnrollmentTTL
 	}
@@ -162,7 +162,7 @@ func parseNodeEnrollmentToken(token string) (nodeID string, bound bool, err erro
 	return nodeID, true, nil
 }
 
-func (s *Store) ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, error) {
+func (s *Repository) ListEnrollmentTokens(ctx context.Context) ([]EnrollmentToken, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,expires_at,used_at,created_at FROM enrollment_tokens ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err

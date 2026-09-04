@@ -166,7 +166,7 @@ func (s *Server) runtimeStream(w http.ResponseWriter, r *http.Request) {
 	if err := writeSSE("ready", map[string]any{"node_id": nodeID}); err != nil {
 		return
 	}
-	changes, unsubscribe := s.store.SubscribeRuntimeChanges()
+	changes, unsubscribe := s.store.ChangeBus().SubscribeRuntimeChanges()
 	defer unsubscribe()
 	keepalive := time.NewTicker(10 * time.Second)
 	defer keepalive.Stop()

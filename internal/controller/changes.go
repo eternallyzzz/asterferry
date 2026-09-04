@@ -23,40 +23,45 @@ type resourceChangeSubscription struct {
 
 var nextResourceSubscription atomic.Uint64
 
-func (s *Store) SubscribeResourceChanges() (<-chan ResourceChange, func()) {
+func (b *ChangeBus) SubscribeResourceChanges() (<-chan ResourceChange, func()) {
 	sub := &resourceChangeSubscription{id: nextResourceSubscription.Add(1), ch: make(chan ResourceChange, 1)}
-	s.changeMu.Lock()
-	if s.changeSubs == nil {
-		s.changeSubs = make(map[uint64]*resourceChangeSubscription)
+	b.changeMu.Lock()
+	if b.closed.Load() {
+		close(sub.ch)
+		b.changeMu.Unlock()
+		return sub.ch, func() {}
 	}
-	s.changeSubs[sub.id] = sub
-	s.changeMu.Unlock()
+	if b.changeSubs == nil {
+		b.changeSubs = make(map[uint64]*resourceChangeSubscription)
+	}
+	b.changeSubs[sub.id] = sub
+	b.changeMu.Unlock()
 	var once sync.Once
 	return sub.ch, func() {
 		once.Do(func() {
-			s.changeMu.Lock()
-			if current := s.changeSubs[sub.id]; current == sub {
-				delete(s.changeSubs, sub.id)
+			b.changeMu.Lock()
+			if current := b.changeSubs[sub.id]; current == sub {
+				delete(b.changeSubs, sub.id)
 				close(current.ch)
 			}
-			s.changeMu.Unlock()
+			b.changeMu.Unlock()
 		})
 	}
 }
 
-func (s *Store) notifyResourceChanges(nodeIDs ...string) {
-	s.notifyResourceChangesWithOptions(false, nodeIDs...)
+func (b *ChangeBus) notifyResourceChanges(nodeIDs ...string) {
+	b.notifyResourceChangesWithOptions(false, nodeIDs...)
 }
 
 // notifyPendingServiceChanges marks a change that may make an otherwise
 // unassigned service placeable, such as a Gateway becoming available or its
 // port pool changing. The scheduler uses this bit to run the broad pending
 // service pass; ordinary heartbeats must not trigger that O(N) scan.
-func (s *Store) notifyPendingServiceChanges(nodeIDs ...string) {
-	s.notifyResourceChangesWithOptions(true, nodeIDs...)
+func (b *ChangeBus) notifyPendingServiceChanges(nodeIDs ...string) {
+	b.notifyResourceChangesWithOptions(true, nodeIDs...)
 }
 
-func (s *Store) notifyResourceChangesWithOptions(pendingServices bool, nodeIDs ...string) {
+func (b *ChangeBus) notifyResourceChangesWithOptions(pendingServices bool, nodeIDs ...string) {
 	if len(nodeIDs) == 0 {
 		return
 	}
@@ -75,9 +80,12 @@ func (s *Store) notifyResourceChangesWithOptions(pendingServices bool, nodeIDs .
 	if len(ids) == 0 {
 		return
 	}
-	s.changeMu.Lock()
-	defer s.changeMu.Unlock()
-	for _, sub := range s.changeSubs {
+	b.changeMu.Lock()
+	defer b.changeMu.Unlock()
+	if b.closed.Load() {
+		return
+	}
+	for _, sub := range b.changeSubs {
 		change := ResourceChange{
 			NodeIDs:         append([]string(nil), ids...),
 			PendingServices: pendingServices,

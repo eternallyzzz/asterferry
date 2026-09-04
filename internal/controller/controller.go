@@ -17,15 +17,14 @@ import (
 // listeners. The data-plane engines never import this type.
 type Controller struct {
 	Config          Config
-	Store           *Store
+	Repository      *Repository
 	HTTP            *Server
-	grpcListener    interface{ Close() error }
+	metrics         *ControllerMetrics
+	Scheduler       *Scheduler
+	grpcListener    net.Listener
 	httpListener    net.Listener
 	metricsListener net.Listener
-	grpcServer      interface {
-		Stop()
-		GracefulStop()
-	}
+	grpcServer      grpcServer
 	grpcServeErr    <-chan error
 	httpServeErr    <-chan error
 	metricsServeErr <-chan error
@@ -61,16 +60,22 @@ func New(config Config) (*Controller, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpServer, err := NewServer(config, store)
+	controllerMetrics := newControllerMetrics(store.DatabaseDriver())
+	scheduler, err := NewScheduler(store, controllerMetrics)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	httpServer, err := newServer(config, store, scheduler, controllerMetrics)
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
-	return &Controller{Config: config, Store: store, HTTP: httpServer, logger: slog.Default()}, nil
+	return &Controller{Config: config, Repository: store, HTTP: httpServer, metrics: controllerMetrics, Scheduler: scheduler, logger: slog.Default()}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) error {
-	if c == nil || c.Store == nil || c.HTTP == nil {
+	if c == nil || c.Repository == nil || c.HTTP == nil || c.Scheduler == nil {
 		return errors.New("controller is not initialized")
 	}
 	c.startMu.Lock()
@@ -86,7 +91,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	listener, grpcServer, grpcServeErr, err := StartGRPCWithErrors(runCtx, c.Config, c.Store)
+	listener, grpcServer, grpcServeErr, err := StartGRPCWithErrors(runCtx, c.Config, c.Repository, c.metrics)
 	if err != nil {
 		c.started = false
 		cancel()
@@ -246,7 +251,7 @@ func (c *Controller) logServeFailure(component string, err error) {
 }
 
 func (c *Controller) reconcileLoop(ctx context.Context) {
-	changes, unsubscribe := c.Store.SubscribeResourceChanges()
+	changes, unsubscribe := c.Repository.ChangeBus().SubscribeResourceChanges()
 	defer unsubscribe()
 	// Recover stale state once at startup. Normal operation is driven by
 	// coalesced heartbeat/resource hints; the slow sweep remains a repair path
@@ -263,14 +268,14 @@ func (c *Controller) reconcileLoop(ctx context.Context) {
 				return
 			}
 			if len(change.NodeIDs) > 0 {
-				if _, err := c.Store.ReconcileAssignmentsForGateways(ctx, DefaultGatewayOfflineAfter, change.NodeIDs...); err != nil && ctx.Err() == nil {
+				if _, err := c.Scheduler.ReconcileAssignmentsForGateways(ctx, DefaultGatewayOfflineAfter, change.NodeIDs...); err != nil && ctx.Err() == nil {
 					c.logReconcileFailure(err)
 				}
-				if _, err := c.Store.ReconcileAssignmentsForAgents(ctx, change.NodeIDs...); err != nil && ctx.Err() == nil {
+				if _, err := c.Scheduler.ReconcileAssignmentsForAgents(ctx, change.NodeIDs...); err != nil && ctx.Err() == nil {
 					c.logReconcileFailure(err)
 				}
 				if change.PendingServices {
-					if _, err := c.Store.ReconcilePendingServices(ctx); err != nil && ctx.Err() == nil {
+					if _, err := c.Scheduler.ReconcilePendingServices(ctx); err != nil && ctx.Err() == nil {
 						c.logReconcileFailure(err)
 					}
 				}
@@ -282,10 +287,10 @@ func (c *Controller) reconcileLoop(ctx context.Context) {
 }
 
 func (c *Controller) reconcileAll(ctx context.Context) {
-	if _, err := c.Store.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter); err != nil && ctx.Err() == nil {
+	if _, err := c.Scheduler.ReconcileAssignments(ctx, DefaultGatewayOfflineAfter); err != nil && ctx.Err() == nil {
 		c.logReconcileFailure(err)
 	}
-	if _, err := c.Store.ReconcilePendingServices(ctx); err != nil && ctx.Err() == nil {
+	if _, err := c.Scheduler.ReconcilePendingServices(ctx); err != nil && ctx.Err() == nil {
 		c.logReconcileFailure(err)
 	}
 }
@@ -302,7 +307,7 @@ func (c *Controller) maintenanceLoop(ctx context.Context) {
 	cleanup := func() {
 		idempotencyTTL := time.Duration(c.Config.IdempotencyRetentionHours) * time.Hour
 		auditTTL := time.Duration(c.Config.AuditRetentionDays) * 24 * time.Hour
-		if err := c.Store.PruneHistory(ctx, time.Now().UTC(), idempotencyTTL, auditTTL); err != nil && ctx.Err() == nil {
+		if err := c.Repository.PruneHistory(ctx, time.Now().UTC(), idempotencyTTL, auditTTL); err != nil && ctx.Err() == nil {
 			logger := c.logger
 			if logger == nil {
 				logger = slog.Default()
@@ -355,8 +360,8 @@ func (c *Controller) Close() error {
 		if c.metricsListener != nil {
 			_ = c.metricsListener.Close()
 		}
-		if c.Store != nil {
-			c.closeErr = c.Store.Close()
+		if c.Repository != nil {
+			c.closeErr = c.Repository.Close()
 		}
 	})
 	return c.closeErr

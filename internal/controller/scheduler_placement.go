@@ -13,32 +13,45 @@ import (
 	"time"
 )
 
-func (s *Store) gatewayCandidates(ctx context.Context) ([]GatewayCandidate, error) {
+func (s *Repository) LoadGatewayCandidates(ctx context.Context) ([]GatewayCandidate, error) {
 	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecGateway))
 	if err != nil {
 		return nil, err
 	}
-	candidates := make([]GatewayCandidate, 0, len(nodes))
+	eligible := make([]domain.Node, 0, len(nodes))
 	for _, gateway := range nodes {
-		if !gateway.Enabled || gateway.CertificateState == domain.CertificateRevoked || gateway.CertificateState == domain.CertificateExpired {
-			continue
+		if gateway.Enabled && gateway.CertificateState != domain.CertificateRevoked && gateway.CertificateState != domain.CertificateExpired {
+			eligible = append(eligible, gateway)
 		}
-		nodeSpec, specErr := s.GetNodeSpec(ctx, gateway.ID)
-		if specErr != nil {
-			if errors.Is(specErr, sql.ErrNoRows) {
-				continue
-			}
-			return nil, specErr
-		}
-		if nodeSpec.Kind != domain.NodeSpecGateway || nodeSpec.Gateway == nil {
+	}
+	if len(eligible) == 0 {
+		return nil, nil
+	}
+
+	// Candidate loading is deliberately set based. The number of reads is
+	// bounded by the backend parameter limit, not by the number of Gateways.
+	specs, err := s.loadGatewaySpecsBatch(ctx, eligible)
+	if err != nil {
+		return nil, err
+	}
+	assignments, err := s.loadGatewayAssignmentsBatch(ctx, eligible)
+	if err != nil {
+		return nil, err
+	}
+	observed, err := s.loadGatewayObservedBatch(ctx, eligible)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]GatewayCandidate, 0, len(eligible))
+	for _, gateway := range eligible {
+		nodeSpec, ok := specs[gateway.ID]
+		if !ok || nodeSpec.Kind != domain.NodeSpecGateway || nodeSpec.Gateway == nil {
 			continue
 		}
 		spec := *nodeSpec.Gateway
 		spec.Revision = nodeSpec.Revision
-		gatewayAssignments, listErr := s.ListAssignments(ctx, gateway.ID, "")
-		if listErr != nil {
-			return nil, listErr
-		}
+		gatewayAssignments := assignments[gateway.ID]
 		used := make(map[string]struct{})
 		for _, listener := range spec.Listeners {
 			used[bindingKey(listener.Protocol, listener.Bind, listener.Port)] = struct{}{}
@@ -55,19 +68,38 @@ func (s *Store) gatewayCandidates(ctx context.Context) ([]GatewayCandidate, erro
 			}
 		}
 		// A missing observed row is treated as provisionally healthy. Once a
-		// node reports a degraded state it is removed from future placement.
+		// node reports a degraded or stale state it is removed from placement.
 		healthy := true
-		if state, observedErr := s.GetObserved(ctx, gateway.ID); observedErr == nil {
+		if state, ok := observed[gateway.ID]; ok {
 			healthy = state.Healthy && !state.Degraded && (state.ObservedAt.IsZero() || time.Since(state.ObservedAt) < DefaultGatewayOfflineAfter)
-		} else if !errors.Is(observedErr, sql.ErrNoRows) {
-			return nil, observedErr
 		}
 		candidates = append(candidates, GatewayCandidate{Node: gateway, Spec: spec, Healthy: healthy, Assignments: gatewayAssignments, UsedBindings: used})
 	}
 	return candidates, nil
 }
 
-func (s *Store) uniqueGeneratedAssignmentID(ctx context.Context, assignment domain.Assignment) (string, error) {
+const gatewayCandidateBatchSize = 500
+
+func (s *Repository) loadGatewaySpecsBatch(ctx context.Context, gateways []domain.Node) (map[string]domain.NodeSpec, error) {
+	return loadGatewaySpecsBatchNormalized(ctx, s.db, gateways)
+}
+
+func (s *Repository) loadGatewayAssignmentsBatch(ctx context.Context, gateways []domain.Node) (map[string][]domain.Assignment, error) {
+	return loadAssignmentsBatchNormalized(ctx, s.db, gateways)
+}
+
+func (s *Repository) loadGatewayObservedBatch(ctx context.Context, gateways []domain.Node) (map[string]domain.ObservedState, error) {
+	return loadObservedBatchNormalized(ctx, s.db, gateways)
+}
+
+func questionMarks(count int) string {
+	if count <= 0 {
+		return "NULL"
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func (s *Repository) AllocateAssignmentID(ctx context.Context, assignment domain.Assignment) (string, error) {
 	base := assignment.ID
 	if err := domain.ValidateID(base, "assignment.id"); err != nil {
 		return "", err

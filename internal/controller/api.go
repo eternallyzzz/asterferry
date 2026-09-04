@@ -15,7 +15,7 @@ import (
 )
 
 type Server struct {
-	store         *Store
+	store         *Repository
 	config        Config
 	http          *http.Server
 	metricsHTTP   *http.Server
@@ -25,6 +25,7 @@ type Server struct {
 	sessionDone   chan struct{}
 	loginLimiter  *loginLimiter
 	metrics       *ControllerMetrics
+	scheduler     *Scheduler
 }
 
 type session struct {
@@ -40,18 +41,37 @@ const (
 	controllerWriteDeadline = 30 * time.Second
 )
 
-func NewServer(config Config, store *Store) (*Server, error) {
+func NewServer(config Config, store *Repository, metrics ...*ControllerMetrics) (*Server, error) {
+	return newServer(config, store, nil, metrics...)
+}
+
+// newServer composes the HTTP surface with the application scheduler. The
+// public constructor keeps its historical convenience behavior for embedders,
+// while Controller.New injects the single scheduler owned by the composition
+// root so reconciliation and API actions share one decision component.
+func newServer(config Config, store *Repository, scheduler *Scheduler, metrics ...*ControllerMetrics) (*Server, error) {
 	if store == nil {
 		return nil, errors.New("controller store is required")
 	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	if store.metrics == nil {
-		store.metrics = newControllerMetrics(store.DatabaseDriver())
+	var controllerMetrics *ControllerMetrics
+	if len(metrics) > 0 {
+		controllerMetrics = metrics[0]
+	}
+	if controllerMetrics == nil {
+		controllerMetrics = newControllerMetrics(store.DatabaseDriver())
+	}
+	if scheduler == nil {
+		var err error
+		scheduler, err = NewScheduler(store, controllerMetrics)
+		if err != nil {
+			return nil, err
+		}
 	}
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
-	server := &Server{store: store, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: store.metrics}
+	server := &Server{store: store, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler}
 	// Runtime SSE is intentionally long-lived.  Per-request handlers retain
 	// their own bounded read/decode limits; the write deadline must not cut off
 	// a healthy event stream after an absolute 30-second wall clock interval.

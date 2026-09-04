@@ -10,25 +10,36 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Store struct {
-	db           *sql.DB
-	path         string
-	dialect      databaseDialect
-	masterKey    [masterKeyBytes]byte
-	metrics      *ControllerMetrics
-	close        sync.Once
-	err          error
-	actionMu     sync.Mutex
-	actionSubs   map[string]map[uint64]*actionSubscription
-	snapshotSubs map[string]map[uint64]*snapshotSubscription
-	changeMu     sync.Mutex
-	changeSubs   map[uint64]*resourceChangeSubscription
-	runtimeMu    sync.Mutex
-	runtimeSubs  map[uint64]*runtimeChangeSubscription
+type Repository struct {
+	db        *sql.DB
+	path      string
+	dialect   databaseDialect
+	masterKey [masterKeyBytes]byte
+	changes   *ChangeBus
+
+	close     sync.Once
+	err       error
+	changesMu sync.Mutex
 	// Snapshot materialization reads a previous generation and then writes a
 	// replacement. Serialize that check-and-write pair so concurrent control
 	// streams cannot publish the same generation with different content.
 	snapshotMu sync.Mutex
+}
+
+// ChangeBus returns the process-local notification bus owned by the
+// Controller composition root. Repository persistence and subscriptions are
+// deliberately separate concerns; this accessor exists only while composing
+// the two at the application boundary.
+func (s *Repository) ChangeBus() *ChangeBus {
+	if s == nil {
+		return nil
+	}
+	s.changesMu.Lock()
+	defer s.changesMu.Unlock()
+	if s.changes == nil {
+		s.changes = newChangeBus()
+	}
+	return s.changes
 }
 
 type RevisionConflictError struct {

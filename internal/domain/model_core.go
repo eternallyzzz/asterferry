@@ -9,8 +9,7 @@ import (
 )
 
 const (
-	SchemaVersion = 1
-	DataALPN      = "asterferry-data/2"
+	DataALPN = "asterferry-data/2"
 
 	CertificateActive  = "active"
 	CertificateRevoked = "revoked"
@@ -485,14 +484,14 @@ type ListenerState struct {
 }
 
 type ObservedState struct {
-	SchemaVersion     uint32             `json:"schema_version"`
-	NodeID            string             `json:"node_id"`
-	AppliedGeneration uint64             `json:"applied_generation"`
-	Healthy           bool               `json:"healthy"`
-	Degraded          bool               `json:"degraded"`
-	LastError         *ApplyError        `json:"last_error,omitempty"`
-	Sessions          []SessionSummary   `json:"sessions,omitempty"`
-	Listeners         []ListenerState    `json:"listeners,omitempty"`
-	Metrics           map[string]float64 `json:"metrics,omitempty"`
-	ObservedAt        time.Time          `json:"observed_at"`
+	SchemaVersion     uint32           `json:"schema_version"`
+	NodeID            string           `json:"node_id"`
+	AppliedGeneration uint64           `json:"applied_generation"`
+	Healthy           bool             `json:"healthy"`
+	Degraded          bool             `json:"degraded"`
+	LastError         *ApplyError      `json:"last_error,omitempty"`
+	Sessions          []SessionSummary `json:"sessions,omitempty"`
+	Listeners         []ListenerState  `json:"listeners,omitempty"`
+	Metrics           RuntimeMetrics   `json:"metrics,omitempty"`
+	ObservedAt        time.Time        `json:"observed_at"`
 }

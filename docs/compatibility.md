@@ -1,13 +1,13 @@
 # Compatibility contract
 
-## v1.x freeze
+## v2.x freeze
 
-The v1.0 release establishes the public compatibility line:
+The v2.0 release establishes the public compatibility line:
 
 - AFDP/2 and control/2 are the supported wire protocols.
 - The REST/OpenAPI contract, snapshot schema and backup format are stable
-  inputs for v1.x.
-- A v1.x release may add optional fields and endpoints, but must not silently
+  inputs for v2.x.
+- A v2.x release may add optional fields and endpoints, but must not silently
   change the meaning of existing fields, authentication requirements, wire
   framing, or persisted data.
 - A breaking wire, API, or database change belongs in v2. It requires a
@@ -15,10 +15,10 @@ The v1.0 release establishes the public compatibility line:
 
 ## Fresh-generation boundary
 
-Pre-v1 binaries, configurations, databases and backup manifests are rejected;
+Pre-v2 binaries, configurations, databases and backup manifests are rejected;
 there is no in-place schema migration or SQLite-to-PostgreSQL conversion in
-v1.0. This is a deliberate boundary, not an upgrade mechanism to repeat for
-every v1.x patch.
+v2.0. Database schema v11 is the first normalized v2 generation. This is a
+deliberate boundary, not an upgrade mechanism to repeat for every v2.x patch.
 
 Before any upgrade, export a Controller backup and verify that it can be
 listed/restored into a disposable directory using the same release line. Keep
@@ -31,3 +31,11 @@ The operational target is RTO 30 minutes and RPO equal to the timestamp of the
 last successful verified backup. Operators must schedule backups often enough
 for that RPO to be meaningful and must retain the config, master key, CA and
 TLS identity together with the database.
+
+## Independent version identifiers
+
+`/api/v1` is the REST route contract. The control-wire and snapshot payloads
+use protocol version `1`, while the physical Controller database uses schema
+version `11` with the `relational` layout marker. These identifiers are
+independent: a database layout change does not silently change the REST route
+or payload protocol.

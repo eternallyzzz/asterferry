@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
+func (s *Repository) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 	if record.NodeID == "" || record.Generation == 0 || record.Checksum == "" || len(record.Document) == 0 {
 		return errors.New("snapshot node, generation, checksum and document are required")
 	}
@@ -96,7 +96,7 @@ func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 			return &RevisionConflictError{Resource: "desired_snapshot", Expected: uint64ToRevision(expected), Actual: uint64ToRevision(record.Generation)}
 		}
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, record.NodeID, record.Generation, record.Checksum, record.Document, record.CreatedAt.Format(time.RFC3339Nano))
+	result, err := tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,payload_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,payload_json=excluded.payload_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, record.NodeID, record.Generation, record.Checksum, record.Document, record.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -132,10 +132,10 @@ func (s *Store) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 	return s.commitAndNotify(tx, record.NodeID)
 }
 
-func (s *Store) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
+func (s *Repository) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
 	var record SnapshotRecord
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT node_id,generation,checksum,document_json,created_at FROM desired_snapshots WHERE node_id=?`, nodeID).Scan(&record.NodeID, &record.Generation, &record.Checksum, &record.Document, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT node_id,generation,checksum,payload_json,created_at FROM desired_snapshots WHERE node_id=?`, nodeID).Scan(&record.NodeID, &record.Generation, &record.Checksum, &record.Document, &created)
 	if err != nil {
 		return SnapshotRecord{}, err
 	}
@@ -178,7 +178,7 @@ func validateSnapshotRecord(record SnapshotRecord) error {
 	return nil
 }
 
-func (s *Store) GetSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
+func (s *Repository) GetSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
 	record, err := s.LoadSnapshot(ctx, nodeID)
 	if err != nil {
 		return domain.DesiredSnapshot{}, err

@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-func (s *Store) CreateUser(ctx context.Context, username, password, role string) (User, error) {
+func (s *Repository) CreateUser(ctx context.Context, username, password, role string) (User, error) {
 	return s.CreateUserWithOptions(ctx, username, password, role, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, role string, options WriteOptions) (User, error) {
+func (s *Repository) CreateUserWithOptions(ctx context.Context, username, password, role string, options WriteOptions) (User, error) {
 	username = strings.TrimSpace(username)
 	if err := validateUsername(username); err != nil {
 		return User{}, err
@@ -68,7 +68,7 @@ func (s *Store) CreateUserWithOptions(ctx context.Context, username, password, r
 // prevents the database lookup result from becoming a username timing oracle.
 const dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$YXN0ZXJmZXJyeS1kdW1teSE$PcdkQIKcsmT6A6y+xYGrZHtf7nOnuwy4AX8onzMTER0"
 
-func (s *Store) Authenticate(ctx context.Context, username, password string) (User, error) {
+func (s *Repository) Authenticate(ctx context.Context, username, password string) (User, error) {
 	var user User
 	var hash, created, updated, passwordChanged string
 	var enabled int
@@ -103,7 +103,7 @@ func (s *Store) Authenticate(ctx context.Context, username, password string) (Us
 	return user, nil
 }
 
-func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, options WriteOptions) (User, error) {
+func (s *Repository) UpdateUser(ctx context.Context, id string, update UserUpdate, options WriteOptions) (User, error) {
 	if strings.TrimSpace(id) == "" {
 		return User{}, sql.ErrNoRows
 	}
@@ -217,7 +217,7 @@ func (s *Store) UpdateUser(ctx context.Context, id string, update UserUpdate, op
 	return user, nil
 }
 
-func (s *Store) DeleteUser(ctx context.Context, id string, options WriteOptions) error {
+func (s *Repository) DeleteUser(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

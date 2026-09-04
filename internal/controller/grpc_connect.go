@@ -56,7 +56,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	if hello == nil {
 		return status.Error(codes.InvalidArgument, "first node message must be Hello")
 	}
-	if hello.GetSchemaVersion() != domain.SchemaVersion {
+	if hello.GetSchemaVersion() != domain.CurrentControlProtocolVersion {
 		return status.Error(codes.InvalidArgument, "unknown control schema version")
 	}
 	if err := domain.ValidateID(hello.GetNodeId(), "node_id"); err != nil || len(hello.GetCapabilities()) > 64 {
@@ -116,7 +116,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	// Subscribe before materializing the initial snapshot. A resource write
 	// racing this handshake is coalesced into the buffered notification instead
 	// of waiting for a periodic poll.
-	snapshotChanges, unsubscribeSnapshots := s.store.SubscribeSnapshotChanges(hello.GetNodeId())
+	snapshotChanges, unsubscribeSnapshots := s.store.ChangeBus().SubscribeSnapshotChanges(hello.GetNodeId())
 	defer unsubscribeSnapshots()
 	// Resource writes are intentionally independent from the long-lived node
 	// stream. Materialize the latest node-scoped document just before sending
@@ -172,7 +172,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			markCancel()
 		}
 	}()
-	actionCh, unsubscribeActions := s.store.SubscribeActions(hello.GetNodeId())
+	actionCh, unsubscribeActions := s.store.ChangeBus().SubscribeActions(hello.GetNodeId())
 	defer unsubscribeActions()
 	// A node's Hello is sent before the Controller can authenticate the
 	// bidirectional RPC.  Send an explicit readiness marker only after all
@@ -299,7 +299,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 					return status.Error(codes.InvalidArgument, "heartbeat has no desired generation")
 				}
 			}
-			observed := domain.ObservedState{SchemaVersion: domain.SchemaVersion, NodeID: hello.GetNodeId(), AppliedGeneration: heartbeat.GetAppliedGeneration(), Healthy: heartbeat.GetHealthy(), Degraded: !heartbeat.GetHealthy(), ObservedAt: time.Now().UTC()}
+			observed := domain.ObservedState{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: hello.GetNodeId(), AppliedGeneration: heartbeat.GetAppliedGeneration(), Healthy: heartbeat.GetHealthy(), Degraded: !heartbeat.GetHealthy(), ObservedAt: time.Now().UTC()}
 			if heartbeat.GetSentAt() != nil {
 				if err := heartbeat.GetSentAt().CheckValid(); err != nil {
 					return status.Error(codes.InvalidArgument, "heartbeat timestamp is invalid")

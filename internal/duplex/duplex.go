@@ -132,7 +132,9 @@ func (s *copyState) closeBoth() {
 	})
 }
 
-type writeHalfCloser interface {
+// WriteHalfCloser is the optional capability used to propagate a normal EOF
+// without closing the receive direction.
+type WriteHalfCloser interface {
 	CloseWrite() error
 }
 
@@ -141,7 +143,7 @@ type writeHalfCloserNoError interface {
 }
 
 func closeWrite(w io.ReadWriteCloser) error {
-	if halfCloser, ok := w.(writeHalfCloser); ok {
+	if halfCloser, ok := w.(WriteHalfCloser); ok {
 		return halfCloser.CloseWrite()
 	}
 	if halfCloser, ok := w.(writeHalfCloserNoError); ok {
@@ -156,12 +158,13 @@ func closeWrite(w io.ReadWriteCloser) error {
 	return ErrHalfCloseUnsupported
 }
 
-type aborter interface {
+// Aborter is the optional capability used when one copy direction fails.
+type Aborter interface {
 	Abort() error
 }
 
 func abortEndpoint(w io.ReadWriteCloser) {
-	if abort, ok := w.(aborter); ok {
+	if abort, ok := w.(Aborter); ok {
 		_ = abort.Abort()
 		return
 	}

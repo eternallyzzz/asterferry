@@ -137,33 +137,41 @@ func runtimeSchemaIndexes() []string {
 	}
 }
 
-func (s *Store) SubscribeRuntimeChanges() (<-chan string, func()) {
+func (b *ChangeBus) SubscribeRuntimeChanges() (<-chan string, func()) {
 	ch := make(chan string, 32)
 	sub := &runtimeChangeSubscription{id: nextRuntimeSubscription.Add(1), ch: ch}
-	s.runtimeMu.Lock()
-	if s.runtimeSubs == nil {
-		s.runtimeSubs = make(map[uint64]*runtimeChangeSubscription)
+	b.runtimeMu.Lock()
+	if b.closed.Load() {
+		close(ch)
+		b.runtimeMu.Unlock()
+		return ch, func() {}
 	}
-	s.runtimeSubs[sub.id] = sub
-	s.runtimeMu.Unlock()
+	if b.runtimeSubs == nil {
+		b.runtimeSubs = make(map[uint64]*runtimeChangeSubscription)
+	}
+	b.runtimeSubs[sub.id] = sub
+	b.runtimeMu.Unlock()
 	var once atomic.Bool
 	return ch, func() {
 		if once.Swap(true) {
 			return
 		}
-		s.runtimeMu.Lock()
-		if current := s.runtimeSubs[sub.id]; current == sub {
-			delete(s.runtimeSubs, sub.id)
+		b.runtimeMu.Lock()
+		if current := b.runtimeSubs[sub.id]; current == sub {
+			delete(b.runtimeSubs, sub.id)
 			close(current.ch)
 		}
-		s.runtimeMu.Unlock()
+		b.runtimeMu.Unlock()
 	}
 }
 
-func (s *Store) notifyRuntimeChanges(nodeID string) {
-	s.runtimeMu.Lock()
-	defer s.runtimeMu.Unlock()
-	for _, sub := range s.runtimeSubs {
+func (b *ChangeBus) notifyRuntimeChanges(nodeID string) {
+	b.runtimeMu.Lock()
+	defer b.runtimeMu.Unlock()
+	if b.closed.Load() {
+		return
+	}
+	for _, sub := range b.runtimeSubs {
 		select {
 		case sub.ch <- nodeID:
 		default:
@@ -171,7 +179,7 @@ func (s *Store) notifyRuntimeChanges(nodeID string) {
 	}
 }
 
-func (s *Store) AdvancedOperationsEnabled(ctx context.Context) (bool, error) {
+func (s *Repository) AdvancedOperationsEnabled(ctx context.Context) (bool, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM runtime_settings WHERE key='advanced_operations_enabled'`).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -183,12 +191,12 @@ func (s *Store) AdvancedOperationsEnabled(ctx context.Context) (bool, error) {
 	return strings.EqualFold(strings.TrimSpace(value), "true") || strings.TrimSpace(value) == "1", nil
 }
 
-func (s *Store) markRuntimeConnectionsUnknownOnStartup(ctx context.Context) error {
+func (s *Repository) markRuntimeConnectionsUnknownOnStartup(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE runtime_connections SET state='unknown' WHERE state='active'`)
 	return err
 }
 
-func (s *Store) SetAdvancedOperationsEnabled(ctx context.Context, enabled bool, options WriteOptions) error {
+func (s *Repository) SetAdvancedOperationsEnabled(ctx context.Context, enabled bool, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -208,6 +216,6 @@ func (s *Store) SetAdvancedOperationsEnabled(ctx context.Context, enabled bool, 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifyRuntimeChanges("")
+	s.ChangeBus().notifyRuntimeChanges("")
 	return nil
 }

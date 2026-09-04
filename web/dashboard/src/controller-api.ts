@@ -420,6 +420,23 @@ export interface ControllerListenerState {
   ready: boolean;
 }
 
+export interface ControllerRuntimeMetrics {
+  active_streams?: number;
+  active_sessions?: number;
+  active_egress?: number;
+  udp_oversize_drops?: number;
+  geoip_up?: boolean;
+  active_connections?: number;
+  active_flows?: number;
+  runtime_bytes_in_total?: number;
+  runtime_bytes_out_total?: number;
+  runtime_opened_total?: number;
+  runtime_closed_total?: number;
+  runtime_rejected_total?: number;
+  runtime_rate_limited_total?: number;
+  runtime_telemetry_dropped_total?: number;
+}
+
 export interface ControllerObservedState {
   schema_version: number;
   node_id: string;
@@ -429,7 +446,7 @@ export interface ControllerObservedState {
   last_error?: ControllerApplyError;
   sessions?: ControllerSessionSummary[];
   listeners?: ControllerListenerState[];
-  metrics?: Record<string, number>;
+  metrics?: ControllerRuntimeMetrics;
   observed_at: string;
 }
 

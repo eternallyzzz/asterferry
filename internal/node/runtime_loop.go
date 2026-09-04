@@ -146,7 +146,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	}
 	state := r.observedState()
 	appliedChecksum := r.reconciler.AppliedChecksum()
-	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.SchemaVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5", "runtime-telemetry-v1", "runtime-control-v1"}}}}); err != nil {
+	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.CurrentControlProtocolVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5", "runtime-telemetry-v1", "runtime-control-v1"}}}}); err != nil {
 		return err
 	}
 	r.reconciler.MarkConnected(time.Now().UTC())

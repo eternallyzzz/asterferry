@@ -130,7 +130,7 @@ runtime-event volume grows. Select it during `controller init` with
 The development schema is a clean-break contract. There is no `controller
 migrate` command and no in-place SQLite-to-PostgreSQL conversion. If the
 backend or schema must change, initialize a new Controller and recreate the
-resources in the Dashboard; v8/v9 databases and pre-v10 backup manifests are
+resources in the Dashboard; pre-v11 databases and backup manifests are
 rejected. PostgreSQL backup/restore requires the `pg_dump` and `pg_restore`
 client utilities on the machine running the CLI; the backup also contains the
 Controller config, master key, CA and TLS identity.

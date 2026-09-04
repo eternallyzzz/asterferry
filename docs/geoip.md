@@ -3,7 +3,7 @@
 GeoIP is an optional routing input. AsterFerry does not commit a GeoIP binary
 to source control or embed one in the container image. The current repository
 does not have verified provenance and licensing for its former `cn.mmdb`, so
-that file is intentionally absent from the v1.0 release inputs.
+that file is intentionally absent from the v2.0 release inputs.
 
 Supply a reviewed MaxMind-compatible country database through an external,
 versioned resource. Keep the exact resource version and SHA-256 digest in the

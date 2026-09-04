@@ -236,6 +236,7 @@ try {
     Invoke-Logged "Windows staticcheck" "staticcheck" @("-checks=all,-SA1019", "./...")
     Invoke-Logged "Windows vulnerability check" "govulncheck" @("./...")
     Invoke-Logged "Windows full tests" "go" @("test", "-count=1", "./...")
+    Invoke-Logged "Windows behavior contract and state-machine tests" "go" @("test", "-count=1", "./internal/afdp", "./internal/controller", "./internal/dataplane", "./internal/duplex", "./internal/node", "-run", "Contract|StateMachine")
     Invoke-Logged "Windows Controller/Gateway/Agent smoke test" "go" @("test", "-tags=integration", "-count=1", "-timeout=5m", "./internal/integration")
     Invoke-Logged "Windows AFDP decoder fuzz smoke" "go" @("test", "./internal/afdp", "-run", "^$", "-fuzz", "FuzzDecodeAFDPFrames", "-fuzztime", "10s")
     Invoke-Logged "Windows control-wire decoder fuzz smoke" "go" @("test", "./internal/controlwire", "-run", "^$", "-fuzz", "FuzzControlwireDecoders", "-fuzztime", "10s")

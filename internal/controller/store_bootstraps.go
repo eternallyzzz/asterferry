@@ -38,7 +38,7 @@ type pendingNodeBootstrap struct {
 // of the one-time enrollment token. The node identity and its business spec
 // are created later by IssueNodeCertificate, after the installer reaches the
 // Controller with the token.
-func (s *Store) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, spec *domain.NodeSpec, options WriteOptions) (string, PendingNodeBootstrap, error) {
+func (s *Repository) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, spec *domain.NodeSpec, options WriteOptions) (string, PendingNodeBootstrap, error) {
 	if err := node.Validate(); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
@@ -212,11 +212,11 @@ func pendingBootstrapIdempotencyResponse(pending PendingNodeBootstrap) map[strin
 	return map[string]any{"node_id": pending.NodeID, "pending": pending}
 }
 
-func (s *Store) GetPendingNodeBootstrap(ctx context.Context, nodeID string) (PendingNodeBootstrap, error) {
+func (s *Repository) GetPendingNodeBootstrap(ctx context.Context, nodeID string) (PendingNodeBootstrap, error) {
 	return scanPendingBootstrap(s.db.QueryRowContext(ctx, pendingBootstrapSelect+` WHERE node_id=?`, nodeID))
 }
 
-func (s *Store) ListPendingNodeBootstraps(ctx context.Context) ([]PendingNodeBootstrap, error) {
+func (s *Repository) ListPendingNodeBootstraps(ctx context.Context) ([]PendingNodeBootstrap, error) {
 	rows, err := s.db.QueryContext(ctx, pendingBootstrapSelect+` ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -233,7 +233,7 @@ func (s *Store) ListPendingNodeBootstraps(ctx context.Context) ([]PendingNodeBoo
 	return result, rows.Err()
 }
 
-func (s *Store) ReissuePendingNodeBootstrap(ctx context.Context, nodeID string, options WriteOptions) (string, PendingNodeBootstrap, error) {
+func (s *Repository) ReissuePendingNodeBootstrap(ctx context.Context, nodeID string, options WriteOptions) (string, PendingNodeBootstrap, error) {
 	request := struct {
 		NodeID string `json:"node_id"`
 		Action string `json:"action"`
@@ -283,7 +283,7 @@ func (s *Store) ReissuePendingNodeBootstrap(ctx context.Context, nodeID string, 
 	return plain, pending.PendingNodeBootstrap, nil
 }
 
-func (s *Store) DeletePendingNodeBootstrap(ctx context.Context, nodeID string, options WriteOptions) error {
+func (s *Repository) DeletePendingNodeBootstrap(ctx context.Context, nodeID string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -326,7 +326,7 @@ func loadPendingBootstrapTx(ctx context.Context, tx *sql.Tx, nodeID string) (pen
 	return scanPendingBootstrapWithSpec(tx.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE node_id=?`, nodeID))
 }
 
-func (s *Store) pendingBootstrapForToken(ctx context.Context, tokenHash string) (pendingNodeBootstrap, error) {
+func (s *Repository) pendingBootstrapForToken(ctx context.Context, tokenHash string) (pendingNodeBootstrap, error) {
 	return scanPendingBootstrapWithSpec(s.db.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE token_hash=?`, tokenHash))
 }
 

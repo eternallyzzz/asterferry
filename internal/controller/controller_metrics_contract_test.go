@@ -84,7 +84,7 @@ func (w *bareResponseWriter) Write(data []byte) (int, error) {
 	return w.body.Write(data)
 }
 
-func TestMetricsResponseWriterPreservesOptionalCapabilities(t *testing.T) {
+func TestMetricsResponseWriterPreservesOptionalCapabilitiesContract(t *testing.T) {
 	underlying := &capabilityResponseWriter{}
 	wrapper := &metricsResponseWriter{ResponseWriter: underlying}
 
@@ -117,7 +117,7 @@ func TestMetricsResponseWriterPreservesOptionalCapabilities(t *testing.T) {
 	}
 }
 
-func TestMetricsResponseWriterReportsUnsupportedCapabilities(t *testing.T) {
+func TestMetricsResponseWriterReportsUnsupportedCapabilitiesContract(t *testing.T) {
 	underlying := &bareResponseWriter{header: make(http.Header)}
 	wrapper := &metricsResponseWriter{ResponseWriter: underlying}
 

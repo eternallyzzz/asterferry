@@ -1,13 +1,13 @@
 # Stable release runbook
 
-This is the v1.0 release gate for a single Controller / multi-Node
+This is the v2.0 release gate for a single Controller / multi-Node
 self-hosted deployment. It is designed for a solo maintainer, so evidence is
 automated and every exception is recorded in the release issue.
 
 ## Before the RC
 
 1. Protect `main` with required pull-request review and CODEOWNERS checks.
-   Assign a second named maintainer before the final v1.0.0 tag; the repository
+   Assign a second named maintainer before the final v2.0.0 tag; the repository
    cannot solve that organizational dependency by itself.
 2. Freeze the pinned release and compatibility toolchains in `.toolchain.json`,
    container base images, Helm dependencies and direct Go/npm versions. Do not
@@ -15,7 +15,8 @@ automated and every exception is recorded in the release issue.
 3. Run the tracked-file secret scan and remove all local keys, certificates,
    tokens, databases, binaries and generated Dashboard output from the
    workspace. Confirm `git ls-files` contains no credential material.
-4. Run the Linux suite: unit tests, PostgreSQL integration, race, vet,
+4. Run the Linux suite: unit tests, the deterministic behavior-contract and
+   state-machine suite, PostgreSQL integration, race, vet,
    staticcheck, govulncheck, Dashboard lint/test/build on the release and
    Node.js 22 compatibility lanes, OpenAPI generation check, Helm lint/render
    and the AFDP/2 end-to-end test.
@@ -29,7 +30,7 @@ automated and every exception is recorded in the release issue.
 
 ## RC and soak
 
-Create a release candidate tag such as `v1.0.0-rc.1`. The tag workflow marks
+Create a release candidate tag such as `v2.0.0-rc.1`. The tag workflow marks
 it prerelease and publishes immutable artifacts without changing the stable
 source version. Operate the candidate for at least seven calendar days with:
 
@@ -49,8 +50,8 @@ issue. If the candidate changes, restart the seven-day soak.
 ## Final publication
 
 After the soak, update `CHANGELOG.md` with the release date, run
-`scripts/release-check.ps1 -Version 1.0.0` (and the Docker-enabled variant),
-merge the final commit to `main`, and create `v1.0.0` from that commit. Verify
+`scripts/release-check.ps1 -Version 2.0.0` (and the Docker-enabled variant),
+merge the final commit to `main`, and create `v2.0.0` from that commit. Verify
 the GitHub release manifest, SHA-256 checksums, signed image/chart digests and
 the Linux/Windows install paths before announcing it.
 

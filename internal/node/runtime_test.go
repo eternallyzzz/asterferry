@@ -37,7 +37,7 @@ func newRuntimeDrainTestFixture(t *testing.T, initiallyDraining bool) (*dataplan
 		t.Fatal(err)
 	}
 	previous, err := (domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-runtime-test",
 		Generation:    1,
 		Agent:         &domain.AgentSpec{NodeID: "agent-runtime-test"},

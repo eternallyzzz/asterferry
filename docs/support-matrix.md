@@ -1,6 +1,6 @@
-# v1.0 support matrix
+# v2.0 support matrix
 
-The v1.0 release is a self-hosted Controller plus generic Node deployment for
+The v2.0 release is a self-hosted Controller plus generic Node deployment for
 personal and small-team private networks. The release is intentionally
 single-replica; PostgreSQL does not turn the Controller into an HA service.
 
@@ -20,6 +20,6 @@ The Dashboard is also tested in CI against the pinned Node.js 22 compatibility
 lane. Dependency upgrades are frozen during the RC soak and are evaluated in a
 separate change.
 
-All Controller and Node binaries in one deployment must use the same v1.x
+All Controller and Node binaries in one deployment must use the same v2.x
 release line. Mixed releases are not a supported upgrade strategy when the
 wire or database contract changes.

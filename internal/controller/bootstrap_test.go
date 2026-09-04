@@ -441,13 +441,13 @@ func TestReconcileAssignmentsForAgentsSchedulesNewServicesWithoutStaleIdempotenc
 			t.Fatal(err)
 		}
 	}
-	if assignments, err := store.ReconcileAssignmentsForAgents(ctx, "agent"); err != nil || len(assignments) != 1 {
+	if assignments, err := schedulerForTest(store).ReconcileAssignmentsForAgents(ctx, "agent"); err != nil || len(assignments) != 1 {
 		t.Fatalf("first reconciliation = %#v, err=%v", assignments, err)
 	}
 	if err := store.PutService(ctx, domain.Service{ID: "svc-b", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8081", PublicBind: "0.0.0.0", PublicPort: 28081, Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	assignments, err := store.ReconcileAssignmentsForAgents(ctx, "agent")
+	assignments, err := schedulerForTest(store).ReconcileAssignmentsForAgents(ctx, "agent")
 	if err != nil {
 		t.Fatalf("second reconciliation failed: %v", err)
 	}

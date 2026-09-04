@@ -23,37 +23,42 @@ type snapshotSubscription struct {
 // SubscribeSnapshotChanges returns a coalescing notification stream for
 // desired-state writes. The notification carries no payload: the subscriber
 // must materialize the current node-scoped snapshot after receiving it.
-func (s *Store) SubscribeSnapshotChanges(nodeID string) (<-chan struct{}, func()) {
+func (b *ChangeBus) SubscribeSnapshotChanges(nodeID string) (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	sub := &snapshotSubscription{id: nextActionSubscription.Add(1), ch: ch}
-	s.actionMu.Lock()
-	if s.snapshotSubs == nil {
-		s.snapshotSubs = make(map[string]map[uint64]*snapshotSubscription)
+	b.actionMu.Lock()
+	if b.closed.Load() {
+		close(ch)
+		b.actionMu.Unlock()
+		return ch, func() {}
 	}
-	if s.snapshotSubs[nodeID] == nil {
-		s.snapshotSubs[nodeID] = make(map[uint64]*snapshotSubscription)
+	if b.snapshotSubs == nil {
+		b.snapshotSubs = make(map[string]map[uint64]*snapshotSubscription)
 	}
-	s.snapshotSubs[nodeID][sub.id] = sub
-	s.actionMu.Unlock()
+	if b.snapshotSubs[nodeID] == nil {
+		b.snapshotSubs[nodeID] = make(map[uint64]*snapshotSubscription)
+	}
+	b.snapshotSubs[nodeID][sub.id] = sub
+	b.actionMu.Unlock()
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
-			s.actionMu.Lock()
-			if subscribers := s.snapshotSubs[nodeID]; subscribers != nil {
+			b.actionMu.Lock()
+			if subscribers := b.snapshotSubs[nodeID]; subscribers != nil {
 				if current := subscribers[sub.id]; current == sub {
 					delete(subscribers, sub.id)
 					close(current.ch)
 				}
 				if len(subscribers) == 0 {
-					delete(s.snapshotSubs, nodeID)
+					delete(b.snapshotSubs, nodeID)
 				}
 			}
-			s.actionMu.Unlock()
+			b.actionMu.Unlock()
 		})
 	}
 }
 
-func (s *Store) notifySnapshotChanges(nodeIDs ...string) {
+func (b *ChangeBus) notifySnapshotChanges(nodeIDs ...string) {
 	if len(nodeIDs) == 0 {
 		return
 	}
@@ -63,10 +68,13 @@ func (s *Store) notifySnapshotChanges(nodeIDs ...string) {
 			targets[nodeID] = struct{}{}
 		}
 	}
-	s.actionMu.Lock()
-	defer s.actionMu.Unlock()
+	b.actionMu.Lock()
+	defer b.actionMu.Unlock()
+	if b.closed.Load() {
+		return
+	}
 	for nodeID := range targets {
-		subscribers := s.snapshotSubs[nodeID]
+		subscribers := b.snapshotSubs[nodeID]
 		for _, subscriber := range subscribers {
 			select {
 			case subscriber.ch <- struct{}{}:
@@ -76,35 +84,35 @@ func (s *Store) notifySnapshotChanges(nodeIDs ...string) {
 	}
 }
 
-func (s *Store) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
+func (s *Repository) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifySnapshotChanges(nodeIDs...)
+	s.ChangeBus().notifySnapshotChanges(nodeIDs...)
 	return nil
 }
 
-func (s *Store) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
+func (s *Repository) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
 	return s.commitAndNotifyResourcesWithOptions(tx, false, nodeIDs...)
 }
 
-func (s *Store) commitAndNotifyPendingServices(tx *sql.Tx, nodeIDs ...string) error {
+func (s *Repository) commitAndNotifyPendingServices(tx *sql.Tx, nodeIDs ...string) error {
 	return s.commitAndNotifyResourcesWithOptions(tx, true, nodeIDs...)
 }
 
-func (s *Store) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
+func (s *Repository) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
 	if err := s.commitAndNotify(tx, nodeIDs...); err != nil {
 		return err
 	}
-	s.notifyResourceChangesWithOptions(pendingServices, nodeIDs...)
+	s.ChangeBus().notifyResourceChangesWithOptions(pendingServices, nodeIDs...)
 	return nil
 }
 
-func (s *Store) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error {
+func (s *Repository) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifyResourceChanges(nodeIDs...)
+	s.ChangeBus().notifyResourceChanges(nodeIDs...)
 	return nil
 }
 
@@ -112,12 +120,12 @@ func (s *Store) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error
 // from the authoritative resources in the configured database.  The result is pure data: it
 // can be checksummed, sent over the control stream, or encrypted in the node
 // cache without giving a node access to the Controller repository.
-func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
+func (s *Repository) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
 	node, err := s.GetNode(ctx, nodeID)
 	if err != nil {
 		return domain.DesiredSnapshot{}, err
 	}
-	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: node.ID}
+	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: node.ID}
 	serviceByID := make(map[string]domain.Service)
 	nodeSpec, specErr := s.GetNodeSpec(ctx, node.ID)
 	if errors.Is(specErr, sql.ErrNoRows) {
@@ -238,7 +246,7 @@ func (s *Store) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain
 // EnsureDesiredSnapshot materializes and durably records the current state if
 // a resource write has changed it.  It is safe to call before every control
 // stream reconnect; unchanged state does not create another generation.
-func (s *Store) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
+func (s *Repository) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
 	s.snapshotMu.Lock()
 	defer s.snapshotMu.Unlock()
 	snapshot, err := s.BuildDesiredSnapshot(ctx, nodeID)
@@ -259,7 +267,7 @@ func (s *Store) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (Snaps
 					return SnapshotRecord{}, errors.New("desired snapshot generation is exhausted")
 				}
 				cleared, clearErr := (domain.DesiredSnapshot{
-					SchemaVersion: domain.SchemaVersion,
+					SchemaVersion: domain.CurrentControlProtocolVersion,
 					NodeID:        nodeID,
 					Generation:    existing.Generation + 1,
 				}).WithChecksum()
@@ -307,7 +315,7 @@ func clearDesiredSnapshotTx(ctx context.Context, tx *sql.Tx, nodeID string) erro
 		}
 		generation = current + 1
 	}
-	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: nodeID, Generation: generation}).WithChecksum()
+	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: nodeID, Generation: generation}).WithChecksum()
 	if err != nil {
 		return err
 	}
@@ -316,14 +324,14 @@ func clearDesiredSnapshotTx(ctx context.Context, tx *sql.Tx, nodeID string) erro
 		return err
 	}
 	now := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,document_json=excluded.document_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, nodeID, snapshot.Generation, snapshot.Checksum, document, now.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,payload_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET generation=excluded.generation,checksum=excluded.checksum,payload_json=excluded.payload_json,created_at=excluded.created_at WHERE excluded.generation > desired_snapshots.generation`, nodeID, snapshot.Generation, snapshot.Checksum, document, now.Format(time.RFC3339Nano))
 	return err
 }
 
 // RebuildDesiredSnapshots refreshes every node that has a complete spec.  A
 // node without a spec is skipped so an operator can enroll the identity first
 // and publish its behavior document in a later transaction.
-func (s *Store) RebuildDesiredSnapshots(ctx context.Context) error {
+func (s *Repository) RebuildDesiredSnapshots(ctx context.Context) error {
 	nodes, err := s.ListNodes(ctx, "")
 	if err != nil {
 		return err

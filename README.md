@@ -28,6 +28,7 @@ the copy-and-run guides:
 - [中文端到端快速开始](docs/quickstart.zh-CN.md)
 - [Operations and runtime visibility (English)](docs/operations.en.md)
 - [运行时观测与运维（中文）](docs/operations.zh-CN.md)
+- [Architecture and test contracts](docs/architecture.md)
 
 Initialize the Controller. `--grpc-advertise` is required and must be the
 host:port that Gateway and Agent hosts can reach; it is not the local bind
@@ -38,7 +39,7 @@ password is supplied:
 ```powershell
 asterferry controller init --dir ./controller `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 1.0.0
+  --release-version 2.0.0
 asterferry controller run --config ./controller/controller.json
 ```
 
@@ -54,7 +55,7 @@ asterferry controller configure `
 ```
 
 If the old configuration also has no published `release_version`, append
-`--release-version 1.0.0` (and use `--release-base-url` for a private HTTPS
+`--release-version 2.0.0` (and use `--release-base-url` for a private HTTPS
 mirror).
 
 For a Windows Controller with Nodes running in the local WSL instance, the
@@ -136,7 +137,7 @@ monotonic generation, schema version and SHA-256 checksum.
 
 ### Controller database lifecycle
 
-SQLite schema v10 remains the zero-dependency default. For a larger deployment,
+SQLite database schema v11 remains the zero-dependency default. For a larger deployment,
 initialize directly against PostgreSQL:
 
 ```powershell
@@ -149,12 +150,19 @@ asterferry controller init --dir ./controller `
 SQLite and PostgreSQL databases are fresh-install resources in this development
 generation. There is no in-place schema migration and no SQLite-to-PostgreSQL
 conversion command. To change backend, create a new Controller installation and
-recreate the Dashboard resources; do not point a v8/v9 database at this binary.
-Backups are versioned v10 artifacts and older backup manifests are rejected.
+recreate the Dashboard resources; do not point a pre-v11 database at this binary.
+Backups are versioned v11 artifacts and older backup manifests are rejected.
 PostgreSQL backup/restore uses the external `pg_dump` and `pg_restore` utilities
 (custom format); the CLI must run where those tools are installed. Both
 backends' backups include the Controller config, master key, CA and TLS
 identity.
+
+The version identifiers are intentionally independent: `/api/v1` is the REST
+route contract, `CurrentControlProtocolVersion = 1` identifies control-wire and
+snapshot payloads, and `CurrentDatabaseSchemaVersion = 11` identifies the
+physical Controller database layout (`asterferry-controller-db-v11-relational`).
+Changing the database layout does not silently change the wire or REST
+identifiers.
 
 ## Node behavior
 
@@ -238,6 +246,7 @@ Run the core verification suite:
 
 ```powershell
 go test ./...
+go test -count=1 ./internal/afdp ./internal/controller ./internal/dataplane ./internal/duplex ./internal/node -run 'Contract|StateMachine'
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 -checks=all,-SA1019 ./...
 npm --prefix web/dashboard ci
@@ -270,9 +279,9 @@ instrumented binaries with Windows status `0xc0000139`.
 
 ## Release preparation
 
-The current Controller/data-plane architecture is prepared as the first public
-`v1.0.0` release. It is a fresh boundary for pre-v1 inputs, while future v1.x
-releases preserve the API, wire and database contracts. Follow the
+The normalized Controller/data-plane architecture is prepared as the first
+public `v2.0.0` release. It is a fresh boundary for pre-v2 inputs, while future
+v2.x releases preserve the API, wire and database contracts. Follow the
 [`stable release runbook`](docs/release-runbook.md): publish an RC, soak it for
 seven days, then create the final tag. Keep `CHANGELOG.md` as `Unreleased`
 until the release tag is created.
@@ -280,13 +289,13 @@ until the release tag is created.
 Run the release preflight on Windows before merging the final release commit:
 
 ```powershell
-.\scripts\release-check.ps1 -Version 1.0.0 -SkipDocker
+.\scripts\release-check.ps1 -Version 2.0.0 -SkipDocker
 ```
 
 The tag workflow repeats the checks on Linux, runs the integration and race
 gates, builds Linux amd64/arm64 and Windows amd64 archives, packages both Helm
 charts, and publishes the install scripts, SHA-256 checksums, source SBOM,
 signed multi-architecture GHCR image and signed OCI charts. After the final
-commit reaches `main`, the maintainer can create and push `v1.0.0` to start
+commit reaches `main`, the maintainer can create and push `v2.0.0` to start
 that workflow. Verify the GitHub assets, both chart digests and an end-to-end
 fresh Controller/Node installation before announcing the release.

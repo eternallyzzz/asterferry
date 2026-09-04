@@ -15,7 +15,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-func TestGatewayObfuscationRotationPropagatesToAssignments(t *testing.T) {
+func TestObfuscationRotationPropagatesToAssignmentsContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestGatewayObfuscationRotationPropagatesToAssignments(t *testing.T) {
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", PublicPort: 18080, Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	assignments, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
+	assignments, err := schedulerForTest(store).ScheduleAgent(ctx, "agent", WriteOptions{})
 	if err != nil || len(assignments) != 1 {
 		t.Fatalf("initial schedule = %#v, err=%v", assignments, err)
 	}
@@ -99,7 +99,7 @@ func TestGatewayObfuscationRotationPropagatesToAssignments(t *testing.T) {
 	}
 }
 
-func TestScheduleAgentPreservesDisjointAssignments(t *testing.T) {
+func TestSchedulingPreservesDisjointAssignmentsContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestScheduleAgentPreservesDisjointAssignments(t *testing.T) {
 		}
 	}
 
-	assignments, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
+	assignments, err := schedulerForTest(store).ScheduleAgent(ctx, "agent", WriteOptions{})
 	if err != nil {
 		t.Fatalf("rescheduling disjoint assignments failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestScheduleAgentPreservesDisjointAssignments(t *testing.T) {
 	}
 }
 
-func TestOneTimeTokenIdempotentRetryDoesNotReturnPlaintext(t *testing.T) {
+func TestOneTimeTokenRetryDoesNotReturnPlaintextContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestOneTimeTokenIdempotentRetryDoesNotReturnPlaintext(t *testing.T) {
 	}
 }
 
-func TestTokenRetryAPIReturnsConflictWithMetadata(t *testing.T) {
+func TestTokenRetryAPIReportsConflictMetadataContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +248,7 @@ func assertAlreadyCreatedResponse(t *testing.T, response *httptest.ResponseRecor
 	}
 }
 
-func TestSaveObservedHeartbeatAcceptsOlderGeneration(t *testing.T) {
+func TestObservedHeartbeatAcceptsOlderGenerationContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -266,7 +266,7 @@ func TestSaveObservedHeartbeatAcceptsOlderGeneration(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	makeRecord := func(generation uint64) ObservedRecord {
-		document, marshalErr := json.Marshal(domain.ObservedState{SchemaVersion: domain.SchemaVersion, NodeID: "agent", AppliedGeneration: generation, Healthy: true, ObservedAt: now})
+		document, marshalErr := json.Marshal(domain.ObservedState{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "agent", AppliedGeneration: generation, Healthy: true, ObservedAt: now})
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
@@ -290,7 +290,7 @@ func TestSaveObservedHeartbeatAcceptsOlderGeneration(t *testing.T) {
 	}
 }
 
-func TestLoginAndLogoutCookiesAreAlwaysSecure(t *testing.T) {
+func TestLoginAndLogoutCookiesRemainSecureContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)

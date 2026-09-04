@@ -235,7 +235,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		}
 		action := parts[2]
 		if action == "schedule" {
-			assignments, scheduleErr := s.store.ScheduleAgent(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+			assignments, scheduleErr := s.scheduler.ScheduleAgent(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 			if scheduleErr != nil {
 				writeStoreError(w, scheduleErr)
 				return

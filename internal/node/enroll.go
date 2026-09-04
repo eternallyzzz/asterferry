@@ -161,7 +161,7 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 	if err != nil {
 		return Bootstrap{}, err
 	}
-	if response.GetSchemaVersion() != domain.SchemaVersion {
+	if response.GetSchemaVersion() != domain.CurrentControlProtocolVersion {
 		return Bootstrap{}, errors.New("controller returned an unsupported control schema version")
 	}
 	if response.GetCertificate() == nil || len(response.GetCertificate().GetCertificateDer()) == 0 {
@@ -174,7 +174,7 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 		caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: response.GetCertificate().GetCaCertificateDer()})
 	}
 	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: response.GetCertificate().GetCertificateDer()})
-	bootstrap := Bootstrap{SchemaVersion: domain.SchemaVersion, ControllerAddress: options.ControllerAddress, ControllerServerName: serverName, NodeID: options.NodeID, CertificatePEM: string(certificatePEM), PrivateKeyPEM: string(privateKey), CAPEM: string(caPEM), CachePath: options.CachePath, LogLevel: "info"}
+	bootstrap := Bootstrap{SchemaVersion: domain.CurrentControlProtocolVersion, ControllerAddress: options.ControllerAddress, ControllerServerName: serverName, NodeID: options.NodeID, CertificatePEM: string(certificatePEM), PrivateKeyPEM: string(privateKey), CAPEM: string(caPEM), CachePath: options.CachePath, LogLevel: "info"}
 	if err := validateBootstrap(bootstrap); err != nil {
 		return Bootstrap{}, fmt.Errorf("controller returned invalid bootstrap identity: %w", err)
 	}
@@ -188,7 +188,7 @@ func Enroll(ctx context.Context, options EnrollOptions) (Bootstrap, error) {
 
 func WriteBootstrap(path string, bootstrap Bootstrap) error {
 	if bootstrap.SchemaVersion == 0 {
-		bootstrap.SchemaVersion = domain.SchemaVersion
+		bootstrap.SchemaVersion = domain.CurrentControlProtocolVersion
 	}
 	if err := validateBootstrap(bootstrap); err != nil {
 		return err
@@ -222,7 +222,7 @@ func LoadBootstrap(path string) (Bootstrap, error) {
 }
 
 func validateBootstrap(bootstrap Bootstrap) error {
-	if bootstrap.SchemaVersion != domain.SchemaVersion || strings.TrimSpace(bootstrap.ControllerAddress) == "" || bootstrap.NodeID == "" || bootstrap.CertificatePEM == "" || bootstrap.PrivateKeyPEM == "" || bootstrap.CAPEM == "" {
+	if bootstrap.SchemaVersion != domain.CurrentControlProtocolVersion || strings.TrimSpace(bootstrap.ControllerAddress) == "" || bootstrap.NodeID == "" || bootstrap.CertificatePEM == "" || bootstrap.PrivateKeyPEM == "" || bootstrap.CAPEM == "" {
 		return errors.New("invalid node bootstrap")
 	}
 	if _, _, err := net.SplitHostPort(bootstrap.ControllerAddress); err != nil {

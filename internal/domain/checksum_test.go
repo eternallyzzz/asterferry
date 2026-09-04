@@ -9,7 +9,7 @@ import (
 
 func checksumSnapshotWithObfuscation(value ObfuscationPolicy) DesiredSnapshot {
 	return DesiredSnapshot{
-		SchemaVersion: SchemaVersion,
+		SchemaVersion: CurrentControlProtocolVersion,
 		NodeID:        "gateway-1",
 		Generation:    7,
 		Gateway: &GatewaySpec{

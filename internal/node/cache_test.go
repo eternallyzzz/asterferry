@@ -22,7 +22,7 @@ func TestEncryptedSnapshotCacheAndReconciler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1"}}
+	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1"}}
 	checksum, err := snapshot.WithChecksum()
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestReconcilerAcceptsAuthoritativeSameGenerationRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := (domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1", Logging: domain.LoggingPolicy{Level: "info"}}}).WithChecksum()
+	first, err := (domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1", Logging: domain.LoggingPolicy{Level: "info"}}}).WithChecksum()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestReconcilerResetsFirstGenerationWhenCachePublishFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1"}}).WithChecksum()
+	snapshot, err := (domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "agent-1", Generation: 1, Agent: &domain.AgentSpec{NodeID: "agent-1"}}).WithChecksum()
 	if err != nil {
 		t.Fatal(err)
 	}

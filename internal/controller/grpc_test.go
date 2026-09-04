@@ -24,7 +24,7 @@ func TestControllerCloseForcesGRPCStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	probe := &closeProbeGRPC{}
-	controller := &Controller{Store: store, grpcServer: probe}
+	controller := &Controller{Repository: store, grpcServer: probe}
 	if err := controller.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -26,22 +26,13 @@ func TestObfuscationKeysAreEncryptedAtRestAndDecryptedForWire(t *testing.T) {
 	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gw", PublicEndpoints: []string{"gw.example:4433"}, Obfuscation: domain.ObfuscationPolicy{Mode: "camouflage", Key: current, PreviousKey: previous}}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	var persisted []byte
-	if err := store.db.QueryRow(`SELECT document_json FROM node_specs WHERE node_id='gw'`).Scan(&persisted); err != nil {
+	var persisted, persistedPrevious []byte
+	var keyID, previousKeyID string
+	if err := store.db.QueryRow(`SELECT obfuscation_key_ciphertext,obfuscation_previous_key_ciphertext,obfuscation_key_id,obfuscation_previous_key_id FROM gateway_specs WHERE node_id='gw'`).Scan(&persisted, &persistedPrevious, &keyID, &previousKeyID); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(persisted), string(current)) || strings.Contains(string(persisted), string(previous)) || strings.Contains(string(persisted), `"key":`) || strings.Contains(string(persisted), `"previous_key":`) {
-		t.Fatalf("plaintext data-plane key was persisted: %s", persisted)
-	}
-	var envelope domain.NodeSpec
-	if err := json.Unmarshal(persisted, &envelope); err != nil {
-		t.Fatal(err)
-	}
-	if envelope.Gateway == nil {
-		t.Fatalf("at-rest node spec is missing gateway document: %#v", envelope)
-	}
-	if len(envelope.Gateway.Obfuscation.KeyCiphertext) == 0 || len(envelope.Gateway.Obfuscation.PreviousKeyCiphertext) == 0 || envelope.Gateway.Obfuscation.KeyID == "" || envelope.Gateway.Obfuscation.PreviousKeyID == "" {
-		t.Fatalf("at-rest key policy is incomplete: %#v", envelope.Gateway.Obfuscation)
+	if strings.Contains(string(persisted), string(current)) || strings.Contains(string(persistedPrevious), string(previous)) || keyID == "" || previousKeyID == "" {
+		t.Fatalf("plaintext or incomplete data-plane key was persisted: current=%x previous=%x key_id=%q previous_key_id=%q", persisted, persistedPrevious, keyID, previousKeyID)
 	}
 
 	snapshot, err := store.EnsureDesiredSnapshot(ctx, "gw")
@@ -100,23 +91,15 @@ func TestLegacyAssignmentObfuscationChecksumIsCanonicalized(t *testing.T) {
 
 	// Reproduce the v3 form: the protected ciphertext survived migration but
 	// the plaintext-derived key identifier was not written into the document.
-	var document []byte
-	if err := store.db.QueryRow(`SELECT document_json FROM assignments WHERE id='assignment'`).Scan(&document); err != nil {
+	var persistedCiphertext []byte
+	var persistedKeyID string
+	if err := store.db.QueryRow(`SELECT obfuscation_key_ciphertext,obfuscation_key_id FROM assignments WHERE id='assignment'`).Scan(&persistedCiphertext, &persistedKeyID); err != nil {
 		t.Fatal(err)
 	}
-	var legacy domain.Assignment
-	if err := json.Unmarshal(document, &legacy); err != nil {
-		t.Fatal(err)
+	if persistedKeyID == "" || len(persistedCiphertext) == 0 {
+		t.Fatalf("test assignment was not stored in protected form: ciphertext=%x key_id=%q", persistedCiphertext, persistedKeyID)
 	}
-	if legacy.Obfuscation.KeyID == "" || len(legacy.Obfuscation.KeyCiphertext) == 0 {
-		t.Fatalf("test assignment was not stored in protected form: %#v", legacy.Obfuscation)
-	}
-	legacy.Obfuscation.KeyID = ""
-	document, err = json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`UPDATE assignments SET document_json=? WHERE id='assignment'`, document); err != nil {
+	if _, err := store.db.Exec(`UPDATE assignments SET obfuscation_key_id='' WHERE id='assignment'`); err != nil {
 		t.Fatal(err)
 	}
 

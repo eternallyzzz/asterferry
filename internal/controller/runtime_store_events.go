@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func (s *Store) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventType string, payload []byte, createdAt time.Time) error {
+func (s *Repository) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventType string, payload []byte, createdAt time.Time) error {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return err
 	}
@@ -148,6 +148,6 @@ func (s *Store) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventTy
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifyRuntimeChanges(nodeID)
+	s.ChangeBus().notifyRuntimeChanges(nodeID)
 	return nil
 }

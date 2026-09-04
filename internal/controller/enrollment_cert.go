@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte) (Certificate, error) {
+func (s *Repository) IssueNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte) (Certificate, error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}
@@ -132,7 +132,7 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, config Config, token, 
 // node. The gRPC control stream authenticates the caller with its current
 // mTLS certificate before invoking this method, so no enrollment token is
 // needed for the rotation path.
-func (s *Store) RenewNodeCertificate(ctx context.Context, config Config, nodeID string, csrDER []byte) (Certificate, error) {
+func (s *Repository) RenewNodeCertificate(ctx context.Context, config Config, nodeID string, csrDER []byte) (Certificate, error) {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return Certificate{}, fmt.Errorf("%w: %w", ErrInvalidEnrollmentRequest, err)
 	}

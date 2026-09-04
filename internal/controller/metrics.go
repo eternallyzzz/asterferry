@@ -111,7 +111,7 @@ func (m *ControllerMetrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{EnableOpenMetrics: true})
 }
 
-func (m *ControllerMetrics) refreshDatabase(store *Store) {
+func (m *ControllerMetrics) refreshDatabase(store *Repository) {
 	if m == nil || store == nil {
 		return
 	}
@@ -165,22 +165,12 @@ func (m *ControllerMetrics) observeNode(nodeID, kind string, observed domain.Obs
 	if m == nil {
 		return
 	}
-	current := observedMetric{kind: kind, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: observed.Metrics["active_streams"], sessions: observed.Metrics["active_sessions"], egress: observed.Metrics["active_egress"], connections: observed.Metrics["active_connections"], flows: observed.Metrics["active_flows"], bytesIn: observed.Metrics["runtime_bytes_in_total"], bytesOut: observed.Metrics["runtime_bytes_out_total"], geoipUp: observed.Metrics["geoip_up"] >= 0.5, listeners: make(map[string]int)}
+	current := observedMetric{kind: kind, healthy: observed.Healthy && !observed.Degraded, generation: observed.AppliedGeneration, streams: float64(observed.Metrics.ActiveStreams), sessions: float64(observed.Metrics.ActiveSessions), egress: float64(observed.Metrics.ActiveEgress), connections: float64(observed.Metrics.ActiveConnections), flows: float64(observed.Metrics.ActiveFlows), bytesIn: float64(observed.Metrics.RuntimeBytesInTotal), bytesOut: float64(observed.Metrics.RuntimeBytesOutTotal), geoipUp: observed.Metrics.GeoIPUp, listeners: make(map[string]int)}
 	for _, listener := range observed.Listeners {
 		current.listeners[listener.Protocol]++
 	}
 	m.mu.Lock()
 	m.nodes[nodeID] = current
-	m.recomputeLocked()
-	m.mu.Unlock()
-}
-
-func (m *ControllerMetrics) removeNode(nodeID string) {
-	if m == nil || nodeID == "" {
-		return
-	}
-	m.mu.Lock()
-	delete(m.nodes, nodeID)
 	m.recomputeLocked()
 	m.mu.Unlock()
 }
@@ -271,6 +261,10 @@ type metricsResponseWriter struct {
 	status int
 }
 
+type responseFlusher interface {
+	FlushError() error
+}
+
 var (
 	_ http.Flusher  = (*metricsResponseWriter)(nil)
 	_ http.Hijacker = (*metricsResponseWriter)(nil)
@@ -305,7 +299,7 @@ func (w *metricsResponseWriter) FlushError() error {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
-	if flusher, ok := w.ResponseWriter.(interface{ FlushError() error }); ok {
+	if flusher, ok := w.ResponseWriter.(responseFlusher); ok {
 		return flusher.FlushError()
 	}
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {

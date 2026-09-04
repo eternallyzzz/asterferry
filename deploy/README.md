@@ -15,7 +15,7 @@ For a copy-and-run three-server walkthrough in both languages, see the
 ```sh
 asterferry controller init --dir /var/lib/asterferry \
   --grpc-advertise controller.example.com:9443 \
-  --release-version 1.0.0
+  --release-version 2.0.0
 asterferry controller run --config /var/lib/asterferry/controller.json
 ```
 
@@ -28,7 +28,7 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-SQLite schema v10 remains the default. For a production-sized Controller, use
+SQLite database schema v11 remains the default. For a production-sized Controller, use
 an external PostgreSQL database:
 
 ```sh
@@ -41,7 +41,7 @@ asterferry controller init --dir /var/lib/asterferry \
 The development schema is a clean break: there is no in-place migration and no
 `controller migrate` command. To change backend, initialize a new Controller
 and recreate resources in the Dashboard. Older or unknown database generations
-and pre-v10 backup manifests remain incompatible. PostgreSQL backup/restore
+and pre-v11 backup manifests remain incompatible. PostgreSQL backup/restore
 requires `pg_dump`/`pg_restore` installed on the machine running the CLI;
 SQLite backup remains local-file based.
 
@@ -155,7 +155,7 @@ docker compose -f deploy/docker/compose.yaml config
 
 ## Release artifacts
 
-The current architecture uses `v1.0.0` as its first public release version.
+The normalized architecture uses `v2.0.0` as its first public release version.
 Controller and Node installations must use the same version and must not mix
 these binaries with the pre-architecture generation. A tagged release
 publishes the native archives and `install-node.sh`/`install-node.ps1` to the
@@ -165,7 +165,7 @@ the multi-architecture image at `ghcr.io/eternallyzzz/asterferry` and the
 under `ghcr.io/eternallyzzz/charts`.
 
 Verify the downloaded archive against `SHA256SUMS` before installation. For a
-fresh deployment, initialize the Controller with `--release-version 1.0.0` so
+fresh deployment, initialize the Controller with `--release-version 2.0.0` so
 generated Node installation commands refer to the matching release assets. The
 release manifest records immutable image and Chart digests; set Helm's
 `image.digest` to pin an installation, which takes precedence over

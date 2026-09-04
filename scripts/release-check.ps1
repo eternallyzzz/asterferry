@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "2.0.0",
     [string]$OutputDirectory = "tmp/release-check",
     [switch]$SkipDocker
 )
@@ -170,6 +170,7 @@ if ($trackedDashboardAssets.Count -gt 0) {
     throw "generated Dashboard assets must not be tracked: $($trackedDashboardAssets -join ', ')"
 }
 Invoke-Checked "Go module verification" "go" @("mod", "verify")
+Invoke-Checked "Behavior contract and state-machine tests" "go" @("test", "-count=1", "./internal/afdp", "./internal/controller", "./internal/dataplane", "./internal/duplex", "./internal/node", "-run", "Contract|StateMachine")
 Invoke-Checked "Protocol benchmark smoke" "go" @("test", "./internal/afdp", "./internal/controlwire", "./internal/dataplane", "-run", "^$", "-bench", "^Benchmark", "-benchmem", "-benchtime=1s", "-count=3")
 
 $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferry/internal/buildinfo.Commit=release-check -X asterferry/internal/buildinfo.BuildDate=release-check"

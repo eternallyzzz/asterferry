@@ -90,7 +90,7 @@ func (s *ControlServer) sendSnapshotForWire(ctx context.Context, cancel context.
 	for attempt := 1; ; attempt++ {
 		wireDocument, err := s.store.SnapshotDocumentForWire(snapshot.Document)
 		if err == nil {
-			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
+			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
 			if err := send(message); err != nil {
 				return err
 			}

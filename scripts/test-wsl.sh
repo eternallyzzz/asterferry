@@ -125,6 +125,7 @@ if command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./...
 fi
 go test -count=1 ./...
+go test -count=1 ./internal/afdp ./internal/controller ./internal/dataplane ./internal/duplex ./internal/node -run 'Contract|StateMachine'
 go test -tags=integration -count=1 -timeout=5m ./internal/integration
 go test ./internal/afdp -run '^$' -fuzz FuzzDecodeAFDPFrames -fuzztime 10s
 go test ./internal/controlwire -run '^$' -fuzz FuzzControlwireDecoders -fuzztime 10s

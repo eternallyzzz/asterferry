@@ -45,5 +45,5 @@ func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (
 		slog.Default().Error("node enrollment failed", "node_id", request.GetNodeId(), "error", err)
 		return nil, status.Error(codes.Unavailable, "enrollment service is temporarily unavailable")
 	}
-	return &v1.EnrollResponse{SchemaVersion: domain.SchemaVersion, Certificate: &v1.CertificateBundle{CertificateDer: certificateDER(certificate.CertificatePEM), CaCertificateDer: certificateDER(certificate.CAPEM), Serial: certificate.Serial, NotBefore: timestamppb.New(certificate.NotBefore), NotAfter: timestamppb.New(certificate.NotAfter)}}, nil
+	return &v1.EnrollResponse{SchemaVersion: domain.CurrentControlProtocolVersion, Certificate: &v1.CertificateBundle{CertificateDer: certificateDER(certificate.CertificatePEM), CaCertificateDer: certificateDER(certificate.CAPEM), Serial: certificate.Serial, NotBefore: timestamppb.New(certificate.NotBefore), NotAfter: timestamppb.New(certificate.NotAfter)}}, nil
 }

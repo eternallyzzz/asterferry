@@ -12,7 +12,7 @@ import (
 	nodepkg "asterferry/internal/node"
 )
 
-func TestGenericEnrollmentTokenCanReenrollConfiguredNode(t *testing.T) {
+func TestGenericEnrollmentTokenReenrollsConfiguredNodeContract(t *testing.T) {
 	config, store := openEnrollmentTestController(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -49,7 +49,7 @@ func TestGenericEnrollmentTokenCanReenrollConfiguredNode(t *testing.T) {
 	}
 }
 
-func TestGenericEnrollmentTokenIsNotBoundToSpecKind(t *testing.T) {
+func TestGenericEnrollmentTokenSupportsAllNodeKindsContract(t *testing.T) {
 	config, store := openEnrollmentTestController(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -88,7 +88,7 @@ func TestGenericEnrollmentTokenIsNotBoundToSpecKind(t *testing.T) {
 	}
 }
 
-func openEnrollmentTestController(t *testing.T) (Config, *Store) {
+func openEnrollmentTestController(t *testing.T) (Config, *Repository) {
 	t.Helper()
 	result, err := Init(context.Background(), InitOptions{
 		Dir:           filepath.Join(t.TempDir(), "controller"),

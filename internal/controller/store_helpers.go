@@ -38,7 +38,7 @@ func requireRevisionWrite(ctx context.Context, tx *sql.Tx, result sql.Result, re
 // RecordEvent persists a node-originated event in the same audit stream used
 // by API writes. Event payloads are intentionally bounded and stored as
 // attributes rather than allowing arbitrary SQL-visible columns.
-func (s *Store) RecordEvent(ctx context.Context, actor, eventID, eventType, message, resourceID string, attributes map[string]string) error {
+func (s *Repository) RecordEvent(ctx context.Context, actor, eventID, eventType, message, resourceID string, attributes map[string]string) error {
 	eventID = strings.TrimSpace(eventID)
 	eventType = strings.TrimSpace(eventType)
 	if len(eventID) > 128 || len(eventType) == 0 || len(eventType) > 128 || strings.ContainsAny(eventID+eventType, "\x00\r\n") {
@@ -80,7 +80,7 @@ func attributesWithMessage(attributes map[string]string, message, eventID string
 	return result
 }
 
-func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+func (s *Repository) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return result, rows.Err()
 }
 
-func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
+func (s *Repository) GetUser(ctx context.Context, id string) (User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users WHERE id=?`, id))
 }
 
@@ -138,7 +138,7 @@ func scanUser(row scanner) (User, error) {
 	return user, nil
 }
 
-func (s *Store) ListAudit(ctx context.Context, limit int) ([]AuditRecord, error) {
+func (s *Repository) ListAudit(ctx context.Context, limit int) ([]AuditRecord, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
@@ -182,70 +182,6 @@ func insertAudit(ctx context.Context, tx *sql.Tx, actor, action, resource, resou
 }
 
 type scanner interface{ Scan(dest ...any) error }
-
-func scanNode(row scanner) (domain.Node, error) {
-	return scanNodeRecord(row)
-}
-
-func scanNodeWithSpecKind(row scanner) (domain.Node, error) {
-	var specKind sql.NullString
-	node, err := scanNodeRecord(row, &specKind)
-	if err != nil {
-		return domain.Node{}, err
-	}
-	if specKind.Valid {
-		node.SpecKind = domain.NodeSpecKind(specKind.String)
-	}
-	return node, nil
-}
-
-func scanNodeAndSpec(row scanner) (domain.Node, domain.NodeSpec, error) {
-	var kind string
-	var data []byte
-	var revision int64
-	var updated string
-	node, err := scanNodeRecord(row, &kind, &data, &revision, &updated)
-	if err != nil {
-		return domain.Node{}, domain.NodeSpec{}, err
-	}
-	spec, err := decodeStoredNodeSpec(node.ID, kind, data, revision, updated)
-	if err != nil {
-		return domain.Node{}, domain.NodeSpec{}, err
-	}
-	node.SpecKind = spec.Kind
-	return node, spec, nil
-}
-
-func scanNodeRecord(row scanner, extra ...any) (domain.Node, error) {
-	var node domain.Node
-	var labels []byte
-	var enabled int
-	var created, updated string
-	args := []any{&node.ID, &node.Name, &labels, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated}
-	args = append(args, extra...)
-	if err := row.Scan(args...); err != nil {
-		return domain.Node{}, err
-	}
-	if len(labels) > 0 {
-		if err := json.Unmarshal(labels, &node.Labels); err != nil {
-			return domain.Node{}, err
-		}
-	}
-	node.Enabled = enabled != 0
-	parsed, err := parseStoredTime("node.created_at", created)
-	if err != nil {
-		return domain.Node{}, err
-	}
-	node.CreatedAt = parsed
-	node.UpdatedAt, err = parseStoredTime("node.updated_at", updated)
-	if err != nil {
-		return domain.Node{}, err
-	}
-	if err := node.Validate(); err != nil {
-		return domain.Node{}, fmt.Errorf("stored node is invalid: %w", err)
-	}
-	return node, nil
-}
 
 func validateNode(node domain.Node) error {
 	return node.Validate()

@@ -130,7 +130,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 `
   --grpc-listen controller.example.com:9443 `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 1.0.0
+  --release-version 2.0.0
 ```
 
 ```sh
@@ -142,7 +142,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 \
   --grpc-listen controller.example.com:9443 \
   --grpc-advertise controller.example.com:9443 \
-  --release-version 1.0.0
+  --release-version 2.0.0
 ```
 
 `--grpc-advertise` 是 A、B 实际连接的 C 地址；`--release-version` 必须替换为已经发布到 `release_base_url` 的版本。初始化会把广播地址写入 Controller 证书 SAN。自建发布镜像可通过 `--release-base-url` 指定，但必须是 HTTPS。
@@ -156,7 +156,7 @@ asterferry.exe controller configure `
 ```
 
 如果旧配置也没有已发布的 `release_version`，再加上
-`--release-version 1.0.0`；使用私有 HTTPS 发布镜像时再加
+`--release-version 2.0.0`；使用私有 HTTPS 发布镜像时再加
 `--release-base-url`。
 
 该命令会重新签发包含新地址 SAN 的 Controller 证书。重启 Controller 后再生成节点安装命令。Windows Controller 与本机 WSL 联调时，WSL 通常可访问 `172.28.80.1:9443`；远程节点必须使用 C 的稳定局域网地址或 DNS，不能使用这个 WSL 虚拟地址。
@@ -393,7 +393,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-SQLite schema v10 仍是零依赖安装的默认选项。节点规模较大时，可以在初始化
+SQLite database schema v11 仍是零依赖安装的默认选项。节点规模较大时，可以在初始化
 Controller 时直接使用 PostgreSQL：
 
 ```sh
@@ -405,7 +405,7 @@ asterferry controller init --dir /var/lib/asterferry \
 
 当前开发代际中，SQLite 和 PostgreSQL 都只能作为全新安装选择，不提供
 原地 schema 迁移或 SQLite→PostgreSQL 转换命令。切换后端时请重新初始化
-Controller 并在 Dashboard 重建资源；v8/v9 数据库和 v10 之前的备份 manifest
+Controller 并在 Dashboard 重建资源；v11 之前的数据库和备份 manifest
 都会被拒绝。PostgreSQL 备份/恢复使用外部 `pg_dump` 和 `pg_restore` 工具，
 因此执行命令的机器必须安装 PostgreSQL 客户端；SQLite 备份仍直接复制本地
 数据库文件。两种后端的备份都包含配置、master key、CA 和 Controller TLS

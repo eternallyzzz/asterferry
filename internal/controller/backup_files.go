@@ -30,7 +30,7 @@ func writeBackupManifest(directory string, createdAt time.Time, databaseSchema s
 	manifest := backupManifest{
 		Version:          backupManifestVersion,
 		CreatedAt:        createdAt.UTC(),
-		ControllerSchema: fmt.Sprintf("%d/%s", currentDBSchema, dbSchemaFingerprint),
+		ControllerSchema: databaseSchemaMarker(),
 		DatabaseSchema:   databaseSchema,
 		Files:            make([]backupManifestFile, 0, len(payloadFiles)),
 	}
@@ -57,7 +57,7 @@ func verifyBackupManifest(directory string, payloadFiles []string) (backupManife
 	if err := jsonutil.DecodeStrict(data, &manifest); err != nil {
 		return backupManifest{}, fmt.Errorf("decode backup manifest: %w", err)
 	}
-	if manifest.Version != backupManifestVersion || manifest.CreatedAt.IsZero() || manifest.ControllerSchema != fmt.Sprintf("%d/%s", currentDBSchema, dbSchemaFingerprint) {
+	if manifest.Version != backupManifestVersion || manifest.CreatedAt.IsZero() || manifest.ControllerSchema != databaseSchemaMarker() {
 		return backupManifest{}, errors.New("backup manifest version or timestamp is invalid")
 	}
 	expected := make(map[string]struct{}, len(payloadFiles))

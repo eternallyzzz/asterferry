@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func (s *Store) ListRuntimeConnections(ctx context.Context, filter RuntimeConnectionFilter) ([]domain.RuntimeConnection, error) {
+func (s *Repository) ListRuntimeConnections(ctx context.Context, filter RuntimeConnectionFilter) ([]domain.RuntimeConnection, error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 200
@@ -46,7 +46,7 @@ func (s *Store) ListRuntimeConnections(ctx context.Context, filter RuntimeConnec
 // MarkRuntimeConnectionsUnknown prevents an abandoned control stream from
 // leaving rows that look active forever. A reconnect immediately repairs the
 // rows with its next runtime snapshot; closed rows are preserved unchanged.
-func (s *Store) MarkRuntimeConnectionsUnknown(ctx context.Context, nodeID string, at time.Time) error {
+func (s *Repository) MarkRuntimeConnectionsUnknown(ctx context.Context, nodeID string, at time.Time) error {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return err
 	}
@@ -62,16 +62,16 @@ func (s *Store) MarkRuntimeConnectionsUnknown(ctx context.Context, nodeID string
 		return err
 	}
 	if changed > 0 {
-		s.notifyRuntimeChanges(nodeID)
+		s.ChangeBus().notifyRuntimeChanges(nodeID)
 	}
 	return nil
 }
 
-func (s *Store) GetRuntimeConnection(ctx context.Context, nodeID, connectionID string) (domain.RuntimeConnection, error) {
+func (s *Repository) GetRuntimeConnection(ctx context.Context, nodeID, connectionID string) (domain.RuntimeConnection, error) {
 	return scanRuntimeConnection(s.db.QueryRowContext(ctx, `SELECT node_id,id,type,state,peer_node_id,gateway_id,agent_id,assignment_id,service_id,protocol,source_ip,source_port,target,parent_session_id,started_at,last_activity_at,ended_at,close_reason,bytes_in,bytes_out,rate_in,rate_out,limit_json FROM runtime_connections WHERE node_id=? AND id=?`, nodeID, connectionID))
 }
 
-func (s *Store) ListRuntimeEvents(ctx context.Context, nodeID string, limit int) ([]RuntimeEventRecord, error) {
+func (s *Repository) ListRuntimeEvents(ctx context.Context, nodeID string, limit int) ([]RuntimeEventRecord, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
@@ -107,7 +107,7 @@ func (s *Store) ListRuntimeEvents(ctx context.Context, nodeID string, limit int)
 	return result, rows.Err()
 }
 
-func (s *Store) ListRuntimeTraffic(ctx context.Context, nodeID string, limit int) ([]RuntimeTrafficRollup, error) {
+func (s *Repository) ListRuntimeTraffic(ctx context.Context, nodeID string, limit int) ([]RuntimeTrafficRollup, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}

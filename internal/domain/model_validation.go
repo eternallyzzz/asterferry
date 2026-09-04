@@ -3,14 +3,13 @@ package domain
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"net/netip"
 	"strings"
 )
 
 func (o ObservedState) Validate() error {
-	if o.SchemaVersion != SchemaVersion {
+	if o.SchemaVersion != CurrentControlProtocolVersion {
 		return &ApplyError{Code: "unknown_schema", Path: "schema_version", Message: "observed schema version is unsupported"}
 	}
 	if err := ValidateID(o.NodeID, "node_id"); err != nil {
@@ -24,7 +23,7 @@ func (o ObservedState) Validate() error {
 			return &ApplyError{Code: "invalid_observed_error", Path: "last_error", Message: "observed error fields are invalid"}
 		}
 	}
-	if len(o.Sessions) > 4096 || len(o.Listeners) > 4096 || len(o.Metrics) > 4096 {
+	if len(o.Sessions) > 4096 || len(o.Listeners) > 4096 {
 		return &ApplyError{Code: "observed_state_too_large", Message: "observed state contains too many entries"}
 	}
 	seenSessions := make(map[string]struct{}, len(o.Sessions))
@@ -55,11 +54,6 @@ func (o ObservedState) Validate() error {
 			return &ApplyError{Code: "duplicate_listener_state", Path: fmt.Sprintf("listeners[%d]", i), Message: "listener state is duplicated"}
 		}
 		seenListeners[key] = struct{}{}
-	}
-	for key, value := range o.Metrics {
-		if strings.TrimSpace(key) == "" || strings.TrimSpace(key) != key || len(key) > 128 || containsControl(key) || math.IsNaN(value) || math.IsInf(value, 0) {
-			return &ApplyError{Code: "invalid_metrics", Path: "metrics", Message: "observed metric is invalid"}
-		}
 	}
 	return nil
 }
@@ -100,7 +94,7 @@ func (e *ApplyError) Error() string {
 // Validate performs structural validation and returns stable error fields
 // suitable for both the REST API and the control protocol.
 func (s DesiredSnapshot) Validate() error {
-	if s.SchemaVersion != SchemaVersion {
+	if s.SchemaVersion != CurrentControlProtocolVersion {
 		return &ApplyError{Code: "unknown_schema", Path: "schema_version", Message: fmt.Sprintf("schema version %d is unsupported", s.SchemaVersion)}
 	}
 	if err := ValidateID(s.NodeID, "node_id"); err != nil {

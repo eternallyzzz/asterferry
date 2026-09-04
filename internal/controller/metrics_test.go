@@ -15,13 +15,17 @@ func TestControllerMetricsExposeRuntimeSignalsWithoutResourceLabels(t *testing.T
 	metrics.observeHTTP(http.MethodGet, "/api/v1/nodes", http.StatusOK, time.Millisecond)
 	metrics.observeGRPC("Connect", "OK")
 	metrics.observeNode("node-secret", string(domain.NodeSpecGateway), domain.ObservedState{
-		SchemaVersion:     domain.SchemaVersion,
+		SchemaVersion:     domain.CurrentControlProtocolVersion,
 		NodeID:            "node-secret",
 		AppliedGeneration: 7,
 		Healthy:           true,
 		ObservedAt:        time.Now().UTC(),
-		Metrics:           map[string]float64{"active_streams": 2, "active_sessions": 1, "active_egress": 3},
-		Listeners:         []domain.ListenerState{{Protocol: domain.ProtocolTCP}},
+		Metrics: domain.RuntimeMetrics{
+			ActiveStreams:  2,
+			ActiveSessions: 1,
+			ActiveEgress:   3,
+		},
+		Listeners: []domain.ListenerState{{Protocol: domain.ProtocolTCP}},
 	})
 
 	recorder := httptest.NewRecorder()
@@ -49,15 +53,15 @@ func TestControllerMetricsExposeRuntimeSignalsWithoutResourceLabels(t *testing.T
 func TestControllerMetricsAggregateGeoIPByKind(t *testing.T) {
 	metrics := newControllerMetrics()
 	observed := domain.ObservedState{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		Healthy:       true,
-		Metrics:       map[string]float64{"geoip_up": 1},
+		Metrics:       domain.RuntimeMetrics{GeoIPUp: true},
 	}
 	metrics.observeNode("gateway-up", string(domain.NodeSpecGateway), observed)
 
-	observed.Metrics["geoip_up"] = 0
+	observed.Metrics.GeoIPUp = false
 	metrics.observeNode("gateway-down", string(domain.NodeSpecGateway), observed)
-	observed.Metrics["geoip_up"] = 1
+	observed.Metrics.GeoIPUp = true
 	metrics.observeNode("agent-up", string(domain.NodeSpecAgent), observed)
 
 	recorder := httptest.NewRecorder()
@@ -72,7 +76,7 @@ func TestControllerMetricsAggregateGeoIPByKind(t *testing.T) {
 
 	// A later observation without geoip_up must clear the previous node's
 	// availability instead of leaving a stale value in the aggregate.
-	observed.Metrics = map[string]float64{}
+	observed.Metrics = domain.RuntimeMetrics{}
 	metrics.observeNode("gateway-up", string(domain.NodeSpecGateway), observed)
 	recorder = httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))

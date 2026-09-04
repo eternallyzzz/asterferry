@@ -18,7 +18,7 @@ import (
 
 type ControlServer struct {
 	v1.UnimplementedControlServer
-	store          *Store
+	store          *Repository
 	config         Config
 	streams        map[string]*controlStream // node id -> active stream
 	streamMu       sync.Mutex
@@ -47,18 +47,22 @@ func hasCapability(capabilities []string, wanted string) bool {
 	return false
 }
 
-func NewControlServer(config Config, store *Store) (*ControlServer, error) {
+func NewControlServer(config Config, store *Repository, metrics ...*ControllerMetrics) (*ControlServer, error) {
 	if store == nil {
 		return nil, errors.New("controller store is required")
 	}
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	if store.metrics == nil {
-		store.metrics = newControllerMetrics(store.DatabaseDriver())
+	var controllerMetrics *ControllerMetrics
+	if len(metrics) > 0 {
+		controllerMetrics = metrics[0]
+	}
+	if controllerMetrics == nil {
+		controllerMetrics = newControllerMetrics(store.DatabaseDriver())
 	}
 	return &ControlServer{
-		store: store, config: config, streams: make(map[string]*controlStream), metrics: store.metrics,
+		store: store, config: config, streams: make(map[string]*controlStream), metrics: controllerMetrics,
 		enrollLimiter:  newAdmissionLimiter(6, time.Minute, 4096),
 		connectLimiter: newAdmissionLimiter(30, time.Minute, 4096),
 		enrollSlots:    make(chan struct{}, 16),
@@ -82,8 +86,8 @@ func (s *ControlServer) Health(context.Context, *emptypb.Empty) (response *v1.He
 // StartGRPC preserves the small embedding API used by tests and tools. Serve
 // failures are still logged by StartGRPCWithErrors; Controller.Start uses the
 // error channel directly so the CLI can propagate the failure.
-func StartGRPC(ctx context.Context, config Config, store *Store) (net.Listener, *grpc.Server, error) {
-	listener, server, serveErr, err := StartGRPCWithErrors(ctx, config, store)
+func StartGRPC(ctx context.Context, config Config, store *Repository, metrics ...*ControllerMetrics) (net.Listener, *grpc.Server, error) {
+	listener, server, serveErr, err := StartGRPCWithErrors(ctx, config, store, metrics...)
 	if err == nil {
 		go func() {
 			if serveErr != nil {
@@ -96,11 +100,11 @@ func StartGRPC(ctx context.Context, config Config, store *Store) (net.Listener, 
 	return listener, server, err
 }
 
-func StartGRPCWithErrors(ctx context.Context, config Config, store *Store) (net.Listener, *grpc.Server, <-chan error, error) {
+func StartGRPCWithErrors(ctx context.Context, config Config, store *Repository, metrics ...*ControllerMetrics) (net.Listener, *grpc.Server, <-chan error, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	server, err := NewControlServer(config, store)
+	server, err := NewControlServer(config, store, metrics...)
 	if err != nil {
 		return nil, nil, nil, err
 	}

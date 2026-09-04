@@ -4,7 +4,6 @@ import (
 	"asterferry/internal/domain"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -46,26 +45,28 @@ func assignmentParticipantIDsForServiceTx(ctx context.Context, tx *sql.Tx, servi
 }
 
 // bumpAssignmentsForServiceTx invalidates the shared placement generation for
-// every assignment that consumes a changed Service. The resource and
-// assignment updates are deliberately part of one database transaction so a
-// snapshot builder can never observe the new target with an old applied
-// assignment. Degraded/draining assignments remain fail-closed; a later
-// scheduler pass can replace them with a fresh placement.
+// every assignment that consumes a changed Service. It updates only the
+// assignment lifecycle columns; the ordered relationship rows remain intact.
 func bumpAssignmentsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID string) error {
-	rows, err := tx.QueryContext(ctx, `SELECT assignments.id,assignments.document_json,assignments.revision,assignments.generation FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=? ORDER BY assignments.id`, serviceID)
+	rows, err := tx.QueryContext(ctx, `SELECT assignments.id,assignments.revision,assignments.generation FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=? ORDER BY assignments.id`, serviceID)
 	if err != nil {
 		return err
 	}
 	type assignmentRow struct {
 		id         string
-		document   []byte
 		revision   int64
 		generation uint64
 	}
 	assigned := make([]assignmentRow, 0)
 	for rows.Next() {
 		var row assignmentRow
-		if err := rows.Scan(&row.id, &row.document, &row.revision, &row.generation); err != nil {
+		var generation int64
+		if err := rows.Scan(&row.id, &row.revision, &generation); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		row.generation, err = storedUint64(generation, "assignment generation")
+		if err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -79,10 +80,9 @@ func bumpAssignmentsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID stri
 		return err
 	}
 	for _, row := range assigned {
-		id, document, revision, indexedGeneration := row.id, row.document, row.revision, row.generation
-		var assignment domain.Assignment
-		if err := json.Unmarshal(document, &assignment); err != nil {
-			return fmt.Errorf("decode assignment %q: %w", id, err)
+		assignment, err := loadAssignmentNormalized(ctx, tx, row.id)
+		if err != nil {
+			return fmt.Errorf("load assignment %q: %w", row.id, err)
 		}
 		contains := false
 		for _, candidate := range assignment.ServiceIDs {
@@ -94,43 +94,36 @@ func bumpAssignmentsForServiceTx(ctx context.Context, tx *sql.Tx, serviceID stri
 		if !contains {
 			continue
 		}
-		if assignment.ID != id || assignment.Generation != indexedGeneration {
+		if assignment.ID != row.id || assignment.Generation != row.generation {
 			return &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "assignment", Message: "stored assignment metadata does not match its row"}
 		}
 		if assignment.Generation == math.MaxUint64 {
 			return &domain.ApplyError{Code: "invalid_generation", Path: "assignment.generation", Message: "assignment generation is exhausted"}
 		}
-		if revision == math.MaxInt64 {
+		if row.revision == math.MaxInt64 {
 			return &domain.ApplyError{Code: "invalid_revision", Path: "assignment.revision", Message: "assignment revision is exhausted"}
-		}
-		if assignment.State == "" {
-			assignment.State = domain.AssignmentPending
 		}
 		assignment.Generation++
 		if assignment.State != domain.AssignmentDegraded && assignment.State != domain.AssignmentDraining {
 			assignment.State = domain.AssignmentPending
 		}
-		assignment.Revision = revision + 1
+		assignment.Revision = row.revision + 1
 		assignment.UpdatedAt = time.Now().UTC()
-		updated, err := json.Marshal(assignment)
+		result, err := updateAssignmentColumnsTx(ctx, tx, assignment, row.revision)
 		if err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,generation=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Generation, assignment.Revision, assignment.UpdatedAt.Format(time.RFC3339Nano), id, revision)
-		if err != nil {
+		if err := requireRevisionWrite(ctx, tx, result, "assignment", row.revision, `SELECT revision FROM assignments WHERE id=?`, row.id); err != nil {
 			return err
 		}
-		if err := requireRevisionWrite(ctx, tx, result, "assignment", revision, `SELECT revision FROM assignments WHERE id=?`, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_acks WHERE assignment_id=?`, row.id); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM assignment_acks WHERE assignment_id=?`, id); err != nil {
-			return err
-		}
-		if err := insertAudit(ctx, tx, "system", "derived_service", "assignment", id, assignment.Revision, map[string]string{"service_id": serviceID, "generation": fmt.Sprint(assignment.Generation)}); err != nil {
+		if err := insertAudit(ctx, tx, "system", "derived_service", "assignment", row.id, assignment.Revision, map[string]string{"service_id": serviceID, "generation": fmt.Sprint(assignment.Generation)}); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func serviceHasAssignment(ctx context.Context, tx *sql.Tx, serviceID string) (bool, error) {
@@ -142,16 +135,16 @@ func serviceHasAssignment(ctx context.Context, tx *sql.Tx, serviceID string) (bo
 }
 
 func assignmentForService(ctx context.Context, tx *sql.Tx, serviceID string) (domain.Assignment, bool, error) {
-	var document []byte
-	err := tx.QueryRowContext(ctx, `SELECT assignments.document_json FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=?`, serviceID).Scan(&document)
+	var id string
+	err := tx.QueryRowContext(ctx, `SELECT assignments.id FROM assignments JOIN assignment_services ON assignment_services.assignment_id=assignments.id WHERE assignment_services.service_id=?`, serviceID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Assignment{}, false, nil
 	}
 	if err != nil {
 		return domain.Assignment{}, false, err
 	}
-	var assignment domain.Assignment
-	if err := json.Unmarshal(document, &assignment); err != nil {
+	assignment, err := loadAssignmentNormalized(ctx, tx, id)
+	if err != nil {
 		return domain.Assignment{}, false, err
 	}
 	return assignment, true, nil

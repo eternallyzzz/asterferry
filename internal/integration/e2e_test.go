@@ -101,7 +101,11 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assignments, err := store.ScheduleAgent(ctx, "agent-e2e", controller.WriteOptions{Actor: "integration"})
+	scheduler, err := controller.NewScheduler(store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignments, err := scheduler.ScheduleAgent(ctx, "agent-e2e", controller.WriteOptions{Actor: "integration"})
 	if err != nil {
 		t.Fatal(err)
 	}

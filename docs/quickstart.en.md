@@ -130,7 +130,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 `
   --grpc-listen controller.example.com:9443 `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 1.0.0
+  --release-version 2.0.0
 ```
 
 ```sh
@@ -142,7 +142,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 \
   --grpc-listen controller.example.com:9443 \
   --grpc-advertise controller.example.com:9443 \
-  --release-version 1.0.0
+  --release-version 2.0.0
 ```
 
 `--grpc-advertise` is the address that A and B use to reach C. Replace
@@ -162,7 +162,7 @@ asterferry.exe controller configure `
 ```
 
 If the old configuration also has no published `release_version`, add
-`--release-version 1.0.0`; add `--release-base-url` when using a private HTTPS
+`--release-version 2.0.0`; add `--release-base-url` when using a private HTTPS
 release mirror.
 
 The command reissues the Controller certificate with the new address in its
@@ -425,7 +425,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-SQLite schema v10 remains the default for a zero-dependency installation. For a
+SQLite database schema v11 remains the default for a zero-dependency installation. For a
 larger Controller, initialize with PostgreSQL instead:
 
 ```sh
@@ -438,7 +438,7 @@ asterferry controller init --dir /var/lib/asterferry \
 SQLite and PostgreSQL are fresh-install choices in this development generation.
 There is no in-place schema migration or SQLite-to-PostgreSQL conversion
 command. To change backend, initialize a new Controller and recreate the
-Dashboard resources; v8/v9 databases and pre-v10 backup manifests are rejected.
+Dashboard resources; pre-v11 databases and backup manifests are rejected.
 The PostgreSQL backup format uses the external `pg_dump` and `pg_restore`
 utilities, so install the PostgreSQL client tools wherever the backup/restore
 CLI is run. SQLite backups continue to use the local database file. In both

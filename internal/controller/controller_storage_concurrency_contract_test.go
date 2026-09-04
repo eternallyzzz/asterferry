@@ -12,7 +12,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-func TestPostgresConcurrentIdempotencyReservationReplays(t *testing.T) {
+func TestIdempotencyReservationReplaysCommittedResultContract(t *testing.T) {
 	storeA, storeB := openTwoPostgresTestStores(t)
 	ctx := context.Background()
 	request := struct {
@@ -81,7 +81,7 @@ func TestPostgresConcurrentIdempotencyReservationReplays(t *testing.T) {
 	}
 }
 
-func TestPostgresSaveSnapshotConditionalConflictIsReported(t *testing.T) {
+func TestSnapshotConditionalConflictIsReportedContract(t *testing.T) {
 	storeA, storeB := openTwoPostgresTestStores(t)
 	ctx := context.Background()
 	if err := storeA.CreateNode(ctx, domain.Node{ID: "snapshot-agent", Name: "Snapshot agent", Enabled: true}, WriteOptions{}); err != nil {
@@ -118,7 +118,7 @@ func TestPostgresSaveSnapshotConditionalConflictIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lockTx.Rollback()
-	if _, err := lockTx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,document_json,created_at) VALUES(?,?,?,?,?)`, winner.NodeID, winner.Generation, winner.Checksum, winnerDocument, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := lockTx.ExecContext(ctx, `INSERT INTO desired_snapshots(node_id,generation,checksum,payload_json,created_at) VALUES(?,?,?,?,?)`, winner.NodeID, winner.Generation, winner.Checksum, winnerDocument, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -152,7 +152,7 @@ func TestPostgresSaveSnapshotConditionalConflictIsReported(t *testing.T) {
 	}
 }
 
-func TestPutAssignmentMissingGatewayDocumentReturnsClearError(t *testing.T) {
+func TestAssignmentValidationReportsMalformedGatewayContract(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ func TestPutAssignmentMissingGatewayDocumentReturnsClearError(t *testing.T) {
 	if err := store.PutService(ctx, domain.Service{ID: "malformed-service", AgentID: "malformed-agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", PublicPort: 18080, Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE node_specs SET document_json=? WHERE node_id=?`, []byte(`{"node_id":"malformed-gateway","kind":"gateway"}`), "malformed-gateway"); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE gateway_specs SET capacity_max_agents=-1 WHERE node_id=?`, "malformed-gateway"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -190,15 +190,15 @@ func TestPutAssignmentMissingGatewayDocumentReturnsClearError(t *testing.T) {
 		State:          domain.AssignmentPending,
 		PublicEndpoint: "gateway.example:4433",
 	}, WriteOptions{})
-	if err == nil || err.Error() != "decode gateway spec: typed gateway document is missing" {
-		t.Fatalf("malformed gateway document error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "stored gateway spec is invalid") {
+		t.Fatalf("malformed gateway aggregate error = %v", err)
 	}
 	if strings.Contains(err.Error(), "%!w") {
 		t.Fatalf("malformed gateway document error contains formatting artifact: %v", err)
 	}
 }
 
-func TestPostgresConcurrentSchedulingRetriesDynamicPortConflict(t *testing.T) {
+func TestConcurrentSchedulingRetriesDynamicPortConflictContract(t *testing.T) {
 	storeA, storeB := openTwoPostgresTestStores(t)
 	ctx := context.Background()
 	if err := storeA.CreateNode(ctx, domain.Node{ID: "race-gateway", Name: "Race gateway", Enabled: true}, WriteOptions{}); err != nil {
@@ -231,7 +231,7 @@ func TestPostgresConcurrentSchedulingRetriesDynamicPortConflict(t *testing.T) {
 	if _, err := storeA.db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION test_delay_binding_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END $$`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storeA.db.ExecContext(ctx, `CREATE TRIGGER test_delay_binding_insert_trigger BEFORE INSERT ON service_bindings FOR EACH ROW EXECUTE FUNCTION test_delay_binding_insert()`); err != nil {
+	if _, err := storeA.db.ExecContext(ctx, `CREATE TRIGGER test_delay_binding_insert_trigger BEFORE INSERT ON assignment_bindings FOR EACH ROW EXECUTE FUNCTION test_delay_binding_insert()`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -244,13 +244,13 @@ func TestPostgresConcurrentSchedulingRetriesDynamicPortConflict(t *testing.T) {
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			var store *Store
+			var store *Repository
 			if index == 0 {
 				store = storeA
 			} else {
 				store = storeB
 			}
-			_, err := store.ScheduleAgent(ctx, agentID, WriteOptions{Actor: "test"})
+			_, err := schedulerForTest(store).ScheduleAgent(ctx, agentID, WriteOptions{Actor: "test"})
 			results <- err
 		}()
 	}

@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-func (s *Store) CreateAPIToken(ctx context.Context, userID, name string, expiresAt *time.Time) (string, APIToken, error) {
+func (s *Repository) CreateAPIToken(ctx context.Context, userID, name string, expiresAt *time.Time) (string, APIToken, error) {
 	return s.CreateAPITokenWithOptions(ctx, userID, name, expiresAt, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) CreateAPITokenWithOptions(ctx context.Context, userID, name string, expiresAt *time.Time, options WriteOptions) (string, APIToken, error) {
+func (s *Repository) CreateAPITokenWithOptions(ctx context.Context, userID, name string, expiresAt *time.Time, options WriteOptions) (string, APIToken, error) {
 	userID = strings.TrimSpace(userID)
 	name = strings.TrimSpace(name)
 	if userID == "" || name == "" {
@@ -123,7 +123,7 @@ func (s *Store) CreateAPITokenWithOptions(ctx context.Context, userID, name stri
 	return plain, APIToken{ID: id, UserID: userID, Name: name, ExpiresAt: expiresAt, CreatedAt: now}, nil
 }
 
-func (s *Store) ListAPITokens(ctx context.Context, userID string) ([]APIToken, error) {
+func (s *Repository) ListAPITokens(ctx context.Context, userID string) ([]APIToken, error) {
 	query := `SELECT id,user_id,name,expires_at,revoked_at,created_at FROM api_tokens`
 	args := []any{}
 	if strings.TrimSpace(userID) != "" {
@@ -168,7 +168,7 @@ func (s *Store) ListAPITokens(ctx context.Context, userID string) ([]APIToken, e
 	return result, rows.Err()
 }
 
-func (s *Store) AuthenticateToken(ctx context.Context, token string) (User, error) {
+func (s *Repository) AuthenticateToken(ctx context.Context, token string) (User, error) {
 	digest := HashToken(token)
 	var user User
 	var enabled int
@@ -213,11 +213,11 @@ func (s *Store) AuthenticateToken(ctx context.Context, token string) (User, erro
 	return user, nil
 }
 
-func (s *Store) RevokeAPIToken(ctx context.Context, id string) error {
+func (s *Repository) RevokeAPIToken(ctx context.Context, id string) error {
 	return s.RevokeAPITokenWithOptions(ctx, id, WriteOptions{Actor: "system"})
 }
 
-func (s *Store) RevokeAPITokenForUser(ctx context.Context, userID, id string, options WriteOptions) error {
+func (s *Repository) RevokeAPITokenForUser(ctx context.Context, userID, id string, options WriteOptions) error {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(id) == "" {
 		return sql.ErrNoRows
 	}
@@ -254,7 +254,7 @@ func (s *Store) RevokeAPITokenForUser(ctx context.Context, userID, id string, op
 	return tx.Commit()
 }
 
-func (s *Store) RevokeAPITokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
+func (s *Repository) RevokeAPITokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

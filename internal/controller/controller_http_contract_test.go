@@ -23,7 +23,7 @@ func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
 	return nil
 }
 
-func TestHTTPWriteDeadlineMiddlewareKeepsSSEUnbounded(t *testing.T) {
+func TestHTTPWriteDeadlineSeparatesStreamingAndOrdinaryRequestsContract(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -44,7 +44,7 @@ func TestHTTPWriteDeadlineMiddlewareKeepsSSEUnbounded(t *testing.T) {
 	}
 }
 
-func TestControllerEndpointAuthenticationPolicy(t *testing.T) {
+func TestControllerEndpointAuthenticationPolicyContract(t *testing.T) {
 	server := &Server{metrics: newControllerMetrics()}
 	handler := server.Handler()
 

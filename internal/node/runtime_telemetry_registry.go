@@ -184,17 +184,17 @@ func cloneRuntimeEvent(value domain.RuntimeEvent) domain.RuntimeEvent {
 
 func (t *runtimeTelemetry) snapshot(nodeID string) domain.RuntimeSnapshot {
 	now := time.Now().UTC()
-	result := domain.RuntimeSnapshot{NodeID: nodeID, ObservedAt: now, Metrics: make(map[string]float64)}
+	result := domain.RuntimeSnapshot{NodeID: nodeID, ObservedAt: now}
 	t.mu.Lock()
 	entries := make([]*runtimeConnection, 0, len(t.connections))
 	for _, entry := range t.connections {
 		entries = append(entries, entry)
 	}
-	result.Metrics["runtime_opened_total"] = float64(t.opened)
-	result.Metrics["runtime_closed_total"] = float64(t.closed)
-	result.Metrics["runtime_rejected_total"] = float64(t.rejected)
-	result.Metrics["runtime_rate_limited_total"] = float64(t.rateLimited)
-	result.Metrics["runtime_telemetry_dropped_total"] = float64(t.dropped)
+	result.Metrics.RuntimeOpenedTotal = t.opened
+	result.Metrics.RuntimeClosedTotal = t.closed
+	result.Metrics.RuntimeRejectedTotal = t.rejected
+	result.Metrics.RuntimeRateLimitedTotal = t.rateLimited
+	result.Metrics.RuntimeTelemetryDroppedTotal = t.dropped
 	t.mu.Unlock()
 	result.Connections = make([]domain.RuntimeConnection, 0, len(entries))
 	for _, entry := range entries {

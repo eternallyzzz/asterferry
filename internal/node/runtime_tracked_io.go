@@ -1,6 +1,7 @@
 package node
 
 import (
+	"asterferry/internal/duplex"
 	"errors"
 	"io"
 	"sync"
@@ -48,14 +49,14 @@ func (c *runtimeTrackedRWC) Close() error {
 }
 
 func (c *runtimeTrackedRWC) CloseWrite() error {
-	if closer, ok := c.inner.(interface{ CloseWrite() error }); ok {
+	if closer, ok := c.inner.(duplex.WriteHalfCloser); ok {
 		return closer.CloseWrite()
 	}
 	return errors.New("tracked endpoint does not support write half-close")
 }
 
 func (c *runtimeTrackedRWC) Abort() error {
-	if aborter, ok := c.inner.(interface{ Abort() error }); ok {
+	if aborter, ok := c.inner.(duplex.Aborter); ok {
 		return aborter.Abort()
 	}
 	return c.Close()
