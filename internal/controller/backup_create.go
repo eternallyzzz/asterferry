@@ -52,14 +52,14 @@ func Backup(ctx context.Context, config Config, destination string) (string, err
 	}
 	databaseSchema := ""
 	if backend == databaseBackendSQLite {
-		store, err := OpenStoreWithConfig(config, masterKey)
+		repositories, err := OpenControllerRepositoriesWithConfig(config, masterKey)
 		if err != nil {
 			return "", err
 		}
-		defer store.Close()
+		defer repositories.Close()
 		backupDB := filepath.Join(staging, "controller.db")
 		// VACUUM INTO produces a consistent copy even while API writes continue.
-		if _, err := store.db.ExecContext(ctx, `VACUUM INTO ?`, backupDB); err != nil {
+		if _, err := repositories.Resources.db.ExecContext(ctx, `VACUUM INTO ?`, backupDB); err != nil {
 			return "", fmt.Errorf("backup sqlite database: %w", err)
 		}
 	} else {

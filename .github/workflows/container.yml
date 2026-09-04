@@ -74,11 +74,11 @@ jobs:
         run: npm install --global npm@12.0.2
       - name: Verify Dashboard dependencies and build
         run: |
-          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard ci --audit=false
           npm --prefix web/dashboard run lint
           npm --prefix web/dashboard test
           npm --prefix web/dashboard run build
-          npm --prefix web/dashboard audit --registry=https://registry.npmjs.org --omit=dev --audit-level=high
+          npm --prefix web/dashboard audit --registry=https://registry.npmjs.org --audit-level=high
           test -s internal/dashboard/dist/index.html
           python3 scripts/sync-openapi.py --check
       - name: Scan tracked files for release secrets
@@ -170,10 +170,11 @@ jobs:
         run: npm install --global npm@11.0.0
       - name: Verify Dashboard compatibility lane
         run: |
-          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard ci --audit=false
           npm --prefix web/dashboard run lint
           npm --prefix web/dashboard test
           npm --prefix web/dashboard run build
+          npm --prefix web/dashboard audit --registry=https://registry.npmjs.org --audit-level=high
 
   windows:
     name: Go checks (Windows)
@@ -392,7 +393,7 @@ jobs:
           python3 scripts/check-toolchain.py
       - name: Verify dashboard assets
         run: |
-          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard ci --audit=false
           npm --prefix web/dashboard run build
           test -s internal/dashboard/dist/index.html
           test -z "$(git ls-files -- internal/dashboard/dist)"

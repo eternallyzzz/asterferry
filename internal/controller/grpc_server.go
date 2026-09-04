@@ -18,7 +18,9 @@ import (
 
 type ControlServer struct {
 	v1.UnimplementedControlServer
-	store          *Repository
+	resources      *ResourceRepository
+	runtime        *RuntimeRepository
+	changes        *ChangeBus
 	config         Config
 	streams        map[string]*controlStream // node id -> active stream
 	streamMu       sync.Mutex
@@ -47,10 +49,11 @@ func hasCapability(capabilities []string, wanted string) bool {
 	return false
 }
 
-func NewControlServer(config Config, store *Repository, metrics ...*ControllerMetrics) (*ControlServer, error) {
-	if store == nil {
-		return nil, errors.New("controller store is required")
+func NewControlServer(config Config, repositories *ControllerRepositories, metrics ...*ControllerMetrics) (*ControlServer, error) {
+	if repositories == nil || repositories.Resources == nil || repositories.Runtime == nil || repositories.Changes == nil {
+		return nil, errors.New("controller repositories are required")
 	}
+	resources, runtime, changes := repositories.Resources, repositories.Runtime, repositories.Changes
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -59,10 +62,10 @@ func NewControlServer(config Config, store *Repository, metrics ...*ControllerMe
 		controllerMetrics = metrics[0]
 	}
 	if controllerMetrics == nil {
-		controllerMetrics = newControllerMetrics(store.DatabaseDriver())
+		controllerMetrics = newControllerMetrics(resources.DatabaseDriver())
 	}
 	return &ControlServer{
-		store: store, config: config, streams: make(map[string]*controlStream), metrics: controllerMetrics,
+		resources: resources, runtime: runtime, changes: changes, config: config, streams: make(map[string]*controlStream), metrics: controllerMetrics,
 		enrollLimiter:  newAdmissionLimiter(6, time.Minute, 4096),
 		connectLimiter: newAdmissionLimiter(30, time.Minute, 4096),
 		enrollSlots:    make(chan struct{}, 16),
@@ -86,8 +89,8 @@ func (s *ControlServer) Health(context.Context, *emptypb.Empty) (response *v1.He
 // StartGRPC preserves the small embedding API used by tests and tools. Serve
 // failures are still logged by StartGRPCWithErrors; Controller.Start uses the
 // error channel directly so the CLI can propagate the failure.
-func StartGRPC(ctx context.Context, config Config, store *Repository, metrics ...*ControllerMetrics) (net.Listener, *grpc.Server, error) {
-	listener, server, serveErr, err := StartGRPCWithErrors(ctx, config, store, metrics...)
+func StartGRPC(ctx context.Context, config Config, repositories *ControllerRepositories, metrics ...*ControllerMetrics) (net.Listener, *grpc.Server, error) {
+	listener, server, serveErr, err := StartGRPCWithErrors(ctx, config, repositories, metrics...)
 	if err == nil {
 		go func() {
 			if serveErr != nil {
@@ -100,11 +103,11 @@ func StartGRPC(ctx context.Context, config Config, store *Repository, metrics ..
 	return listener, server, err
 }
 
-func StartGRPCWithErrors(ctx context.Context, config Config, store *Repository, metrics ...*ControllerMetrics) (net.Listener, *grpc.Server, <-chan error, error) {
+func StartGRPCWithErrors(ctx context.Context, config Config, repositories *ControllerRepositories, metrics ...*ControllerMetrics) (net.Listener, *grpc.Server, <-chan error, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	server, err := NewControlServer(config, store, metrics...)
+	server, err := NewControlServer(config, repositories, metrics...)
 	if err != nil {
 		return nil, nil, nil, err
 	}

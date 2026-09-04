@@ -17,7 +17,7 @@ import (
 // listeners. The data-plane engines never import this type.
 type Controller struct {
 	Config          Config
-	Repository      *Repository
+	Repositories    *ControllerRepositories
 	HTTP            *Server
 	metrics         *ControllerMetrics
 	Scheduler       *Scheduler
@@ -56,26 +56,26 @@ func New(config Config) (*Controller, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := OpenStoreWithConfig(config, masterKey)
+	repositories, err := OpenControllerRepositoriesWithConfig(config, masterKey)
 	if err != nil {
 		return nil, err
 	}
-	controllerMetrics := newControllerMetrics(store.DatabaseDriver())
-	scheduler, err := NewScheduler(store, controllerMetrics)
+	controllerMetrics := newControllerMetrics(repositories.Resources.DatabaseDriver())
+	scheduler, err := NewScheduler(repositories.Resources, controllerMetrics)
 	if err != nil {
-		_ = store.Close()
+		_ = repositories.Close()
 		return nil, err
 	}
-	httpServer, err := newServer(config, store, scheduler, controllerMetrics)
+	httpServer, err := newServer(config, repositories, scheduler, controllerMetrics)
 	if err != nil {
-		store.Close()
+		repositories.Close()
 		return nil, err
 	}
-	return &Controller{Config: config, Repository: store, HTTP: httpServer, metrics: controllerMetrics, Scheduler: scheduler, logger: slog.Default()}, nil
+	return &Controller{Config: config, Repositories: repositories, HTTP: httpServer, metrics: controllerMetrics, Scheduler: scheduler, logger: slog.Default()}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) error {
-	if c == nil || c.Repository == nil || c.HTTP == nil || c.Scheduler == nil {
+	if c == nil || c.Repositories == nil || c.HTTP == nil || c.Scheduler == nil {
 		return errors.New("controller is not initialized")
 	}
 	c.startMu.Lock()
@@ -91,7 +91,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	listener, grpcServer, grpcServeErr, err := StartGRPCWithErrors(runCtx, c.Config, c.Repository, c.metrics)
+	listener, grpcServer, grpcServeErr, err := StartGRPCWithErrors(runCtx, c.Config, c.Repositories, c.metrics)
 	if err != nil {
 		c.started = false
 		cancel()
@@ -251,7 +251,7 @@ func (c *Controller) logServeFailure(component string, err error) {
 }
 
 func (c *Controller) reconcileLoop(ctx context.Context) {
-	changes, unsubscribe := c.Repository.ChangeBus().SubscribeResourceChanges()
+	changes, unsubscribe := c.Repositories.ChangeBus().SubscribeResourceChanges()
 	defer unsubscribe()
 	// Recover stale state once at startup. Normal operation is driven by
 	// coalesced heartbeat/resource hints; the slow sweep remains a repair path
@@ -307,12 +307,20 @@ func (c *Controller) maintenanceLoop(ctx context.Context) {
 	cleanup := func() {
 		idempotencyTTL := time.Duration(c.Config.IdempotencyRetentionHours) * time.Hour
 		auditTTL := time.Duration(c.Config.AuditRetentionDays) * 24 * time.Hour
-		if err := c.Repository.PruneHistory(ctx, time.Now().UTC(), idempotencyTTL, auditTTL); err != nil && ctx.Err() == nil {
+		now := time.Now().UTC()
+		if err := c.Repositories.Resources.PruneHistory(ctx, now, idempotencyTTL, auditTTL); err != nil && ctx.Err() == nil {
 			logger := c.logger
 			if logger == nil {
 				logger = slog.Default()
 			}
 			logger.Warn("controller history cleanup failed", "error", err)
+		}
+		if err := c.Repositories.Runtime.PruneRuntimeHistory(ctx, now); err != nil && ctx.Err() == nil {
+			logger := c.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("controller runtime history cleanup failed", "error", err)
 		}
 	}
 	cleanup()
@@ -360,8 +368,8 @@ func (c *Controller) Close() error {
 		if c.metricsListener != nil {
 			_ = c.metricsListener.Close()
 		}
-		if c.Repository != nil {
-			c.closeErr = c.Repository.Close()
+		if c.Repositories != nil {
+			c.closeErr = c.Repositories.Close()
 		}
 	})
 	return c.closeErr

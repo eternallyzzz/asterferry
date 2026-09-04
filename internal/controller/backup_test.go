@@ -42,7 +42,7 @@ func TestBackupPublishesAndRestoreVerifiesManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStoreWithConfig(restoredConfig, key)
+	store, err := OpenControllerRepositoriesWithConfig(restoredConfig, key)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,7 +15,9 @@ import (
 )
 
 type Server struct {
-	store         *Repository
+	resources     *ResourceRepository
+	runtime       *RuntimeRepository
+	changes       *ChangeBus
 	config        Config
 	http          *http.Server
 	metricsHTTP   *http.Server
@@ -41,18 +43,19 @@ const (
 	controllerWriteDeadline = 30 * time.Second
 )
 
-func NewServer(config Config, store *Repository, metrics ...*ControllerMetrics) (*Server, error) {
-	return newServer(config, store, nil, metrics...)
+func NewServer(config Config, repositories *ControllerRepositories, metrics ...*ControllerMetrics) (*Server, error) {
+	return newServer(config, repositories, nil, metrics...)
 }
 
 // newServer composes the HTTP surface with the application scheduler. The
 // public constructor keeps its historical convenience behavior for embedders,
 // while Controller.New injects the single scheduler owned by the composition
 // root so reconciliation and API actions share one decision component.
-func newServer(config Config, store *Repository, scheduler *Scheduler, metrics ...*ControllerMetrics) (*Server, error) {
-	if store == nil {
-		return nil, errors.New("controller store is required")
+func newServer(config Config, repositories *ControllerRepositories, scheduler *Scheduler, metrics ...*ControllerMetrics) (*Server, error) {
+	if repositories == nil || repositories.Resources == nil || repositories.Runtime == nil || repositories.Changes == nil {
+		return nil, errors.New("controller repositories are required")
 	}
+	resources, runtime, changes := repositories.Resources, repositories.Runtime, repositories.Changes
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -61,17 +64,17 @@ func newServer(config Config, store *Repository, scheduler *Scheduler, metrics .
 		controllerMetrics = metrics[0]
 	}
 	if controllerMetrics == nil {
-		controllerMetrics = newControllerMetrics(store.DatabaseDriver())
+		controllerMetrics = newControllerMetrics(resources.DatabaseDriver())
 	}
 	if scheduler == nil {
 		var err error
-		scheduler, err = NewScheduler(store, controllerMetrics)
+		scheduler, err = NewScheduler(resources, controllerMetrics)
 		if err != nil {
 			return nil, err
 		}
 	}
 	sessionCtx, sessionCancel := context.WithCancel(context.Background())
-	server := &Server{store: store, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler}
+	server := &Server{resources: resources, runtime: runtime, changes: changes, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler}
 	// Runtime SSE is intentionally long-lived.  Per-request handlers retain
 	// their own bounded read/decode limits; the write deadline must not cut off
 	// a healthy event stream after an absolute 30-second wall clock interval.
@@ -274,7 +277,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorize(w, r, RoleViewer); !ok {
 		return
 	}
-	if err := s.store.Ping(r.Context()); err != nil {
+	if err := s.resources.Ping(r.Context()); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller database is unavailable")
 		return
 	}
@@ -289,6 +292,6 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) internalMetricsHandler(w http.ResponseWriter, r *http.Request) {
-	s.metrics.refreshDatabase(s.store)
+	s.metrics.refreshDatabase(s.resources)
 	s.metrics.Handler().ServeHTTP(w, r)
 }

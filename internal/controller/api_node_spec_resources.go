@@ -11,7 +11,7 @@ import (
 // wire makes policy changes participate in the same optimistic-concurrency
 // transaction as the complete typed document.
 func (s *Server) gatewayEgressAction(w http.ResponseWriter, r *http.Request, gatewayID string) {
-	spec, err := s.store.GetGatewaySpec(r.Context(), gatewayID)
+	spec, err := s.resources.GetGatewaySpec(r.Context(), gatewayID)
 	if r.Method == http.MethodGet {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
@@ -47,11 +47,11 @@ func (s *Server) gatewayEgressAction(w http.ResponseWriter, r *http.Request, gat
 		writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 		return
 	}
-	if err := s.store.PutGatewaySpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutGatewaySpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.GetGatewaySpec(r.Context(), gatewayID)
+	updated, err := s.resources.GetGatewaySpec(r.Context(), gatewayID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -64,7 +64,7 @@ func (s *Server) gatewayEgressAction(w http.ResponseWriter, r *http.Request, gat
 // complete AgentSpec remains the persisted resource; this endpoint only offers
 // a narrow policy-shaped API for Dashboard and automation clients.
 func (s *Server) agentEgressAction(w http.ResponseWriter, r *http.Request, agentID string) {
-	spec, err := s.store.GetAgentSpec(r.Context(), agentID)
+	spec, err := s.resources.GetAgentSpec(r.Context(), agentID)
 	if r.Method == http.MethodGet {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
@@ -100,11 +100,11 @@ func (s *Server) agentEgressAction(w http.ResponseWriter, r *http.Request, agent
 		writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 		return
 	}
-	if err := s.store.PutAgentSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutAgentSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.GetAgentSpec(r.Context(), agentID)
+	updated, err := s.resources.GetAgentSpec(r.Context(), agentID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -125,7 +125,7 @@ func (s *Server) agentSpecSubresource(w http.ResponseWriter, r *http.Request, ag
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		spec, err := s.store.GetAgentSpec(r.Context(), agentID)
+		spec, err := s.resources.GetAgentSpec(r.Context(), agentID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -161,7 +161,7 @@ func (s *Server) agentSpecSubresource(w http.ResponseWriter, r *http.Request, ag
 	if !ok {
 		return
 	}
-	spec, err := s.store.GetAgentSpec(r.Context(), agentID)
+	spec, err := s.resources.GetAgentSpec(r.Context(), agentID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -261,11 +261,11 @@ func (s *Server) agentSpecSubresource(w http.ResponseWriter, r *http.Request, ag
 		methodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete)
 		return
 	}
-	if err := s.store.PutAgentSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutAgentSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.GetAgentSpec(r.Context(), agentID)
+	updated, err := s.resources.GetAgentSpec(r.Context(), agentID)
 	if err != nil {
 		writeStoreError(w, err)
 		return

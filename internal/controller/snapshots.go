@@ -84,7 +84,7 @@ func (b *ChangeBus) notifySnapshotChanges(nodeIDs ...string) {
 	}
 }
 
-func (s *Repository) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
+func (s *ResourceRepository) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -92,15 +92,15 @@ func (s *Repository) commitAndNotify(tx *sql.Tx, nodeIDs ...string) error {
 	return nil
 }
 
-func (s *Repository) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
+func (s *ResourceRepository) commitAndNotifyResources(tx *sql.Tx, nodeIDs ...string) error {
 	return s.commitAndNotifyResourcesWithOptions(tx, false, nodeIDs...)
 }
 
-func (s *Repository) commitAndNotifyPendingServices(tx *sql.Tx, nodeIDs ...string) error {
+func (s *ResourceRepository) commitAndNotifyPendingServices(tx *sql.Tx, nodeIDs ...string) error {
 	return s.commitAndNotifyResourcesWithOptions(tx, true, nodeIDs...)
 }
 
-func (s *Repository) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
+func (s *ResourceRepository) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServices bool, nodeIDs ...string) error {
 	if err := s.commitAndNotify(tx, nodeIDs...); err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (s *Repository) commitAndNotifyResourcesWithOptions(tx *sql.Tx, pendingServ
 	return nil
 }
 
-func (s *Repository) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error {
+func (s *ResourceRepository) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func (s *Repository) commitAndNotifyResourceOnly(tx *sql.Tx, nodeIDs ...string) 
 // from the authoritative resources in the configured database.  The result is pure data: it
 // can be checksummed, sent over the control stream, or encrypted in the node
 // cache without giving a node access to the Controller repository.
-func (s *Repository) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
+func (s *ResourceRepository) BuildDesiredSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
 	node, err := s.GetNode(ctx, nodeID)
 	if err != nil {
 		return domain.DesiredSnapshot{}, err
@@ -246,7 +246,7 @@ func (s *Repository) BuildDesiredSnapshot(ctx context.Context, nodeID string) (d
 // EnsureDesiredSnapshot materializes and durably records the current state if
 // a resource write has changed it.  It is safe to call before every control
 // stream reconnect; unchanged state does not create another generation.
-func (s *Repository) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
+func (s *ResourceRepository) EnsureDesiredSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
 	s.snapshotMu.Lock()
 	defer s.snapshotMu.Unlock()
 	snapshot, err := s.BuildDesiredSnapshot(ctx, nodeID)
@@ -331,7 +331,7 @@ func clearDesiredSnapshotTx(ctx context.Context, tx *sql.Tx, nodeID string) erro
 // RebuildDesiredSnapshots refreshes every node that has a complete spec.  A
 // node without a spec is skipped so an operator can enroll the identity first
 // and publish its behavior document in a later transaction.
-func (s *Repository) RebuildDesiredSnapshots(ctx context.Context) error {
+func (s *ResourceRepository) RebuildDesiredSnapshots(ctx context.Context) error {
 	nodes, err := s.ListNodes(ctx, "")
 	if err != nil {
 		return err

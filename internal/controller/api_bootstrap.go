@@ -28,7 +28,7 @@ func (s *Server) nodeBootstrap(w http.ResponseWriter, r *http.Request, nodeID st
 		writeStoreError(w, err)
 		return
 	}
-	node, err := s.store.GetNode(r.Context(), nodeID)
+	node, err := s.resources.GetNode(r.Context(), nodeID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -46,7 +46,7 @@ func (s *Server) nodeBootstrap(w http.ResponseWriter, r *http.Request, nodeID st
 		writeStoreError(w, err)
 		return
 	}
-	plain, token, err := s.store.CreateNodeEnrollmentTokenWithOptions(r.Context(), node.ID, EnrollmentTTL, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	plain, token, err := s.resources.CreateNodeEnrollmentTokenWithOptions(r.Context(), node.ID, EnrollmentTTL, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		if errors.Is(err, ErrSecretAlreadyCreated) {
 			writeAlreadyCreatedSecret(w, "token_metadata", token)
@@ -65,7 +65,7 @@ func (s *Server) nodeBootstrap(w http.ResponseWriter, r *http.Request, nodeID st
 }
 
 func (s *Server) ensureBootstrapSpec(r *http.Request, node domain.Node, input NodeBootstrapRequest, actor string) error {
-	if _, err := s.store.GetNodeSpec(r.Context(), node.ID); err == nil {
+	if _, err := s.resources.GetNodeSpec(r.Context(), node.ID); err == nil {
 		// Existing behavior is never replaced by an install/bootstrap request.
 		return nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -88,7 +88,7 @@ func (s *Server) ensureBootstrapSpec(r *http.Request, node domain.Node, input No
 				spec.Kind = domain.NodeSpecAgent
 			}
 		}
-		return s.store.PutNodeSpec(r.Context(), spec, WriteOptions{Actor: actor})
+		return s.resources.PutNodeSpec(r.Context(), spec, WriteOptions{Actor: actor})
 	}
 	// A generic node may be bootstrapped before its behavior is chosen. It will
 	// enroll, establish a control stream, and remain idle until /spec is set.

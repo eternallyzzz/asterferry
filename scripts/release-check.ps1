@@ -152,8 +152,9 @@ $frontendTemp = Prepare-FrontendScratch
 $oldDashboardOut = $env:ASTERFERRY_DASHBOARD_OUT
 try {
     $env:ASTERFERRY_DASHBOARD_OUT = (Join-Path $root "internal/dashboard/dist")
-    Invoke-Checked "Dashboard dependencies" "npm" @("--prefix", $frontendTemp, "ci")
+    Invoke-Checked "Dashboard dependencies" "npm" @("--prefix", $frontendTemp, "ci", "--audit=false")
     Invoke-Checked "Dashboard build" "npm" @("--prefix", $frontendTemp, "run", "build")
+    Invoke-Checked "Dashboard dependency audit" "npm" @("--prefix", $frontendTemp, "audit", "--registry=https://registry.npmjs.org", "--audit-level=high")
 } finally {
     if ($null -eq $oldDashboardOut) { Remove-Item Env:ASTERFERRY_DASHBOARD_OUT -ErrorAction SilentlyContinue } else { $env:ASTERFERRY_DASHBOARD_OUT = $oldDashboardOut }
     if (Test-Path -LiteralPath $frontendTemp) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }

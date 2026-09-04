@@ -38,7 +38,7 @@ func requireRevisionWrite(ctx context.Context, tx *sql.Tx, result sql.Result, re
 // RecordEvent persists a node-originated event in the same audit stream used
 // by API writes. Event payloads are intentionally bounded and stored as
 // attributes rather than allowing arbitrary SQL-visible columns.
-func (s *Repository) RecordEvent(ctx context.Context, actor, eventID, eventType, message, resourceID string, attributes map[string]string) error {
+func (s *ResourceRepository) RecordEvent(ctx context.Context, actor, eventID, eventType, message, resourceID string, attributes map[string]string) error {
 	eventID = strings.TrimSpace(eventID)
 	eventType = strings.TrimSpace(eventType)
 	if len(eventID) > 128 || len(eventType) == 0 || len(eventType) > 128 || strings.ContainsAny(eventID+eventType, "\x00\r\n") {
@@ -80,7 +80,7 @@ func attributesWithMessage(attributes map[string]string, message, eventID string
 	return result
 }
 
-func (s *Repository) ListUsers(ctx context.Context) ([]User, error) {
+func (s *ResourceRepository) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func (s *Repository) ListUsers(ctx context.Context) ([]User, error) {
 	return result, rows.Err()
 }
 
-func (s *Repository) GetUser(ctx context.Context, id string) (User, error) {
+func (s *ResourceRepository) GetUser(ctx context.Context, id string) (User, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT id,username,role,enabled,revision,created_at,updated_at,password_changed_at FROM users WHERE id=?`, id))
 }
 
@@ -138,7 +138,7 @@ func scanUser(row scanner) (User, error) {
 	return user, nil
 }
 
-func (s *Repository) ListAudit(ctx context.Context, limit int) ([]AuditRecord, error) {
+func (s *ResourceRepository) ListAudit(ctx context.Context, limit int) ([]AuditRecord, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}

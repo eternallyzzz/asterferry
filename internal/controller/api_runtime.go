@@ -37,7 +37,7 @@ func (s *Server) runtimeSettings(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		enabled, err := s.store.AdvancedOperationsEnabled(r.Context())
+		enabled, err := s.resources.AdvancedOperationsEnabled(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -58,7 +58,7 @@ func (s *Server) runtimeSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		if err := s.store.SetAdvancedOperationsEnabled(r.Context(), *input.Enabled, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.SetAdvancedOperationsEnabled(r.Context(), *input.Enabled, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -72,13 +72,13 @@ func (s *Server) runtimeSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) broadcastRuntimeControlClear(r *http.Request, actor string) {
-	nodes, err := s.store.ListNodes(r.Context(), "")
+	nodes, err := s.resources.ListNodes(r.Context(), "")
 	if err != nil {
 		return
 	}
 	for _, node := range nodes {
-		if _, err := s.store.PublishAction(r.Context(), node.ID, "clear_runtime_controls", `{}`); err != nil {
-			_ = s.store.RecordEvent(r.Context(), actor, "", "runtime_control_clear_failed", "could not clear runtime controls immediately", node.ID, map[string]string{"action": "clear_runtime_controls"})
+		if _, err := s.resources.PublishAction(r.Context(), node.ID, "clear_runtime_controls", `{}`); err != nil {
+			_ = s.resources.RecordEvent(r.Context(), actor, "", "runtime_control_clear_failed", "could not clear runtime controls immediately", node.ID, map[string]string{"action": "clear_runtime_controls"})
 		}
 	}
 }
@@ -96,7 +96,7 @@ func (s *Server) runtimeConnections(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	items, err := s.store.ListRuntimeConnections(r.Context(), filter)
+	items, err := s.runtime.ListRuntimeConnections(r.Context(), filter)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -113,7 +113,7 @@ func (s *Server) runtimeEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := s.store.ListRuntimeEvents(r.Context(), r.URL.Query().Get("node_id"), limit)
+	items, err := s.runtime.ListRuntimeEvents(r.Context(), r.URL.Query().Get("node_id"), limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -130,7 +130,7 @@ func (s *Server) runtimeTraffic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := s.store.ListRuntimeTraffic(r.Context(), r.URL.Query().Get("node_id"), limit)
+	items, err := s.runtime.ListRuntimeTraffic(r.Context(), r.URL.Query().Get("node_id"), limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -166,7 +166,7 @@ func (s *Server) runtimeStream(w http.ResponseWriter, r *http.Request) {
 	if err := writeSSE("ready", map[string]any{"node_id": nodeID}); err != nil {
 		return
 	}
-	changes, unsubscribe := s.store.ChangeBus().SubscribeRuntimeChanges()
+	changes, unsubscribe := s.changes.SubscribeRuntimeChanges()
 	defer unsubscribe()
 	keepalive := time.NewTicker(10 * time.Second)
 	defer keepalive.Stop()
@@ -209,7 +209,7 @@ func (s *Server) nodeRuntimeAction(w http.ResponseWriter, r *http.Request, nodeI
 				return
 			}
 			filter.NodeID = nodeID
-			items, err := s.store.ListRuntimeConnections(r.Context(), filter)
+			items, err := s.runtime.ListRuntimeConnections(r.Context(), filter)
 			if err != nil {
 				writeStoreError(w, err)
 				return
@@ -220,7 +220,7 @@ func (s *Server) nodeRuntimeAction(w http.ResponseWriter, r *http.Request, nodeI
 			if _, ok := s.authorize(w, r, RoleViewer); !ok {
 				return
 			}
-			item, err := s.store.GetRuntimeConnection(r.Context(), nodeID, parts[1])
+			item, err := s.runtime.GetRuntimeConnection(r.Context(), nodeID, parts[1])
 			if err != nil {
 				writeStoreError(w, err)
 				return
@@ -246,7 +246,7 @@ func submitRuntimeAction(s *Server, w http.ResponseWriter, r *http.Request, node
 	if !ok {
 		return
 	}
-	enabled, err := s.store.AdvancedOperationsEnabled(r.Context())
+	enabled, err := s.resources.AdvancedOperationsEnabled(r.Context())
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -264,7 +264,7 @@ func submitRuntimeAction(s *Server, w http.ResponseWriter, r *http.Request, node
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	delivered, err := s.store.RequestNodeAction(r.Context(), nodeID, "runtime_connection", payload, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	delivered, err := s.resources.RequestNodeAction(r.Context(), nodeID, "runtime_connection", payload, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		writeStoreError(w, err)
 		return

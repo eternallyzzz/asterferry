@@ -92,7 +92,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	if err := verifyPeerIdentity(stream.Context(), hello.GetNodeId()); err != nil {
 		return status.Error(codes.PermissionDenied, "control stream authentication failed")
 	}
-	node, err := s.store.GetNode(stream.Context(), hello.GetNodeId())
+	node, err := s.resources.GetNode(stream.Context(), hello.GetNodeId())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return status.Error(codes.PermissionDenied, "control stream authentication failed")
@@ -116,16 +116,16 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	// Subscribe before materializing the initial snapshot. A resource write
 	// racing this handshake is coalesced into the buffered notification instead
 	// of waiting for a periodic poll.
-	snapshotChanges, unsubscribeSnapshots := s.store.ChangeBus().SubscribeSnapshotChanges(hello.GetNodeId())
+	snapshotChanges, unsubscribeSnapshots := s.changes.SubscribeSnapshotChanges(hello.GetNodeId())
 	defer unsubscribeSnapshots()
 	// Resource writes are intentionally independent from the long-lived node
 	// stream. Materialize the latest node-scoped document just before sending
 	// it so a reconnect always observes API changes, even if the writer was
 	// offline when the resource was edited.
-	if _, snapshotErr := s.store.EnsureDesiredSnapshot(stream.Context(), hello.GetNodeId()); snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
+	if _, snapshotErr := s.resources.EnsureDesiredSnapshot(stream.Context(), hello.GetNodeId()); snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
 		return status.Error(codes.Internal, "build desired snapshot failed")
 	}
-	snapshotRecord, snapshotErr := s.store.LoadSnapshot(stream.Context(), hello.GetNodeId())
+	snapshotRecord, snapshotErr := s.resources.LoadSnapshot(stream.Context(), hello.GetNodeId())
 	if snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
 		return status.Error(codes.Internal, "load desired snapshot failed")
 	}
@@ -166,13 +166,13 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		cancel()
 		if wasCurrent {
 			markCtx, markCancel := context.WithTimeout(context.Background(), time.Second)
-			if err := s.store.MarkRuntimeConnectionsUnknown(markCtx, hello.GetNodeId(), time.Now().UTC()); err != nil {
+			if err := s.runtime.MarkRuntimeConnectionsUnknown(markCtx, hello.GetNodeId(), time.Now().UTC()); err != nil {
 				slog.Default().Warn("failed to mark runtime connections unknown", "node_id", hello.GetNodeId(), "error", err)
 			}
 			markCancel()
 		}
 	}()
-	actionCh, unsubscribeActions := s.store.ChangeBus().SubscribeActions(hello.GetNodeId())
+	actionCh, unsubscribeActions := s.changes.SubscribeActions(hello.GetNodeId())
 	defer unsubscribeActions()
 	// A node's Hello is sent before the Controller can authenticate the
 	// bidirectional RPC.  Send an explicit readiness marker only after all
@@ -190,7 +190,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	// offline, clear any limit that survived in the Node process before it can
 	// serve a newly authenticated control session.
 	if hasCapability(hello.GetCapabilities(), "runtime-control-v1") {
-		enabled, settingsErr := s.store.AdvancedOperationsEnabled(connectionCtx)
+		enabled, settingsErr := s.resources.AdvancedOperationsEnabled(connectionCtx)
 		if settingsErr != nil {
 			slog.Default().Error("runtime operation setting lookup failed", "node_id", hello.GetNodeId(), "error", settingsErr)
 			return status.Error(codes.Internal, "load runtime operation settings failed")
@@ -275,7 +275,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		switch {
 		case message.GetHeartbeat() != nil:
 			heartbeat := message.GetHeartbeat()
-			currentNode, currentNodeErr := s.store.GetNode(stream.Context(), hello.GetNodeId())
+			currentNode, currentNodeErr := s.resources.GetNode(stream.Context(), hello.GetNodeId())
 			currentPeer, currentPeerErr := peerCertificate(stream.Context())
 			if currentNodeErr != nil {
 				if !errors.Is(currentNodeErr, sql.ErrNoRows) {
@@ -288,7 +288,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				return status.Error(codes.PermissionDenied, "certificate serial is not current")
 			}
 			if heartbeat.GetAppliedGeneration() > 0 {
-				latest, latestErr := s.store.LoadSnapshot(stream.Context(), hello.GetNodeId())
+				latest, latestErr := s.resources.LoadSnapshot(stream.Context(), hello.GetNodeId())
 				if latestErr == nil && heartbeat.GetAppliedGeneration() > latest.Generation {
 					return status.Error(codes.InvalidArgument, "heartbeat reports a future generation")
 				}
@@ -311,7 +311,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			}
 			var previousObserved domain.ObservedState
 			hasPreviousObserved := false
-			if previous, previousErr := s.store.GetObserved(stream.Context(), hello.GetNodeId()); previousErr == nil {
+			if previous, previousErr := s.resources.GetObserved(stream.Context(), hello.GetNodeId()); previousErr == nil {
 				previousObserved = previous
 				hasPreviousObserved = true
 				observed.Sessions = previous.Sessions
@@ -328,11 +328,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				return status.Error(codes.Internal, "encode heartbeat state failed")
 			}
 			staleGeneration := hasPreviousObserved && observed.AppliedGeneration < previousObserved.AppliedGeneration
-			if err := s.store.SaveObservedHeartbeat(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: observed.ObservedAt}); err != nil {
+			if err := s.resources.SaveObservedHeartbeat(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: observed.ObservedAt}); err != nil {
 				return status.Error(codes.Internal, "save heartbeat state failed")
 			}
 			if staleGeneration {
-				if err := s.store.RecordEvent(stream.Context(), "system", "", "stale_generation", "heartbeat reported an older applied generation", hello.GetNodeId(), map[string]string{"reported_generation": fmt.Sprint(observed.AppliedGeneration), "current_generation": fmt.Sprint(previousObserved.AppliedGeneration)}); err != nil {
+				if err := s.resources.RecordEvent(stream.Context(), "system", "", "stale_generation", "heartbeat reported an older applied generation", hello.GetNodeId(), map[string]string{"reported_generation": fmt.Sprint(observed.AppliedGeneration), "current_generation": fmt.Sprint(previousObserved.AppliedGeneration)}); err != nil {
 					return status.Error(codes.Internal, "record stale heartbeat event failed")
 				}
 			}
@@ -347,7 +347,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			if observed.NodeID != hello.GetNodeId() {
 				return status.Error(codes.InvalidArgument, "observed state node identity does not match hello")
 			}
-			latest, latestErr := s.store.LoadSnapshot(stream.Context(), hello.GetNodeId())
+			latest, latestErr := s.resources.LoadSnapshot(stream.Context(), hello.GetNodeId())
 			if latestErr == nil {
 				if observed.AppliedGeneration > latest.Generation {
 					return status.Error(codes.InvalidArgument, "observed state reports a future generation")
@@ -361,7 +361,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			if marshalErr != nil {
 				return status.Error(codes.Internal, "encode observed state failed")
 			}
-			if err := s.store.SaveObserved(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: time.Now().UTC()}); err != nil {
+			if err := s.resources.SaveObserved(stream.Context(), ObservedRecord{NodeID: hello.GetNodeId(), Generation: observed.AppliedGeneration, Document: document, UpdatedAt: time.Now().UTC()}); err != nil {
 				return status.Error(codes.Internal, "save observed state failed")
 			}
 			if s.metrics != nil {
@@ -370,7 +370,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		case message.GetApplyResult() != nil:
 			result := message.GetApplyResult()
 			latest := snapshotRecord
-			if current, currentErr := s.store.LoadSnapshot(stream.Context(), hello.GetNodeId()); currentErr == nil {
+			if current, currentErr := s.resources.LoadSnapshot(stream.Context(), hello.GetNodeId()); currentErr == nil {
 				latest = current
 			} else if !errors.Is(currentErr, sql.ErrNoRows) {
 				return status.Error(codes.Internal, "load desired snapshot failed")
@@ -381,7 +381,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			// must not tear down the control stream or cause an endless reconnect
 			// loop. The node will receive and apply the newer snapshot normally.
 			if latest.NodeID != "" && result.GetGeneration() < latest.Generation {
-				if err := s.store.RecordEvent(stream.Context(), "system", "", "stale_apply_result", "ignored apply result for an older desired generation", hello.GetNodeId(), map[string]string{"generation": fmt.Sprint(result.GetGeneration()), "latest_generation": fmt.Sprint(latest.Generation)}); err != nil {
+				if err := s.resources.RecordEvent(stream.Context(), "system", "", "stale_apply_result", "ignored apply result for an older desired generation", hello.GetNodeId(), map[string]string{"generation": fmt.Sprint(result.GetGeneration()), "latest_generation": fmt.Sprint(latest.Generation)}); err != nil {
 					return status.Error(codes.Internal, "record stale apply result failed")
 				}
 				continue
@@ -397,7 +397,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				attributes["error_code"] = result.GetError().GetCode()
 				attributes["error_path"] = result.GetError().GetFieldPath()
 			}
-			if err := s.store.RecordEvent(stream.Context(), hello.GetNodeId(), "", "apply_result", result.GetStatus().String(), hello.GetNodeId(), attributes); err != nil {
+			if err := s.resources.RecordEvent(stream.Context(), hello.GetNodeId(), "", "apply_result", result.GetStatus().String(), hello.GetNodeId(), attributes); err != nil {
 				return status.Error(codes.Internal, "record apply result failed")
 			}
 			if result.GetStatus() == v1.ApplyStatus_APPLY_STATUS_APPLIED || result.GetStatus() == v1.ApplyStatus_APPLY_STATUS_REJECTED {
@@ -405,7 +405,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				if result.GetError() != nil {
 					errorCode = result.GetError().GetCode()
 				}
-				changed, stateErr := s.store.applyNodeResultWithError(stream.Context(), hello.GetNodeId(), result.GetGeneration(), result.GetStatus() == v1.ApplyStatus_APPLY_STATUS_APPLIED, errorCode, hello.GetNodeId())
+				changed, stateErr := s.resources.applyNodeResultWithError(stream.Context(), hello.GetNodeId(), result.GetGeneration(), result.GetStatus() == v1.ApplyStatus_APPLY_STATUS_APPLIED, errorCode, hello.GetNodeId())
 				if stateErr != nil {
 					return status.Error(codes.Internal, "update assignment state failed")
 				}
@@ -416,7 +416,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				// updated peer view.
 				for _, assignment := range changed {
 					for _, participant := range []string{assignment.GatewayID, assignment.AgentID} {
-						if _, snapshotErr := s.store.EnsureDesiredSnapshot(stream.Context(), participant); snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
+						if _, snapshotErr := s.resources.EnsureDesiredSnapshot(stream.Context(), participant); snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
 							return status.Error(codes.Internal, "refresh assignment snapshot failed")
 						}
 					}
@@ -450,7 +450,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 						}
 						createdAt = event.GetCreatedAt().AsTime().UTC()
 					}
-					if err := s.store.RecordRuntimeEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetAttributesJson(), createdAt); err != nil {
+					if err := s.runtime.RecordRuntimeEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetAttributesJson(), createdAt); err != nil {
 						slog.Default().Error("failed to record runtime event", "node_id", hello.GetNodeId(), "event_type", event.GetType(), "error", err)
 						return status.Error(codes.Internal, "record runtime event failed")
 					}
@@ -469,7 +469,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 						return status.Error(codes.InvalidArgument, "event attributes are invalid")
 					}
 				}
-				if err := s.store.RecordEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetMessage(), hello.GetNodeId(), attributes); err != nil {
+				if err := s.resources.RecordEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetMessage(), hello.GetNodeId(), attributes); err != nil {
 					slog.Default().Error("failed to record node event", "node_id", hello.GetNodeId(), "event_type", event.GetType(), "error", err)
 					return status.Error(codes.Internal, "record node event failed")
 				}
@@ -482,7 +482,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			// certificate. Re-check the peer serial before issuing one so an old
 			// stream cannot renew itself after an administrator has rotated or
 			// revoked the node in the meantime.
-			currentNode, currentNodeErr := s.store.GetNode(stream.Context(), hello.GetNodeId())
+			currentNode, currentNodeErr := s.resources.GetNode(stream.Context(), hello.GetNodeId())
 			currentPeer, currentPeerErr := peerCertificate(stream.Context())
 			if currentNodeErr != nil {
 				if !errors.Is(currentNodeErr, sql.ErrNoRows) {
@@ -494,7 +494,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 			if currentPeerErr != nil || currentNode.CertificateState != domain.CertificateActive || currentNode.CertificateSerial == "" || !strings.EqualFold(currentPeer.SerialNumber.Text(16), currentNode.CertificateSerial) {
 				return status.Error(codes.PermissionDenied, "certificate serial is not current")
 			}
-			certificate, renewErr := s.store.RenewNodeCertificate(stream.Context(), s.config, hello.GetNodeId(), message.GetRenewCertificate().GetCsrDer())
+			certificate, renewErr := s.resources.RenewNodeCertificate(stream.Context(), s.config, hello.GetNodeId(), message.GetRenewCertificate().GetCsrDer())
 			if renewErr != nil {
 				if errors.Is(renewErr, ErrInvalidEnrollmentRequest) {
 					return status.Error(codes.InvalidArgument, "renewal request is invalid")

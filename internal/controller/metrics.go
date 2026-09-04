@@ -111,7 +111,7 @@ func (m *ControllerMetrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{EnableOpenMetrics: true})
 }
 
-func (m *ControllerMetrics) refreshDatabase(store *Repository) {
+func (m *ControllerMetrics) refreshDatabase(store *ResourceRepository) {
 	if m == nil || store == nil {
 		return
 	}

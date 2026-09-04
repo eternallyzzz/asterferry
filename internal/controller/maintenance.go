@@ -8,7 +8,7 @@ import (
 // PruneHistory removes records whose retention window has elapsed. It is a
 // single transaction so a failed cleanup cannot leave a half-applied policy.
 // A non-positive duration disables cleanup for that table.
-func (s *Repository) PruneHistory(ctx context.Context, now time.Time, idempotencyTTL, auditTTL time.Duration) error {
+func (s *ResourceRepository) PruneHistory(ctx context.Context, now time.Time, idempotencyTTL, auditTTL time.Duration) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -38,5 +38,5 @@ func (s *Repository) PruneHistory(ctx context.Context, now time.Time, idempotenc
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return s.PruneRuntimeHistory(ctx, now)
+	return nil
 }

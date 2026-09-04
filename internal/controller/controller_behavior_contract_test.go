@@ -203,7 +203,7 @@ func TestTokenRetryAPIReportsConflictMetadataContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{store: store, sessions: sync.Map{}, metrics: newControllerMetrics()}
+	server := &Server{resources: store, sessions: sync.Map{}, metrics: newControllerMetrics()}
 	request := func(path, body, idempotencyKey string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -300,7 +300,7 @@ func TestLoginAndLogoutCookiesRemainSecureContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{store: store, sessions: sync.Map{}, loginLimiter: newLoginLimiter()}
+	server := &Server{resources: store, sessions: sync.Map{}, loginLimiter: newLoginLimiter()}
 	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"username":"cookie-user","password":"a-very-long-password"}`))
 	loginRequest.Header.Set("Content-Type", "application/json")
 	loginResponse := httptest.NewRecorder()

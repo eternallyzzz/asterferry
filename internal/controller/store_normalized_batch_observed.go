@@ -86,6 +86,7 @@ func loadObservedBatchNormalized(ctx context.Context, q sqlQueryer, gateways []d
 			if err != nil {
 				return nil, err
 			}
+			sessionPositions := make(map[string]int)
 			for rows.Next() {
 				var nodeID, started string
 				var position, streams int64
@@ -94,6 +95,12 @@ func loadObservedBatchNormalized(ctx context.Context, q sqlQueryer, gateways []d
 					_ = rows.Close()
 					return nil, err
 				}
+				expected := sessionPositions[nodeID]
+				if err := requireStoredPosition(position, expected, "observed session"); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				sessionPositions[nodeID] = expected + 1
 				session.StartedAt, err = parseStoredTime("observed.session.started_at", started)
 				if err != nil {
 					_ = rows.Close()
@@ -118,6 +125,7 @@ func loadObservedBatchNormalized(ctx context.Context, q sqlQueryer, gateways []d
 			if err != nil {
 				return nil, err
 			}
+			listenerPositions := make(map[string]int)
 			for rows.Next() {
 				var nodeID, protocol, bind string
 				var position, port int64
@@ -126,6 +134,12 @@ func loadObservedBatchNormalized(ctx context.Context, q sqlQueryer, gateways []d
 					_ = rows.Close()
 					return nil, err
 				}
+				expected := listenerPositions[nodeID]
+				if err := requireStoredPosition(position, expected, "observed listener"); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				listenerPositions[nodeID] = expected + 1
 				listenerPort, err := storedUint16(port, "observed listener port")
 				if err != nil {
 					_ = rows.Close()

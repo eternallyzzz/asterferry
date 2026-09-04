@@ -11,7 +11,7 @@ func (s *Server) assignments(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		items, err := s.store.ListAssignments(r.Context(), r.URL.Query().Get("gateway_id"), r.URL.Query().Get("agent_id"))
+		items, err := s.resources.ListAssignments(r.Context(), r.URL.Query().Get("gateway_id"), r.URL.Query().Get("agent_id"))
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -32,11 +32,11 @@ func (s *Server) assignments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := s.store.PutAssignment(r.Context(), assignment, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutAssignment(r.Context(), assignment, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	created, err := s.store.GetAssignment(r.Context(), assignment.ID)
+	created, err := s.resources.GetAssignment(r.Context(), assignment.ID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -55,7 +55,7 @@ func (s *Server) assignmentAction(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		assignment, err := s.store.GetAssignment(r.Context(), id)
+		assignment, err := s.resources.GetAssignment(r.Context(), id)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -74,7 +74,7 @@ func (s *Server) assignmentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		if err := s.store.DeleteAssignment(r.Context(), id, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.DeleteAssignment(r.Context(), id, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -91,11 +91,11 @@ func (s *Server) assignmentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	assignment.ID = id
-	if err := s.store.PutAssignment(r.Context(), assignment, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutAssignment(r.Context(), assignment, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.GetAssignment(r.Context(), id)
+	updated, err := s.resources.GetAssignment(r.Context(), id)
 	if err != nil {
 		writeStoreError(w, err)
 		return

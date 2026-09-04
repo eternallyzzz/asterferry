@@ -6,7 +6,7 @@ import (
 )
 
 // ChangeBus owns all process-local subscriptions. It has no database handle
-// and is safe to close before the Repository closes its database.
+// and is safe to close before the shared database handle is released.
 type ChangeBus struct {
 	actionMu     sync.Mutex
 	actionSubs   map[string]map[uint64]*actionSubscription

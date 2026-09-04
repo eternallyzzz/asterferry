@@ -11,7 +11,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-func (s *Repository) PutAssignment(ctx context.Context, assignment domain.Assignment, options WriteOptions) error {
+func (s *ResourceRepository) PutAssignment(ctx context.Context, assignment domain.Assignment, options WriteOptions) error {
 	if assignment.State == "" {
 		assignment.State = domain.AssignmentPending
 	}
@@ -248,7 +248,7 @@ func supersededAssignments(ctx context.Context, tx *sql.Tx, serviceIDs []string,
 	return result, nil
 }
 
-func (s *Repository) DeleteAssignment(ctx context.Context, id string, options WriteOptions) error {
+func (s *ResourceRepository) DeleteAssignment(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

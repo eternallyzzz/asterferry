@@ -104,7 +104,7 @@ func TestPasswordChangeRevokesTokensAndSessions(t *testing.T) {
 		t.Fatalf("token was not valid before password change: %v", err)
 	}
 
-	server := &Server{store: store, sessions: sync.Map{}}
+	server := &Server{resources: store, sessions: sync.Map{}}
 	cookieValue := "session-before-password-change"
 	server.sessions.Store(cookieValue, session{User: user, ExpiresAt: time.Now().UTC().Add(time.Hour), CSRF: "csrf"})
 	newPassword := "new-password"

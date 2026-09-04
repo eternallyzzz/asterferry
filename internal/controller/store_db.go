@@ -20,10 +20,11 @@ const (
 // produced by the same database generation.
 var ErrIncompatibleDatabase = errors.New("controller database belongs to an incompatible generation")
 
-// OpenStoreWithConfig opens the configured Controller database. Database
-// configuration is explicit so SQLite and PostgreSQL have the same lifecycle
-// and there is no hidden SQLite-only compatibility entry point.
-func OpenStoreWithConfig(config Config, masterKey []byte) (*Repository, error) {
+// OpenControllerRepositoriesWithConfig opens the configured Controller
+// database and wires the resource and runtime repositories to one connection
+// pool and one process-local change bus. Database configuration is explicit so
+// SQLite and PostgreSQL have the same lifecycle.
+func OpenControllerRepositoriesWithConfig(config Config, masterKey []byte) (*ControllerRepositories, error) {
 	if len(masterKey) != masterKeyBytes {
 		return nil, errors.New("master key must contain exactly 32 bytes")
 	}
@@ -43,15 +44,19 @@ func OpenStoreWithConfig(config Config, masterKey []byte) (*Repository, error) {
 	if backend == databaseBackendPostgres {
 		path = strings.TrimSpace(config.DatabaseURL)
 	}
-	store := &Repository{db: db, path: path, dialect: newDatabaseDialect(backend), changes: newChangeBus()}
-	copy(store.masterKey[:], masterKey)
+	database := &databaseHandle{db: db, path: path, dialect: newDatabaseDialect(backend)}
+	changes := newChangeBus()
+	resources := &ResourceRepository{databaseHandle: database, changes: changes}
+	runtime := &RuntimeRepository{databaseHandle: database, changes: changes}
+	repositories := &ControllerRepositories{Resources: resources, Runtime: runtime, Changes: changes, databaseHandle: database}
+	copy(resources.masterKey[:], masterKey)
 	if backend == databaseBackendSQLite {
-		if err := store.configure(); err != nil {
+		if err := database.configure(); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
 	}
-	if err := store.initializeSchema(context.Background()); err != nil {
+	if err := resources.initializeSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -59,14 +64,14 @@ func OpenStoreWithConfig(config Config, masterKey []byte) (*Repository, error) {
 	// connections. The next Node snapshot will restore active rows; until then
 	// keep the read-only operations view fail-safe instead of showing stale
 	// connections as live.
-	if err := store.markRuntimeConnectionsUnknownOnStartup(context.Background()); err != nil {
+	if err := runtime.markRuntimeConnectionsUnknownOnStartup(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("reset runtime connection liveness: %w", err)
 	}
-	return store, nil
+	return repositories, nil
 }
 
-func (s *Repository) Path() string {
+func (s *databaseHandle) Path() string {
 	if s == nil {
 		return ""
 	}
@@ -78,14 +83,14 @@ func (s *Repository) Path() string {
 
 // DatabaseDriver returns the configured backend name for metrics and
 // diagnostics. It intentionally does not expose a raw *sql.DB handle.
-func (s *Repository) DatabaseDriver() string {
+func (s *databaseHandle) DatabaseDriver() string {
 	if s == nil || s.dialect == nil {
 		return DatabaseDriverSQLite
 	}
 	return string(s.dialect.backend())
 }
 
-func (s *Repository) configure() error {
+func (s *databaseHandle) configure() error {
 	for _, statement := range []string{
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA synchronous = NORMAL",
@@ -111,7 +116,7 @@ func sqliteDSN(path string) string {
 	return path + separator + "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 }
 
-func (s *Repository) initializeSchema(ctx context.Context) error {
+func (s *ResourceRepository) initializeSchema(ctx context.Context) error {
 	if s == nil || s.dialect == nil {
 		return errors.New("database dialect is not configured")
 	}
@@ -438,14 +443,14 @@ func currentSchemaTables() []string {
 	}
 }
 
-func (s *Repository) Close() error {
+func (s *databaseHandle) closeDatabase() error {
+	if s == nil {
+		return nil
+	}
 	s.close.Do(func() {
-		// Wake all process-local subscribers before closing the database so
-		// long-lived control streams do not retain goroutines after shutdown.
-		s.ChangeBus().Close()
 		s.err = s.db.Close()
 	})
 	return s.err
 }
 
-func (s *Repository) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+func (s *databaseHandle) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

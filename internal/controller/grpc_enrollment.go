@@ -34,7 +34,7 @@ func (s *ControlServer) Enroll(ctx context.Context, request *v1.EnrollRequest) (
 	default:
 		return nil, status.Error(codes.ResourceExhausted, "enrollment capacity is temporarily exhausted")
 	}
-	certificate, err := s.store.IssueNodeCertificate(ctx, s.config, request.GetToken(), request.GetNodeId(), request.GetCsrDer())
+	certificate, err := s.resources.IssueNodeCertificate(ctx, s.config, request.GetToken(), request.GetNodeId(), request.GetCsrDer())
 	if err != nil {
 		if errors.Is(err, ErrInvalidEnrollmentRequest) {
 			return nil, status.Error(codes.InvalidArgument, "enrollment request is invalid")

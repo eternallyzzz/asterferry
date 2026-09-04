@@ -11,7 +11,7 @@ import (
 )
 
 // CreateNode persists a node identity and its initial lifecycle state.
-func (s *Repository) CreateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
+func (s *ResourceRepository) CreateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
 	if err := validateNode(node); err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func (s *Repository) CreateNode(ctx context.Context, node domain.Node, options W
 	return s.commitAndNotifyResources(tx, node.ID)
 }
 
-func (s *Repository) GetNode(ctx context.Context, id string) (domain.Node, error) {
+func (s *ResourceRepository) GetNode(ctx context.Context, id string) (domain.Node, error) {
 	node, err := loadNodeIdentity(ctx, s.db, id)
 	if err != nil {
 		return domain.Node{}, err
@@ -68,7 +68,7 @@ func (s *Repository) GetNode(ctx context.Context, id string) (domain.Node, error
 	return node, nil
 }
 
-func (s *Repository) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
+func (s *ResourceRepository) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
 	kind = strings.TrimSpace(kind)
 	query := `SELECT n.id,n.name,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,ns.kind FROM nodes n LEFT JOIN node_specs ns ON ns.node_id=n.id`
 	args := []any{}
@@ -145,7 +145,7 @@ type AgentView struct {
 	Spec *domain.AgentSpec
 }
 
-func (s *Repository) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
+func (s *ResourceRepository) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
 	views, err := s.listNodeSpecViews(ctx, domain.NodeSpecGateway)
 	if err != nil {
 		return nil, err
@@ -162,7 +162,7 @@ func (s *Repository) ListGatewayViews(ctx context.Context) ([]GatewayView, error
 	return result, nil
 }
 
-func (s *Repository) ListAgentViews(ctx context.Context) ([]AgentView, error) {
+func (s *ResourceRepository) ListAgentViews(ctx context.Context) ([]AgentView, error) {
 	views, err := s.listNodeSpecViews(ctx, domain.NodeSpecAgent)
 	if err != nil {
 		return nil, err
@@ -184,7 +184,7 @@ type nodeSpecView struct {
 	Spec domain.NodeSpec
 }
 
-func (s *Repository) listNodeSpecViews(ctx context.Context, kind domain.NodeSpecKind) ([]nodeSpecView, error) {
+func (s *ResourceRepository) listNodeSpecViews(ctx context.Context, kind domain.NodeSpecKind) ([]nodeSpecView, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,ns.node_id,ns.kind,ns.revision,ns.updated_at FROM nodes n INNER JOIN node_specs ns ON ns.node_id=n.id WHERE ns.kind=? ORDER BY n.id`, string(kind))
 	if err != nil {
 		return nil, err
@@ -255,7 +255,7 @@ func (s *Repository) listNodeSpecViews(ctx context.Context, kind domain.NodeSpec
 	return result, nil
 }
 
-func (s *Repository) UpdateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
+func (s *ResourceRepository) UpdateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
 	if err := validateNode(node); err != nil {
 		return err
 	}
@@ -422,7 +422,7 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 	return nil
 }
 
-func (s *Repository) DeleteNode(ctx context.Context, id string, options WriteOptions) error {
+func (s *ResourceRepository) DeleteNode(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

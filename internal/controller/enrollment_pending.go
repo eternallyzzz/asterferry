@@ -18,7 +18,7 @@ import (
 // pending intent, enrollment token, node identity and initial spec are all
 // committed together, so a failed or racing enrollment cannot leave a node
 // that has no certificate, or a certificate for a node that has no spec.
-func (s *Repository) issuePendingNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
+func (s *ResourceRepository) issuePendingNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
 	if pending.NodeID != nodeID {
 		return Certificate{}, ErrEnrollmentNodeMismatch
 	}

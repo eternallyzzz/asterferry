@@ -178,19 +178,19 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if err != nil {
 		return InitResult{}, err
 	}
-	store, err := OpenStoreWithConfig(stagedConfig, masterKey)
+	repositories, err := OpenControllerRepositoriesWithConfig(stagedConfig, masterKey)
 	if err != nil {
 		return InitResult{}, err
 	}
-	defer store.Close()
-	admin, err := store.CreateUser(ctx, options.Username, options.Password, RoleAdmin)
+	defer repositories.Close()
+	admin, err := repositories.Resources.CreateUser(ctx, options.Username, options.Password, RoleAdmin)
 	if err != nil {
 		return InitResult{}, err
 	}
 	// Windows keeps SQLite's database handle open across directory renames.
 	// Close the staging store before publishing the containing directory; the
 	// deferred close still covers every earlier error path.
-	if err := store.Close(); err != nil {
+	if err := repositories.Close(); err != nil {
 		return InitResult{}, err
 	}
 	if err := ctx.Err(); err != nil {

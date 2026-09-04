@@ -9,7 +9,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-func (s *Repository) putServiceDocument(ctx context.Context, service domain.Service, options WriteOptions) error {
+func (s *ResourceRepository) putServiceDocument(ctx context.Context, service domain.Service, options WriteOptions) error {
 	requestService := service
 	requestService.Revision = 0
 	requestService.UpdatedAt = time.Time{}

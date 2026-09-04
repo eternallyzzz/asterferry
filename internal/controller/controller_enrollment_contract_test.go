@@ -88,7 +88,7 @@ func TestGenericEnrollmentTokenSupportsAllNodeKindsContract(t *testing.T) {
 	}
 }
 
-func openEnrollmentTestController(t *testing.T) (Config, *Repository) {
+func openEnrollmentTestController(t *testing.T) (Config, *ResourceRepository) {
 	t.Helper()
 	result, err := Init(context.Background(), InitOptions{
 		Dir:           filepath.Join(t.TempDir(), "controller"),
@@ -102,11 +102,11 @@ func openEnrollmentTestController(t *testing.T) (Config, *Repository) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStoreWithConfig(result.Config, masterKey)
+	repositories, err := OpenControllerRepositoriesWithConfig(result.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return result.Config, store
+	return result.Config, repositories.Resources
 }
 
 func parseEnrollmentCertificate(t *testing.T, data []byte) *x509.Certificate {

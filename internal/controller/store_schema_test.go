@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestOpenStoreWithConfigRejectsDatabaseWithoutGenerationMarker(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigRejectsDatabaseWithoutGenerationMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -34,7 +34,7 @@ func TestOpenStoreWithConfigRejectsDatabaseWithoutGenerationMarker(t *testing.T)
 	}
 }
 
-func TestOpenStoreWithConfigPreservesSchemaProbeCause(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigPreservesSchemaProbeCause(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "damaged.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -66,7 +66,7 @@ func TestOpenStoreWithConfigPreservesSchemaProbeCause(t *testing.T) {
 	}
 }
 
-func TestOpenStoreWithConfigTreatsMissingMarkerRowAsIncompatible(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigTreatsMissingMarkerRowAsIncompatible(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "unmarked.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestOpenStoreWithConfigTreatsMissingMarkerRowAsIncompatible(t *testing.T) {
 	}
 }
 
-func TestOpenStoreWithConfigRejectsWrongGenerationFingerprint(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigRejectsWrongGenerationFingerprint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrong-generation.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -125,7 +125,7 @@ func TestOpenStoreWithConfigRejectsWrongGenerationFingerprint(t *testing.T) {
 	}
 }
 
-func TestOpenStoreWithConfigDoesNotMigrateLegacyGeneration(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigDoesNotMigrateLegacyGeneration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v9.db")
 	db, err := sql.Open(driverName, path)
 	if err != nil {
@@ -165,7 +165,7 @@ func TestOpenStoreWithConfigDoesNotMigrateLegacyGeneration(t *testing.T) {
 	}
 }
 
-func TestOpenStoreWithConfigCreatesCurrentGenerationMarker(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigCreatesCurrentGenerationMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "current.db")
 	store, err := openTestStore(path)
 	if err != nil {
@@ -199,7 +199,7 @@ func TestOpenStoreWithConfigCreatesCurrentGenerationMarker(t *testing.T) {
 	}
 }
 
-func TestOpenStoreWithConfigRejectsCurrentMarkerWithMissingTable(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigRejectsCurrentMarkerWithMissingTable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "partial-current.db")
 	store, err := openTestStore(path)
 	if err != nil {
@@ -232,7 +232,7 @@ func TestOpenStoreWithConfigRejectsCurrentMarkerWithMissingTable(t *testing.T) {
 	}
 }
 
-func TestOpenStoreWithConfigRejectsExplicitV10MarkerWithoutMutation(t *testing.T) {
+func TestOpenControllerRepositoriesWithConfigRejectsExplicitV10MarkerWithoutMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v10-marker.db")
 	db, err := sql.Open(driverName, sqliteDSN(path))
 	if err != nil {

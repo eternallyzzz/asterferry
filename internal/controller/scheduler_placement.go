@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func (s *Repository) LoadGatewayCandidates(ctx context.Context) ([]GatewayCandidate, error) {
+func (s *ResourceRepository) LoadGatewayCandidates(ctx context.Context) ([]GatewayCandidate, error) {
 	nodes, err := s.ListNodes(ctx, string(domain.NodeSpecGateway))
 	if err != nil {
 		return nil, err
@@ -80,15 +80,15 @@ func (s *Repository) LoadGatewayCandidates(ctx context.Context) ([]GatewayCandid
 
 const gatewayCandidateBatchSize = 500
 
-func (s *Repository) loadGatewaySpecsBatch(ctx context.Context, gateways []domain.Node) (map[string]domain.NodeSpec, error) {
+func (s *ResourceRepository) loadGatewaySpecsBatch(ctx context.Context, gateways []domain.Node) (map[string]domain.NodeSpec, error) {
 	return loadGatewaySpecsBatchNormalized(ctx, s.db, gateways)
 }
 
-func (s *Repository) loadGatewayAssignmentsBatch(ctx context.Context, gateways []domain.Node) (map[string][]domain.Assignment, error) {
+func (s *ResourceRepository) loadGatewayAssignmentsBatch(ctx context.Context, gateways []domain.Node) (map[string][]domain.Assignment, error) {
 	return loadAssignmentsBatchNormalized(ctx, s.db, gateways)
 }
 
-func (s *Repository) loadGatewayObservedBatch(ctx context.Context, gateways []domain.Node) (map[string]domain.ObservedState, error) {
+func (s *ResourceRepository) loadGatewayObservedBatch(ctx context.Context, gateways []domain.Node) (map[string]domain.ObservedState, error) {
 	return loadObservedBatchNormalized(ctx, s.db, gateways)
 }
 
@@ -99,7 +99,7 @@ func questionMarks(count int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
 }
 
-func (s *Repository) AllocateAssignmentID(ctx context.Context, assignment domain.Assignment) (string, error) {
+func (s *ResourceRepository) AllocateAssignmentID(ctx context.Context, assignment domain.Assignment) (string, error) {
 	base := assignment.ID
 	if err := domain.ValidateID(base, "assignment.id"); err != nil {
 		return "", err

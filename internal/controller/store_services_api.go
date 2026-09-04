@@ -11,15 +11,15 @@ import (
 )
 
 // PutGatewaySpec stores the normalized Gateway behavior specification.
-func (s *Repository) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, options WriteOptions) error {
+func (s *ResourceRepository) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, options WriteOptions) error {
 	return s.PutNodeSpec(ctx, domain.NewGatewayNodeSpec(spec), options)
 }
 
-func (s *Repository) DeleteGatewaySpec(ctx context.Context, nodeID string, options WriteOptions) error {
+func (s *ResourceRepository) DeleteGatewaySpec(ctx context.Context, nodeID string, options WriteOptions) error {
 	return s.DeleteNodeSpec(ctx, nodeID, options)
 }
 
-func (s *Repository) GetGatewaySpec(ctx context.Context, nodeID string) (domain.GatewaySpec, error) {
+func (s *ResourceRepository) GetGatewaySpec(ctx context.Context, nodeID string) (domain.GatewaySpec, error) {
 	spec, err := s.GetNodeSpec(ctx, nodeID)
 	if err != nil {
 		return domain.GatewaySpec{}, err
@@ -32,15 +32,15 @@ func (s *Repository) GetGatewaySpec(ctx context.Context, nodeID string) (domain.
 	return value, nil
 }
 
-func (s *Repository) PutAgentSpec(ctx context.Context, spec domain.AgentSpec, options WriteOptions) error {
+func (s *ResourceRepository) PutAgentSpec(ctx context.Context, spec domain.AgentSpec, options WriteOptions) error {
 	return s.PutNodeSpec(ctx, domain.NewAgentNodeSpec(spec), options)
 }
 
-func (s *Repository) DeleteAgentSpec(ctx context.Context, nodeID string, options WriteOptions) error {
+func (s *ResourceRepository) DeleteAgentSpec(ctx context.Context, nodeID string, options WriteOptions) error {
 	return s.DeleteNodeSpec(ctx, nodeID, options)
 }
 
-func (s *Repository) GetAgentSpec(ctx context.Context, nodeID string) (domain.AgentSpec, error) {
+func (s *ResourceRepository) GetAgentSpec(ctx context.Context, nodeID string) (domain.AgentSpec, error) {
 	spec, err := s.GetNodeSpec(ctx, nodeID)
 	if err != nil {
 		return domain.AgentSpec{}, err
@@ -53,7 +53,7 @@ func (s *Repository) GetAgentSpec(ctx context.Context, nodeID string) (domain.Ag
 	return value, nil
 }
 
-func (s *Repository) PutService(ctx context.Context, service domain.Service, options WriteOptions) error {
+func (s *ResourceRepository) PutService(ctx context.Context, service domain.Service, options WriteOptions) error {
 	if err := service.Validate(); err != nil {
 		return err
 	}
@@ -67,11 +67,11 @@ func (s *Repository) PutService(ctx context.Context, service domain.Service, opt
 	return s.putServiceDocument(ctx, service, options)
 }
 
-func (s *Repository) GetService(ctx context.Context, id string) (domain.Service, error) {
+func (s *ResourceRepository) GetService(ctx context.Context, id string) (domain.Service, error) {
 	return loadServiceNormalized(ctx, s.db, id)
 }
 
-func (s *Repository) ListServices(ctx context.Context, agentID string) ([]domain.Service, error) {
+func (s *ResourceRepository) ListServices(ctx context.Context, agentID string) ([]domain.Service, error) {
 	query := `SELECT id FROM services`
 	args := []any{}
 	if strings.TrimSpace(agentID) != "" {
@@ -112,7 +112,7 @@ func (s *Repository) ListServices(ctx context.Context, agentID string) ([]domain
 	return result, nil
 }
 
-func (s *Repository) DeleteService(ctx context.Context, id string, options WriteOptions) error {
+func (s *ResourceRepository) DeleteService(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

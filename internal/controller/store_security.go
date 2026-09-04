@@ -99,7 +99,7 @@ func requestHash(value any) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func (s *Repository) protectObfuscationPolicy(policy *domain.ObfuscationPolicy) error {
+func (s *ResourceRepository) protectObfuscationPolicy(policy *domain.ObfuscationPolicy) error {
 	if policy == nil {
 		return nil
 	}
@@ -199,7 +199,7 @@ func sameObfuscationPolicy(left, right domain.ObfuscationPolicy) bool {
 // authenticated node. The persisted desired snapshot retains ciphertext and
 // is never sent to a node as key material; the returned document is ephemeral
 // and contains plaintext keys protected by the mTLS control stream.
-func (s *Repository) SnapshotDocumentForWire(document []byte) ([]byte, error) {
+func (s *ResourceRepository) SnapshotDocumentForWire(document []byte) ([]byte, error) {
 	var snapshot domain.DesiredSnapshot
 	if err := json.Unmarshal(document, &snapshot); err != nil {
 		return nil, fmt.Errorf("decode snapshot for wire: %w", err)
@@ -220,7 +220,7 @@ func (s *Repository) SnapshotDocumentForWire(document []byte) ([]byte, error) {
 	return json.Marshal(snapshot)
 }
 
-func (s *Repository) decryptObfuscationPolicyForWire(policy *domain.ObfuscationPolicy) error {
+func (s *ResourceRepository) decryptObfuscationPolicyForWire(policy *domain.ObfuscationPolicy) error {
 	if policy == nil || policy.Mode == "" || policy.Mode == "standard" {
 		if policy != nil {
 			policy.Key = nil

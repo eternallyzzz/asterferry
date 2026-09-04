@@ -8,7 +8,7 @@ COPY web/dashboard/package.json web/dashboard/package-lock.json ./web/dashboard/
 # npm 12 treats lockfile tarballs from alternate registries as remote packages.
 # Keep the release build on the canonical registry while accepting a mirrored lockfile.
 RUN npm install --global npm@12.0.2 --registry=https://registry.npmjs.org \
-	&& npm --prefix web/dashboard ci --registry=https://registry.npmjs.org --replace-registry-host=always
+	&& npm --prefix web/dashboard ci --audit=false --registry=https://registry.npmjs.org --replace-registry-host=always
 
 COPY web/dashboard ./web/dashboard
 RUN npm --prefix web/dashboard run build

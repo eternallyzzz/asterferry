@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func (s *Repository) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
+func (s *ResourceRepository) SaveSnapshot(ctx context.Context, record SnapshotRecord) error {
 	if record.NodeID == "" || record.Generation == 0 || record.Checksum == "" || len(record.Document) == 0 {
 		return errors.New("snapshot node, generation, checksum and document are required")
 	}
@@ -132,7 +132,7 @@ func (s *Repository) SaveSnapshot(ctx context.Context, record SnapshotRecord) er
 	return s.commitAndNotify(tx, record.NodeID)
 }
 
-func (s *Repository) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
+func (s *ResourceRepository) LoadSnapshot(ctx context.Context, nodeID string) (SnapshotRecord, error) {
 	var record SnapshotRecord
 	var created string
 	err := s.db.QueryRowContext(ctx, `SELECT node_id,generation,checksum,payload_json,created_at FROM desired_snapshots WHERE node_id=?`, nodeID).Scan(&record.NodeID, &record.Generation, &record.Checksum, &record.Document, &created)
@@ -178,7 +178,7 @@ func validateSnapshotRecord(record SnapshotRecord) error {
 	return nil
 }
 
-func (s *Repository) GetSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
+func (s *ResourceRepository) GetSnapshot(ctx context.Context, nodeID string) (domain.DesiredSnapshot, error) {
 	record, err := s.LoadSnapshot(ctx, nodeID)
 	if err != nil {
 		return domain.DesiredSnapshot{}, err

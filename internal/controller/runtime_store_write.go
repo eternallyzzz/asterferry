@@ -132,7 +132,7 @@ func uint64ToDatabaseInt(value uint64) int64 {
 	return int64(value)
 }
 
-func (s *Repository) PruneRuntimeHistory(ctx context.Context, now time.Time) error {
+func (s *RuntimeRepository) PruneRuntimeHistory(ctx context.Context, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
