@@ -127,9 +127,9 @@ jobs:
       - name: Verify QUIC implementation migration
         shell: bash
         run: |
-          ! rg -n "golang.org/x/net/quic" --glob "*.go" .
-          rg -n "github.com/quic-go/quic-go" --glob "*.go" internal/afdp internal/dataplane
-          ! rg -n "internal/(agent|gateway|relay|transport|configstore|observability)" --glob "*.go" .
+          ! git grep -n "golang.org/x/net/quic" -- '*.go'
+          git grep -n "github.com/quic-go/quic-go" -- internal/afdp internal/dataplane
+          ! git grep -n -E "internal/(agent|gateway|relay|transport|configstore|observability)" -- '*.go'
       - name: Build binary
         run: go build ./cmd/asterferry
       - name: Build binary with embedded Dashboard
