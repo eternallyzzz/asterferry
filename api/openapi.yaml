@@ -1,0 +1,649 @@
+openapi: 3.0.3
+info:
+  title: AsterFerry Controller API
+  version: 1.0.0
+  description: Authoritative control-plane API for the AsterFerry v1.0.0 current architecture. Gateway and Agent business traffic never traverses this API.
+servers:
+  - url: /api/v1
+tags:
+  - name: auth
+  - name: nodes
+  - name: resources
+  - name: operations
+  - name: audit
+  - name: runtime
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      servers: [{ url: / }]
+      responses: { '200': { description: Controller is healthy } }
+  /readyz:
+    get:
+      operationId: readyz
+      servers: [{ url: / }]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Controller is ready }, '503': { description: Database unavailable } }
+  /metrics:
+    get:
+      operationId: metrics
+      servers: [{ url: / }]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Prometheus metrics } }
+  /openapi.yaml:
+    get:
+      operationId: openapi
+      servers: [{ url: / }]
+      responses: { '200': { description: OpenAPI document } }
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } }
+      responses:
+        '200': { description: Authenticated, content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Logged out }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /me:
+    get:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Current user, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } } }
+  /nodes:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: kind, in: query, description: Filter by configured Node behavior, schema: { type: string, enum: [gateway, agent] } }]
+      responses: { '200': { description: Nodes, content: { application/json: { schema: { $ref: '#/components/schemas/NodeList' } } } } }
+    post:
+      tags: [nodes]
+      operationId: createNode
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeInput' } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/spec:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        '200': { description: Configured Node behavior, content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } } }
+        '404': { description: Node has no behavior spec yet }
+    put:
+      tags: [nodes]
+      operationId: putNodeSpec
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { name: If-Match, in: header, required: false, schema: { type: string, pattern: '^[1-9][0-9]*$' } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/CSRF' }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } }
+      responses:
+        '200': { description: Updated behavior, content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } } }
+        '201': { description: First behavior, content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [nodes]
+      operationId: deleteNodeSpec
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Behavior removed }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Node, content: { application/json: { schema: { $ref: '#/components/schemas/Node' } } } } }
+    patch:
+      tags: [nodes]
+      operationId: updateNode
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodePatch' } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/bootstrap:
+    post:
+      tags: [operations]
+      operationId: bootstrapNode
+      description: Create a node-bound enrollment token and return a platform-specific one-line installer command. Existing node specs are not replaced.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapRequest' } } }
+      responses:
+        '201':
+          description: One-time installer command generated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
+        '409': { description: Idempotency key already created the one-time token, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
+        '503': { description: Controller bootstrap configuration is unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /node-installations:
+    get:
+      tags: [operations]
+      description: List installation intents that have not enrolled yet. The response never contains the one-time token.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        '200':
+          description: Pending node installations.
+          content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/PendingNodeInstallation' } } } } } }
+    post:
+      tags: [operations]
+      operationId: createNodeInstallation
+      description: Create an installation intent and return a one-time platform installer command. The enrolled node and its initial spec are created atomically only when the installer completes Enroll.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NodeInstallationRequest' } } }
+      responses:
+        '201':
+          description: One-time installer command generated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
+        '409': { description: Pending installation conflict or unrecoverable token retry, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
+        '503': { description: Controller bootstrap configuration is unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /node-installations/{nodeId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    delete:
+      tags: [operations]
+      operationId: cancelNodeInstallation
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses:
+        '204': { description: Pending installation cancelled. }
+        '404': { description: Pending installation not found. }
+  /node-installations/{nodeId}/reissue:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    post:
+      tags: [operations]
+      operationId: reissueNodeInstallation
+      description: Replace the one-time token and return a fresh installer command for an existing pending installation.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses:
+        '200':
+          description: Replacement one-time installer command generated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/NodeBootstrapResponse' } } }
+        '404': { description: Pending installation not found. }
+        '409': { description: Unrecoverable token retry, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } }
+  /nodes/{nodeId}/snapshot:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Current desired snapshot }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/desired:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Current desired snapshot }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/observed:
+    get:
+      tags: [nodes]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Latest observed state }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/actions/{action}:
+    post:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/NodeId' }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [drain, reconnect, resync] } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { $ref: '#/components/parameters/CSRF' }
+      responses: { '202': { description: Action accepted } }
+  /nodes/{nodeId}/spec/egress:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Egress policy for the configured Node behavior } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
+      responses: { '200': { description: Updated egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
+      responses: { '200': { description: Updated egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/spec/proxies:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent proxy entrances } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '201': { description: Created proxy entrance }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/spec/proxies/{proxyId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/ProxyId' }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Proxy entrance } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Updated proxy entrance } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Updated proxy entrance } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted proxy entrance } }
+  /nodes/{nodeId}/spec/routes:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent route rules } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '201': { description: Created route rule }, '409': { $ref: '#/components/responses/Conflict' } }
+  /nodes/{nodeId}/spec/routes/{routeName}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/RouteName' }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Route rule } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Updated route rule } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+      responses: { '200': { description: Updated route rule } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted route rule } }
+  /nodes/{nodeId}/actions/schedule:
+    post:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses:
+        '202':
+          description: Assignments scheduled for the Node's enabled services; existing disjoint assignments are preserved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assignments]
+                properties:
+                  assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /services:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Services } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+  /services/{serviceId}:
+    parameters: [{ name: serviceId, in: path, required: true, schema: { type: string } }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Service } } }
+    patch:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted } }
+  /assignments:
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignments } } }
+    post:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+  /assignments/{assignmentId}:
+    parameters: [{ name: assignmentId, in: path, required: true, schema: { type: string } }]
+    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignment } } }
+    put:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }
+      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+    delete:
+      tags: [resources]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted } }
+  /enrollment-tokens:
+    get: { tags: [operations], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Enrollment tokens without plaintext secrets } } }
+    post:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentTokenRequest' } } } }
+      responses: { '201': { description: Plaintext is returned once }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
+  /enrollment-tokens/{tokenId}:
+    delete:
+      tags: [operations]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Revoked } }
+  /users:
+    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Users } } }
+    post:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserInput' } } } }
+      responses: { '201': { description: Created } }
+  /users/{userId}/tokens:
+    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ name: userId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Token metadata } } }
+    post:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/APITokenRequest' } } } }
+      responses: { '201': { description: Plaintext token returned once }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
+  /users/{userId}:
+    parameters: [{ name: userId, in: path, required: true, schema: { type: string } }]
+    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: User } } }
+    patch:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserInput' } } } }
+      responses: { '200': { description: Updated user } }
+    delete:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Deleted user } }
+  /users/{userId}/tokens/{tokenId}:
+    delete:
+      tags: [auth]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '204': { description: Revoked } }
+  /runtime/settings:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Runtime operation settings } }
+    put:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [advanced_operations_enabled], properties: { advanced_operations_enabled: { type: boolean } } } } }
+      responses: { '200': { description: Runtime operation settings updated } }
+  /runtime/connections:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { name: node_id, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: source_ip, in: query, schema: { type: string, description: IPv4 or IPv6 address } }
+        - { name: assignment_id, in: query, schema: { type: string } }
+        - { name: service_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses: { '200': { description: Current and recently closed connection metadata } }
+  /runtime/events:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: node_id, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }]
+      responses: { '200': { description: Runtime lifecycle events retained for 30 days } }
+  /runtime/traffic:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: node_id, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 2000 } }]
+      responses: { '200': { description: Per-minute traffic rollups } }
+  /runtime/stream:
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: node_id, in: query, schema: { type: string } }]
+      responses: { '200': { description: Server-sent runtime metadata change notifications, content: { text/event-stream: {} } } }
+  /nodes/{nodeId}/runtime/actions:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    post:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeAction' } } }
+      responses: { '202': { description: Runtime action queued }, '403': { description: Advanced operations are disabled } }
+  /nodes/{nodeId}/runtime/connections:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }]
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { name: state, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: source_ip, in: query, schema: { type: string, description: IPv4 or IPv6 address } }
+        - { name: peer_node_id, in: query, schema: { type: string } }
+        - { name: assignment_id, in: query, schema: { type: string } }
+        - { name: service_id, in: query, schema: { type: string } }
+        - { name: protocol, in: query, schema: { type: string, enum: [tcp, udp, quic] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses: { '200': { description: Current and recently closed connection metadata for one Node } }
+  /nodes/{nodeId}/runtime/connections/{connectionId}:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
+    get:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        '200': { description: One current or recently closed connection metadata record, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeConnection' } } } }
+  /nodes/{nodeId}/runtime/connections/{connectionId}/actions:
+    parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string } }]
+    post:
+      tags: [runtime]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeAction' } } }
+      responses: { '202': { description: Runtime action queued }, '403': { description: Advanced operations are disabled } }
+  /audit:
+    get:
+      tags: [audit]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }]
+      responses: { '200': { description: Audit records } }
+  /events:
+    get:
+      tags: [audit]
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Event records } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+    cookieAuth: { type: apiKey, in: cookie, name: af_session }
+  parameters:
+    NodeId: { name: nodeId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+    IfMatch: { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^[1-9][0-9]*$' } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
+    CSRF: { name: X-CSRF-Token, in: header, required: false, schema: { type: string, minLength: 32 } }
+  responses:
+    Unauthorized: { description: Authentication required }
+    Conflict: { description: Revision or unique binding conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties: { username: { type: string }, password: { type: string, format: password } }
+    LoginResponse:
+      type: object
+      properties: { user: { $ref: '#/components/schemas/User' }, csrf_token: { type: string } }
+    User:
+      type: object
+      properties: { id: { type: string }, username: { type: string }, role: { type: string, enum: [viewer, operator, admin] }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    UserInput:
+      type: object
+      properties: { username: { type: string }, password: { type: string, format: password }, role: { type: string, enum: [viewer, operator, admin] } }
+    NodeInput:
+      type: object
+      required: [id, name]
+      properties: { id: { type: string }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean } }
+    NodeSpec:
+      type: object
+      required: [node_id, kind]
+      description: The behavior selected for a Node. Exactly one typed document is present.
+      properties:
+        node_id: { type: string }
+        kind: { type: string, enum: [gateway, agent] }
+        gateway: { $ref: '#/components/schemas/GatewaySpec' }
+        agent: { $ref: '#/components/schemas/AgentSpec' }
+        revision: { type: integer, format: int64 }
+        updated_at: { type: string, format: date-time }
+      oneOf:
+        - required: [gateway]
+        - required: [agent]
+    NodeBootstrapRequest:
+      type: object
+      required: [platform, arch]
+      properties:
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        spec: { $ref: '#/components/schemas/NodeSpec' }
+    NodeBootstrapResponse:
+      type: object
+      required: [node_id, platform, arch, version, expires_at, command]
+      properties:
+        installation_id: { type: string, description: Pending installation identifier; set only by the install-first endpoint. }
+        state: { type: string, enum: [pending], description: Pending installation state; set only by the install-first endpoint. }
+        node_id: { type: string }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' }
+        expires_at: { type: string, format: date-time }
+        command: { type: string }
+    NodeInstallationRequest:
+      type: object
+      required: [node_id, name, platform, arch]
+      description: Creates a pending installation intent. It does not create an enrolled node until the installer completes Enroll.
+      properties:
+        node_id: { type: string, minLength: 1, maxLength: 128 }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        labels: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean, default: true }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        spec: { $ref: '#/components/schemas/NodeSpec' }
+    PendingNodeInstallation:
+      type: object
+      required: [node_id, name, enabled, platform, arch, expires_at, created_at]
+      properties:
+        node_id: { type: string }
+        spec_kind: { type: string, enum: [gateway, agent], description: Initial behavior, omitted for a generic pending installation. }
+        name: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean }
+        platform: { type: string, enum: [linux, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    NodePatch:
+      type: object
+      properties: { name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean }, certificate_state: { type: string }, certificate_serial: { type: string } }
+    Node:
+      allOf:
+        - $ref: '#/components/schemas/NodeInput'
+        - type: object
+          properties: { spec_kind: { type: string, enum: [gateway, agent], description: Configured behavior projection; omitted until a spec is saved. }, certificate_state: { type: string }, certificate_serial: { type: string }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    NodeList: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Node' } } } }
+    GatewaySpec: { type: object, required: [node_id, public_endpoints], properties: { node_id: { type: string }, public_endpoints: { type: array, items: { type: string } }, listeners: { type: array, items: { type: object } }, capacity: { type: object }, port_pool: { type: object }, transport: { type: object }, obfuscation: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, revision: { type: integer, format: int64 } } }
+    AgentSpec: { type: object, required: [node_id], properties: { node_id: { type: string }, gateway_selector: { type: object }, proxies: { type: array, items: { type: object } }, routes: { type: array, items: { type: object } }, limits: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, logging: { type: object }, revision: { type: integer, format: int64 } } }
+    EgressPolicy: { type: object, properties: { enabled: { type: boolean }, tcp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, udp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, allow_cidrs: { type: array, items: { type: string } }, allow_special_cidrs: { type: array, items: { type: string } }, max_connections: { type: integer, minimum: 0, maximum: 1048576 } } }
+    Service: { type: object, required: [id, agent_id, protocol, local_target, public_bind], properties: { id: { type: string }, agent_id: { type: string }, protocol: { type: string, enum: [tcp, udp] }, local_target: { type: string }, public_bind: { type: string }, public_port: { type: integer, minimum: 0, maximum: 65535 }, gateway_selector: { type: object }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
+    Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
+    EnrollmentTokenRequest: { type: object, properties: { ttl_seconds: { type: integer, minimum: 1, maximum: 900 } } }
+    APITokenRequest: { type: object, required: [name], properties: { name: { type: string }, expires_at: { type: string, format: date-time } } }
+    RuntimeRateLimit: { type: object, required: [direction, bytes_per_second, burst_bytes, expires_at], properties: { direction: { type: string, enum: [in, out, both] }, bytes_per_second: { type: integer, format: int64 }, burst_bytes: { type: integer, format: int64 }, expires_at: { type: string, format: date-time } } }
+    RuntimeConnection:
+      type: object
+      required: [id, type, node_id, protocol, started_at, last_activity_at, state, bytes_in, bytes_out, rate_in_bps, rate_out_bps]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [session, tcp, udp_flow, egress] }
+        node_id: { type: string }
+        peer_node_id: { type: string }
+        gateway_id: { type: string }
+        agent_id: { type: string }
+        assignment_id: { type: string }
+        service_id: { type: string }
+        protocol: { type: string, enum: [tcp, udp, quic] }
+        source_ip: { type: string }
+        source_port: { type: integer, minimum: 0, maximum: 65535 }
+        target: { type: string }
+        parent_session_id: { type: string }
+        started_at: { type: string, format: date-time }
+        last_activity_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        state: { type: string, enum: [active, closed, unknown] }
+        close_reason: { type: string }
+        bytes_in: { type: integer, format: int64, minimum: 0 }
+        bytes_out: { type: integer, format: int64, minimum: 0 }
+        rate_in_bps: { type: number, format: double, minimum: 0, description: Cumulative average bytes per second since started_at }
+        rate_out_bps: { type: number, format: double, minimum: 0, description: Cumulative average bytes per second since started_at }
+        limit: { $ref: '#/components/schemas/RuntimeRateLimit' }
+    RuntimeAction:
+      type: object
+      required: [action]
+      description: A selector is required for a node-level action. The connection action path supplies connection_id from the URL.
+      properties:
+        action: { type: string, enum: [disconnect, rate_limit, clear_limit] }
+        selector: { type: object, properties: { connection_id: { type: string }, source_ip: { type: string }, peer_node_id: { type: string }, assignment_id: { type: string }, service_id: { type: string }, protocol: { type: string } } }
+        direction: { type: string, enum: [in, out, both] }
+        bytes_per_second: { type: integer, format: int64, minimum: 1 }
+        burst_bytes: { type: integer, format: int64, minimum: 1 }
+        ttl_seconds: { type: integer, minimum: 60, maximum: 86400 }
+    SecretAlreadyCreated:
+      type: object
+      required: [error, token_recoverable]
+      properties:
+        error: { type: object, properties: { code: { type: string, enum: [already_created] }, message: { type: string } } }
+        token_recoverable: { type: boolean, enum: [false] }
+        metadata: { type: object }
+        token_metadata: { type: object }
+    ErrorResponse: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, path: { type: string }, retryable: { type: boolean } } } } }

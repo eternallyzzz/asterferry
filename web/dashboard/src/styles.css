@@ -1,0 +1,139 @@
+/* AsterFerry Dashboard 设计系统：token（浅色默认 / 深色覆盖）、元素级 base、少量工具类。
+   业务样式一律写入各 SFC 的 <style scoped>，全局只保留变量与元素级基础。 */
+
+:root {
+  color-scheme: light;
+  /* 品牌 */
+  --af-accent: #2f6bff;
+  --af-accent-strong: #1f5aeb;
+  --af-accent-soft: #ebf1ff;
+  --af-on-accent: #ffffff;
+  /* 背景与表面 */
+  --af-bg: #f7f8fa;
+  --af-panel: #ffffff;
+  --af-panel-soft: #fafbfc;
+  --af-header-bg: rgba(255, 255, 255, 0.72);
+  --af-mask: rgba(11, 18, 32, 0.32);
+  /* 文字 */
+  --af-text: #0b1220;
+  --af-muted: #5b6472;
+  --af-faint: #9aa3b2;
+  /* 边框 */
+  --af-border: #e5e7eb;
+  --af-border-soft: #eef0f3;
+  /* 状态语义 */
+  --af-green: #16a34a;
+  --af-green-soft: #e9f7ee;
+  --af-amber: #d97706;
+  --af-amber-soft: #fcf3e3;
+  --af-red: #dc2626;
+  --af-red-soft: #fcecec;
+  /* 阴影（弱层级） */
+  --af-shadow-sm: 0 1px 2px rgba(11, 18, 32, 0.05);
+  --af-shadow: 0 1px 2px rgba(11, 18, 32, 0.04), 0 6px 20px rgba(11, 18, 32, 0.06);
+  --af-shadow-lg: 0 12px 40px rgba(11, 18, 32, 0.14);
+  /* 圆角 */
+  --af-radius-sm: 8px;
+  --af-radius: 12px;
+  --af-radius-lg: 16px;
+  /* 字体 */
+  --af-font: "PingFang SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --af-mono: "SFMono-Regular", ui-monospace, Consolas, "Liberation Mono", monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --af-accent: #5b8cff;
+  --af-accent-strong: #7aa3ff;
+  --af-accent-soft: rgba(91, 140, 255, 0.16);
+  --af-on-accent: #ffffff;
+  --af-bg: #0f1218;
+  --af-panel: #171c25;
+  --af-panel-soft: #1c222d;
+  --af-header-bg: rgba(15, 18, 24, 0.72);
+  --af-mask: rgba(0, 0, 0, 0.5);
+  --af-text: #e9ecf2;
+  --af-muted: #9aa3b2;
+  --af-faint: #6b7482;
+  --af-border: #262d38;
+  --af-border-soft: #20262f;
+  --af-green: #3ecf7a;
+  --af-green-soft: rgba(62, 207, 122, 0.14);
+  --af-amber: #e8a33d;
+  --af-amber-soft: rgba(232, 163, 61, 0.14);
+  --af-red: #f06b6b;
+  --af-red-soft: rgba(240, 107, 107, 0.14);
+  --af-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --af-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 20px rgba(0, 0, 0, 0.3);
+  --af-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; margin: 0; }
+body {
+  min-width: 320px;
+  background: var(--af-bg);
+  color: var(--af-text);
+  font-family: var(--af-font);
+  font-size: 13px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+button { padding: 0; border: 0; background: transparent; cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+code, pre { font-family: var(--af-mono); }
+a { color: var(--af-accent); text-decoration: none; }
+::selection { background: var(--af-accent-soft); }
+
+:where(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-sm);
+  outline: none;
+  background: var(--af-panel);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+:where(input:not([type="checkbox"]):not([type="radio"]):focus, select:focus, textarea:focus) {
+  border-color: var(--af-accent);
+  box-shadow: 0 0 0 3px var(--af-accent-soft);
+}
+:where(input::placeholder, textarea::placeholder) { color: var(--af-faint); }
+:where(input:disabled, select:disabled, textarea:disabled) { opacity: 0.55; }
+:where(input[type="checkbox"], input[type="radio"]) { accent-color: var(--af-accent); }
+
+.muted { color: var(--af-muted); }
+.mono { font-family: var(--af-mono); }
+
+/* 按钮工具类：全站统一的主/次/危险/文字按钮 */
+.af-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--af-radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+.af-button:active:not(:disabled) { transform: scale(0.98); }
+.af-button:disabled { opacity: 0.45; }
+.af-button.primary { color: var(--af-on-accent); background: var(--af-accent); }
+.af-button.primary:hover:not(:disabled) { background: var(--af-accent-strong); }
+.af-button.secondary { border-color: var(--af-border); color: var(--af-text); background: var(--af-panel); }
+.af-button.secondary:hover:not(:disabled) { background: var(--af-panel-soft); }
+.af-button.danger { color: var(--af-on-accent); background: var(--af-red); }
+.af-button.text { padding: 4px 6px; color: var(--af-accent); }
+.af-button.text:hover:not(:disabled) { background: var(--af-accent-soft); }
+.af-button.danger-text { padding: 4px 6px; color: var(--af-red); }
+.af-button.danger-text:hover:not(:disabled) { background: var(--af-red-soft); }
+
+@keyframes af-spin { to { transform: rotate(360deg); } }

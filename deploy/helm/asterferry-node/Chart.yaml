@@ -1,0 +1,6 @@
+apiVersion: v2
+name: asterferry-node
+description: AsterFerry data-plane Node; behavior is selected by the Controller
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

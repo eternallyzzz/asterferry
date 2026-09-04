@@ -1,0 +1,12 @@
+image:
+  repository: ghcr.io/eternallyzzz/asterferry
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+bootstrapSecret: asterferry-node-bootstrap
+bootstrapKey: bootstrap.json
+bootstrapInitImage: busybox:1.36
+stateSize: 1Gi
+stateStorageClass: ""
+dataPort: 4433
+resources: {}

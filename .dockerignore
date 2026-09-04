@@ -1,0 +1,17 @@
+.git
+.github
+.idea
+.vscode
+node_modules/
+**/node_modules/
+web/dashboard/node_modules/
+internal/dashboard/dist/
+*.exe
+*.log
+*.err
+*.key
+*.crt
+*.pem
+*.token
+secrets/
+tmp/

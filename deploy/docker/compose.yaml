@@ -1,0 +1,82 @@
+services:
+  controller:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${ASTERFERRY_IMAGE:-asterferry:local}
+    user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
+    command: ["controller", "run", "--config", "/var/lib/asterferry/controller.json"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "${ASTERFERRY_CONTROLLER_HTTPS_PORT:-8443}:8443/tcp"
+      - "${ASTERFERRY_CONTROLLER_GRPC_PORT:-9443}:9443/tcp"
+    volumes:
+      # Holds controller.json and the local PKI/master key. With PostgreSQL,
+      # the database itself remains external and this volume still holds the
+      # Controller identity material.
+      - ${ASTERFERRY_CONTROLLER_DIR:-../../controller}:/var/lib/asterferry:rw
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/asterferry", "healthcheck", "--url", "https://127.0.0.1:8443/healthz", "--insecure-tls"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  # These service names are deployment slots kept for compose compatibility;
+  # each process starts as a generic Node and receives its behavior from the
+  # Controller after enrollment.
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${ASTERFERRY_IMAGE:-asterferry:local}
+    user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
+    command: ["node", "run", "--bootstrap", "/var/lib/asterferry/gateway-bootstrap.json"]
+    working_dir: /var/lib/asterferry
+    restart: unless-stopped
+    stop_grace_period: 35s
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=16m"
+    depends_on:
+      controller:
+        condition: service_healthy
+    ports:
+      - "${ASTERFERRY_GATEWAY_DATA_PORT:-4433}:4433/udp"
+    volumes:
+      # The node atomically replaces this file when the Controller rotates its
+      # certificate. Keep the containing state directory writable as well.
+      - ${ASTERFERRY_GATEWAY_BOOTSTRAP:-../../nodes/gateway-bootstrap.json}:/var/lib/asterferry/gateway-bootstrap.json:rw
+      - ${ASTERFERRY_GATEWAY_STATE:-../../nodes/gateway-state}:/var/lib/asterferry/state:rw
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${ASTERFERRY_IMAGE:-asterferry:local}
+    user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
+    command: ["node", "run", "--bootstrap", "/var/lib/asterferry/agent-bootstrap.json"]
+    working_dir: /var/lib/asterferry
+    restart: unless-stopped
+    stop_grace_period: 35s
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=16m"
+    depends_on:
+      controller:
+        condition: service_healthy
+    volumes:
+      # The node atomically replaces this file when the Controller rotates its
+      # certificate. Keep the containing state directory writable as well.
+      - ${ASTERFERRY_AGENT_BOOTSTRAP:-../../nodes/agent-bootstrap.json}:/var/lib/asterferry/agent-bootstrap.json:rw
+      - ${ASTERFERRY_AGENT_STATE:-../../nodes/agent-state}:/var/lib/asterferry/state:rw
