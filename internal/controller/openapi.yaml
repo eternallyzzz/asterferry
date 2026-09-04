@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: AsterFerry Controller API
-  version: 2.0.0
-  description: Authoritative control-plane API for the AsterFerry v2.0.0 normalized architecture. Gateway and Agent business traffic never traverses this API.
+  version: 1.0.0
+  description: Authoritative control-plane API for the AsterFerry v1.0.0 normalized architecture. Gateway and Agent business traffic never traverses this API.
 servers:
   - url: /api/v1
 tags:

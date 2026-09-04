@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.0.0] - Unreleased
+## [1.0.0] - Unreleased
 
 This release is a deliberate breaking cutover to the normalized Controller/
 data-plane architecture.

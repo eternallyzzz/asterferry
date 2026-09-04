@@ -130,7 +130,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 `
   --grpc-listen controller.example.com:9443 `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 2.0.0
+  --release-version 1.0.0
 ```
 
 ```sh
@@ -142,7 +142,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 \
   --grpc-listen controller.example.com:9443 \
   --grpc-advertise controller.example.com:9443 \
-  --release-version 2.0.0
+  --release-version 1.0.0
 ```
 
 `--grpc-advertise` is the address that A and B use to reach C. Replace
@@ -162,7 +162,7 @@ asterferry.exe controller configure `
 ```
 
 If the old configuration also has no published `release_version`, add
-`--release-version 2.0.0`; add `--release-base-url` when using a private HTTPS
+`--release-version 1.0.0`; add `--release-base-url` when using a private HTTPS
 release mirror.
 
 The command reissues the Controller certificate with the new address in its

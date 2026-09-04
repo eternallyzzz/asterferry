@@ -35,7 +35,7 @@ func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 	config := DefaultConfig(dir)
 	config.GRPCAdvertise = "controller.example.com:9443"
 	config.ReleaseBaseURL = "https://mirror.example.com/asterferry/releases/download"
-	config.ReleaseVersion = "1.2.3"
+	config.ReleaseVersion = "1.2.3-rc.4"
 	caPEM := []byte("-----BEGIN CERTIFICATE-----\ncontroller-ca\n-----END CERTIFICATE-----\n")
 	if err := os.MkdirAll(filepath.Dir(config.CACertPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -50,11 +50,11 @@ func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"https://mirror.example.com/asterferry/releases/download/v1.2.3/install-node.sh",
+		"https://mirror.example.com/asterferry/releases/download/v1.2.3-rc.4/install-node.sh",
 		"--node-id 'gw-public'",
 		"--controller 'controller.example.com:9443'",
 		"--token 'afn_token'",
-		"--version '1.2.3'",
+		"--version '1.2.3-rc.4'",
 		"--arch 'amd64'",
 	} {
 		if !strings.Contains(linux.Command, want) {
@@ -74,7 +74,7 @@ func TestNodeBootstrapCommandIncludesReleaseAndEnrollmentInputs(t *testing.T) {
 		"-NodeId 'gw-public'",
 		"-Controller 'controller.example.com:9443'",
 		"-Token 'afn_token'",
-		"-Version '1.2.3'",
+		"-Version '1.2.3-rc.4'",
 		"-Arch 'amd64'",
 	} {
 		if !strings.Contains(windows.Command, want) {

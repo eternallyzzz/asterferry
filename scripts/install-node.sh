@@ -4,7 +4,7 @@ set -Eeuo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage: install-node.sh --node-id ID --controller HOST:PORT
-  --token TOKEN --ca-pem-b64 BASE64 --release-base-url URL --version X.Y.Z --arch amd64|arm64
+  --token TOKEN --ca-pem-b64 BASE64 --release-base-url URL --version X.Y.Z[-rc.N] --arch amd64|arm64
 USAGE
   exit 2
 }
@@ -32,7 +32,7 @@ while (($# > 0)); do
 done
 
 [[ "$EXPECTED_ARCH" == "amd64" || "$EXPECTED_ARCH" == "arm64" ]] || { echo "arch must be amd64 or arm64" >&2; exit 2; }
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z" >&2; exit 2; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || { echo "version must be X.Y.Z or X.Y.Z-rc.N" >&2; exit 2; }
 [[ -n "$NODE_ID" && -n "$CONTROLLER" && -n "$TOKEN" && -n "$CA_PEM_B64" && -n "$RELEASE_BASE_URL" ]] || usage
 [[ "$(id -u)" -eq 0 ]] || { echo "run this installer as root (the generated command uses sudo)" >&2; exit 1; }
 

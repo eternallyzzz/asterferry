@@ -130,7 +130,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 `
   --grpc-listen controller.example.com:9443 `
   --grpc-advertise controller.example.com:9443 `
-  --release-version 2.0.0
+  --release-version 1.0.0
 ```
 
 ```sh
@@ -142,7 +142,7 @@ asterferry.exe controller init `
   --http-listen controller.example.com:8443 \
   --grpc-listen controller.example.com:9443 \
   --grpc-advertise controller.example.com:9443 \
-  --release-version 2.0.0
+  --release-version 1.0.0
 ```
 
 `--grpc-advertise` 是 A、B 实际连接的 C 地址；`--release-version` 必须替换为已经发布到 `release_base_url` 的版本。初始化会把广播地址写入 Controller 证书 SAN。自建发布镜像可通过 `--release-base-url` 指定，但必须是 HTTPS。
@@ -156,7 +156,7 @@ asterferry.exe controller configure `
 ```
 
 如果旧配置也没有已发布的 `release_version`，再加上
-`--release-version 2.0.0`；使用私有 HTTPS 发布镜像时再加
+`--release-version 1.0.0`；使用私有 HTTPS 发布镜像时再加
 `--release-base-url`。
 
 该命令会重新签发包含新地址 SAN 的 Controller 证书。重启 Controller 后再生成节点安装命令。Windows Controller 与本机 WSL 联调时，WSL 通常可访问 `172.28.80.1:9443`；远程节点必须使用 C 的稳定局域网地址或 DNS，不能使用这个 WSL 虚拟地址。

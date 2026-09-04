@@ -16,7 +16,7 @@ For a copy-and-run three-server walkthrough in both languages, see the
 ```sh
 asterferry controller init --dir /var/lib/asterferry \
   --grpc-advertise controller.example.com:9443 \
-  --release-version 2.0.0
+  --release-version 1.0.0
 asterferry controller run --config /var/lib/asterferry/controller.json
 ```
 
@@ -156,7 +156,7 @@ release pipelines.
 ```sh
 go test ./...
 go vet ./...
-npm --prefix web/dashboard ci
+npm --prefix web/dashboard ci --audit=false --registry=https://registry.npmjs.org --replace-registry-host=always
 npm --prefix web/dashboard test -- --run
 npm --prefix web/dashboard run build
 go build -tags=dashboard_assets ./cmd/asterferry
@@ -166,9 +166,9 @@ docker compose -f deploy/docker/compose.yaml config
 
 ## Release artifacts
 
-The normalized architecture uses `v2.0.0` as its first public release version.
+The normalized architecture uses `v1.0.0` as its first public release version.
 Controller and Node installations must use the same version and must not mix
-these binaries with the pre-architecture generation. A tagged release
+these binaries with the pre-release generation. A tagged release
 publishes the native archives and `install-node.sh`/`install-node.ps1` to the
 GitHub Release, together with `SHA256SUMS` and a source SBOM. It also publishes
 the multi-architecture image at `ghcr.io/eternallyzzz/asterferry` and the
@@ -176,7 +176,7 @@ the multi-architecture image at `ghcr.io/eternallyzzz/asterferry` and the
 under `ghcr.io/eternallyzzz/charts`.
 
 Verify the downloaded archive against `SHA256SUMS` before installation. For a
-fresh deployment, initialize the Controller with `--release-version 2.0.0` so
+fresh deployment, initialize the Controller with `--release-version 1.0.0` so
 generated Node installation commands refer to the matching release assets. The
 release manifest records immutable image and Chart digests; set Helm's
 `image.digest` to pin an installation, which takes precedence over
