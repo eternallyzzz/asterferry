@@ -156,7 +156,7 @@ release pipelines.
 ```sh
 go test ./...
 go vet ./...
-npm --prefix web/dashboard ci
+npm --prefix web/dashboard ci --audit=false --registry=https://registry.npmjs.org --replace-registry-host=always
 npm --prefix web/dashboard test -- --run
 npm --prefix web/dashboard run build
 go build -tags=dashboard_assets ./cmd/asterferry
