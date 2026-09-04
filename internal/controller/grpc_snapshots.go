@@ -61,7 +61,7 @@ func (s *ControlServer) pushSnapshots(ctx context.Context, cancel context.Cancel
 			if !ok {
 				return
 			}
-			snapshot, err := s.store.EnsureDesiredSnapshot(ctx, nodeID)
+			snapshot, err := s.resources.EnsureDesiredSnapshot(ctx, nodeID)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					continue
@@ -88,7 +88,7 @@ func (s *ControlServer) pushSnapshots(ctx context.Context, cancel context.Cancel
 func (s *ControlServer) sendSnapshotForWire(ctx context.Context, cancel context.CancelFunc, snapshot SnapshotRecord, send func(*v1.ControllerMessage) error, lastSent *atomic.Uint64) error {
 	retryDelay := snapshotWireRetryStart
 	for attempt := 1; ; attempt++ {
-		wireDocument, err := s.store.SnapshotDocumentForWire(snapshot.Document)
+		wireDocument, err := s.resources.SnapshotDocumentForWire(snapshot.Document)
 		if err == nil {
 			message := &v1.ControllerMessage{Body: &v1.ControllerMessage_DesiredSnapshot{DesiredSnapshot: &v1.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeId: snapshot.NodeID, Generation: snapshot.Generation, Checksum: snapshot.Checksum, DocumentJson: wireDocument}}}
 			if err := send(message); err != nil {

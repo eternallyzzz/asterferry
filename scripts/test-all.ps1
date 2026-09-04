@@ -213,11 +213,11 @@ try {
     $oldDashboardOut = $env:ASTERFERRY_DASHBOARD_OUT
     try {
         $env:ASTERFERRY_DASHBOARD_OUT = (Join-Path $root "internal/dashboard/dist")
-        Invoke-Logged "Dashboard npm dependencies" "npm" @("--prefix", $frontendTemp, "ci")
+        Invoke-Logged "Dashboard npm dependencies" "npm" @("--prefix", $frontendTemp, "ci", "--audit=false")
         Invoke-Logged "Dashboard type check" "npm" @("--prefix", $frontendTemp, "run", "lint")
         Invoke-Logged "Dashboard unit tests" "npm" @("--prefix", $frontendTemp, "test")
         Invoke-Logged "Dashboard production build" "npm" @("--prefix", $frontendTemp, "run", "build")
-        Invoke-Logged "Dashboard dependency audit" "npm" @("--prefix", $frontendTemp, "audit", "--registry=https://registry.npmjs.org", "--omit=dev", "--audit-level=high")
+        Invoke-Logged "Dashboard dependency audit" "npm" @("--prefix", $frontendTemp, "audit", "--registry=https://registry.npmjs.org", "--audit-level=high")
     } finally {
         if ($null -eq $oldDashboardOut) { Remove-Item Env:ASTERFERRY_DASHBOARD_OUT -ErrorAction SilentlyContinue } else { $env:ASTERFERRY_DASHBOARD_OUT = $oldDashboardOut }
         if ($null -ne $frontendTemp -and (Test-Path -LiteralPath $frontendTemp)) { Remove-Item -LiteralPath $frontendTemp -Recurse -Force -ErrorAction SilentlyContinue }

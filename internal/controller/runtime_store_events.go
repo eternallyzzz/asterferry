@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func (s *Repository) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventType string, payload []byte, createdAt time.Time) error {
+func (s *RuntimeRepository) RecordRuntimeEvent(ctx context.Context, nodeID, eventID, eventType string, payload []byte, createdAt time.Time) error {
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
 		return err
 	}

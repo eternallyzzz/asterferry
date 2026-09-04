@@ -8,7 +8,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-func (s *Repository) GetAssignment(ctx context.Context, id string) (domain.Assignment, error) {
+func (s *ResourceRepository) GetAssignment(ctx context.Context, id string) (domain.Assignment, error) {
 	return loadAssignmentNormalized(ctx, s.db, id)
 }
 
@@ -18,7 +18,7 @@ func assignmentParticipantsApplied(ctx context.Context, tx *sql.Tx, assignment d
 	return count == 2, err
 }
 
-func (s *Repository) ListAssignments(ctx context.Context, gatewayID, agentID string) ([]domain.Assignment, error) {
+func (s *ResourceRepository) ListAssignments(ctx context.Context, gatewayID, agentID string) ([]domain.Assignment, error) {
 	query := `SELECT id FROM assignments WHERE 1=1`
 	args := []any{}
 	if gatewayID != "" {

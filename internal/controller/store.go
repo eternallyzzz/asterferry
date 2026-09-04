@@ -10,36 +10,81 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Repository struct {
-	db        *sql.DB
-	path      string
-	dialect   databaseDialect
+// databaseHandle owns only the physical database lifecycle. Resource and
+// runtime repositories embed the same handle so they share one connection
+// pool without sharing business methods.
+type databaseHandle struct {
+	db      *sql.DB
+	path    string
+	dialect databaseDialect
+	close   sync.Once
+	err     error
+}
+
+// ResourceRepository owns low-frequency control-plane state: users,
+// enrollment, normalized resources, snapshots, observed state, and audit
+// records. Runtime telemetry deliberately lives in RuntimeRepository.
+type ResourceRepository struct {
+	*databaseHandle
 	masterKey [masterKeyBytes]byte
 	changes   *ChangeBus
-
-	close     sync.Once
-	err       error
-	changesMu sync.Mutex
 	// Snapshot materialization reads a previous generation and then writes a
 	// replacement. Serialize that check-and-write pair so concurrent control
 	// streams cannot publish the same generation with different content.
 	snapshotMu sync.Mutex
 }
 
-// ChangeBus returns the process-local notification bus owned by the
-// Controller composition root. Repository persistence and subscriptions are
-// deliberately separate concerns; this accessor exists only while composing
-// the two at the application boundary.
-func (s *Repository) ChangeBus() *ChangeBus {
+// RuntimeRepository owns high-frequency runtime connections, events, and
+// traffic rollups. It shares the database handle and notification bus with
+// ResourceRepository, but has no resource CRUD surface.
+type RuntimeRepository struct {
+	*databaseHandle
+	changes *ChangeBus
+}
+
+// ControllerRepositories is the composition root for the two repositories
+// and their process-local change bus. It contains lifecycle wiring only; it
+// intentionally does not proxy repository operations.
+type ControllerRepositories struct {
+	Resources *ResourceRepository
+	Runtime   *RuntimeRepository
+	Changes   *ChangeBus
+	*databaseHandle
+}
+
+func (s *ResourceRepository) ChangeBus() *ChangeBus {
 	if s == nil {
 		return nil
 	}
-	s.changesMu.Lock()
-	defer s.changesMu.Unlock()
-	if s.changes == nil {
-		s.changes = newChangeBus()
+	return s.changes
+}
+
+func (s *RuntimeRepository) ChangeBus() *ChangeBus {
+	if s == nil {
+		return nil
 	}
 	return s.changes
+}
+
+func (s *ControllerRepositories) ChangeBus() *ChangeBus {
+	if s == nil {
+		return nil
+	}
+	return s.Changes
+}
+
+// Close wakes subscribers before releasing the shared connection pool.
+func (s *ControllerRepositories) Close() error {
+	if s == nil {
+		return nil
+	}
+	if s.Changes != nil {
+		s.Changes.Close()
+	}
+	if s.databaseHandle == nil {
+		return nil
+	}
+	return s.databaseHandle.closeDatabase()
 }
 
 type RevisionConflictError struct {

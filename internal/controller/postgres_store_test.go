@@ -27,17 +27,18 @@ func TestPostgresStoreSchemaAndRuntimeEvent(t *testing.T) {
 	_, databaseURL := createPostgresTestSchema(t, baseURL)
 	config := Config{DatabaseDriver: DatabaseDriverPostgres, DatabaseURL: databaseURL, DatabaseMaxOpenConns: 4}
 	key := make([]byte, masterKeyBytes)
-	store, err := OpenStoreWithConfig(config, key)
+	repositories, err := OpenControllerRepositoriesWithConfig(config, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	if store.DatabaseDriver() != DatabaseDriverPostgres {
-		t.Fatalf("database driver = %q", store.DatabaseDriver())
+	defer repositories.Close()
+	resources, runtime := repositories.Resources, repositories.Runtime
+	if repositories.DatabaseDriver() != DatabaseDriverPostgres {
+		t.Fatalf("database driver = %q", repositories.DatabaseDriver())
 	}
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	if err := store.CreateNode(context.Background(), domain.Node{ID: "pg-node", Name: "PostgreSQL node", Enabled: true}, WriteOptions{}); err != nil {
+	if err := resources.CreateNode(context.Background(), domain.Node{ID: "pg-node", Name: "PostgreSQL node", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	connection := domain.RuntimeConnection{ID: "connection-1", Type: domain.RuntimeConnectionTCP, NodeID: "pg-node", Protocol: domain.ProtocolTCP, SourceIP: "192.0.2.1", SourcePort: 443, StartedAt: now, LastActivityAt: now, State: domain.RuntimeStateActive}
@@ -46,27 +47,27 @@ func TestPostgresStoreSchemaAndRuntimeEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordRuntimeEvent(context.Background(), "pg-node", event.ID, "runtime_connection", payload, now); err != nil {
+	if err := runtime.RecordRuntimeEvent(context.Background(), "pg-node", event.ID, "runtime_connection", payload, now); err != nil {
 		t.Fatal(err)
 	}
-	connections, err := store.ListRuntimeConnections(context.Background(), RuntimeConnectionFilter{NodeID: "pg-node", Limit: 10})
+	connections, err := runtime.ListRuntimeConnections(context.Background(), RuntimeConnectionFilter{NodeID: "pg-node", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(connections) != 1 || connections[0].ID != connection.ID || connections[0].BytesIn != 0 {
 		t.Fatalf("unexpected PostgreSQL runtime connections: %#v", connections)
 	}
-	events, err := store.ListRuntimeEvents(context.Background(), "pg-node", 10)
+	events, err := runtime.ListRuntimeEvents(context.Background(), "pg-node", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].EventID != event.ID {
 		t.Fatalf("unexpected PostgreSQL runtime events: %#v", events)
 	}
-	if err := store.SetAdvancedOperationsEnabled(context.Background(), true, WriteOptions{Actor: "test"}); err != nil {
+	if err := resources.SetAdvancedOperationsEnabled(context.Background(), true, WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	enabled, err := store.AdvancedOperationsEnabled(context.Background())
+	enabled, err := resources.AdvancedOperationsEnabled(context.Background())
 	if err != nil || !enabled {
 		t.Fatalf("advanced operations enabled = %v, err=%v", enabled, err)
 	}
@@ -237,7 +238,7 @@ func TestPostgresAssignmentAcknowledgementsSerializeByAssignment(t *testing.T) {
 	}
 }
 
-func openTwoPostgresTestStores(t *testing.T) (*Repository, *Repository) {
+func openTwoPostgresTestStores(t *testing.T) (*ResourceRepository, *ResourceRepository) {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("ASTERFERRY_TEST_POSTGRES_URL"))
 	if baseURL == "" {
@@ -245,20 +246,20 @@ func openTwoPostgresTestStores(t *testing.T) (*Repository, *Repository) {
 	}
 	_, databaseURL := createPostgresTestSchema(t, baseURL)
 	config := Config{DatabaseDriver: DatabaseDriverPostgres, DatabaseURL: databaseURL, DatabaseMaxOpenConns: 4}
-	first, err := OpenStoreWithConfig(config, testMasterKey)
+	firstRepositories, err := OpenControllerRepositoriesWithConfig(config, testMasterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := OpenStoreWithConfig(config, testMasterKey)
+	secondRepositories, err := OpenControllerRepositoriesWithConfig(config, testMasterKey)
 	if err != nil {
-		_ = first.Close()
+		_ = firstRepositories.Close()
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = second.Close()
-		_ = first.Close()
+		_ = secondRepositories.Close()
+		_ = firstRepositories.Close()
 	})
-	return first, second
+	return firstRepositories.Resources, secondRepositories.Resources
 }
 
 func TestInitPostgresUsesExternalDatabaseWithoutLocalDatabaseFile(t *testing.T) {
@@ -289,12 +290,12 @@ func TestInitPostgresUsesExternalDatabaseWithoutLocalDatabaseFile(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStoreWithConfig(loaded, key)
+	repositories, err := OpenControllerRepositoriesWithConfig(loaded, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	if _, err := store.GetUser(context.Background(), result.Admin.ID); err != nil {
+	defer repositories.Close()
+	if _, err := repositories.Resources.GetUser(context.Background(), result.Admin.ID); err != nil {
 		t.Fatal(err)
 	}
 }

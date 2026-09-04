@@ -59,21 +59,21 @@ func TestConfigMetricsListenCanBeDisabledAndMustBeValid(t *testing.T) {
 }
 
 func TestMetricsListenerIsAnonymousAndManagementMetricsRemainAuthenticated(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
+	repositories, err := openTestRepositories(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	config := DefaultConfig(t.TempDir())
 	config.HTTPListen = "127.0.0.1:0"
 	config.MetricsListen = "127.0.0.1:0"
-	server, err := NewServer(config, store)
+	server, err := NewServer(config, repositories)
 	if err != nil {
-		_ = store.Close()
+		_ = repositories.Close()
 		t.Fatal(err)
 	}
 	defer func() {
 		_ = server.Close()
-		_ = store.Close()
+		_ = repositories.Close()
 	}()
 
 	metrics := httptest.NewRecorder()
@@ -118,20 +118,20 @@ func TestMetricsListenerIsAnonymousAndManagementMetricsRemainAuthenticated(t *te
 }
 
 func TestDisabledMetricsListenerDoesNotBind(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
+	repositories, err := openTestRepositories(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	config := DefaultConfig(t.TempDir())
 	config.MetricsListen = ""
-	server, err := NewServer(config, store)
+	server, err := NewServer(config, repositories)
 	if err != nil {
-		_ = store.Close()
+		_ = repositories.Close()
 		t.Fatal(err)
 	}
 	defer func() {
 		_ = server.Close()
-		_ = store.Close()
+		_ = repositories.Close()
 	}()
 	listener, err := server.MetricsListener()
 	if err != nil {

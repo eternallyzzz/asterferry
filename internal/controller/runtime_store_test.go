@@ -11,11 +11,12 @@ import (
 )
 
 func TestRuntimeStorePersistsLifecycleAndDefaultSafety(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "runtime.db"))
+	repositories, err := openTestRepositories(filepath.Join(t.TempDir(), "runtime.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer repositories.Close()
+	store, runtime := repositories.Resources, repositories.Runtime
 	ctx := context.Background()
 	if err := store.CreateNode(ctx, domain.Node{ID: "node-a", Name: "Node A", Enabled: true}, WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
@@ -32,10 +33,10 @@ func TestRuntimeStorePersistsLifecycleAndDefaultSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordRuntimeEvent(ctx, connection.NodeID, event.ID, "runtime_connection", payload, now); err != nil {
+	if err := runtime.RecordRuntimeEvent(ctx, connection.NodeID, event.ID, "runtime_connection", payload, now); err != nil {
 		t.Fatal(err)
 	}
-	got, err := store.GetRuntimeConnection(ctx, connection.NodeID, connection.ID)
+	got, err := runtime.GetRuntimeConnection(ctx, connection.NodeID, connection.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +54,10 @@ func TestRuntimeStorePersistsLifecycleAndDefaultSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordRuntimeEvent(ctx, connection.NodeID, event.ID, "runtime_connection", payload, ended); err != nil {
+	if err := runtime.RecordRuntimeEvent(ctx, connection.NodeID, event.ID, "runtime_connection", payload, ended); err != nil {
 		t.Fatal(err)
 	}
-	got, err = store.GetRuntimeConnection(ctx, connection.NodeID, connection.ID)
+	got, err = runtime.GetRuntimeConnection(ctx, connection.NodeID, connection.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,15 +69,15 @@ func TestRuntimeStorePersistsLifecycleAndDefaultSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordRuntimeEvent(ctx, connection.NodeID, rejected.ID, "runtime_connection", payload, ended); err != nil {
+	if err := runtime.RecordRuntimeEvent(ctx, connection.NodeID, rejected.ID, "runtime_connection", payload, ended); err != nil {
 		t.Fatal(err)
 	}
 
-	events, err := store.ListRuntimeEvents(ctx, "node-a", 10)
+	events, err := runtime.ListRuntimeEvents(ctx, "node-a", 10)
 	if err != nil || len(events) != 3 {
 		t.Fatalf("runtime events = %d, %v", len(events), err)
 	}
-	rollups, err := store.ListRuntimeTraffic(ctx, "node-a", 10)
+	rollups, err := runtime.ListRuntimeTraffic(ctx, "node-a", 10)
 	if err != nil || len(rollups) == 0 {
 		t.Fatalf("runtime rollups = %+v, %v", rollups, err)
 	}
@@ -98,12 +99,13 @@ func TestRuntimeStorePersistsLifecycleAndDefaultSafety(t *testing.T) {
 }
 
 func TestRuntimeStoreSettingsAndSubscription(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "runtime-settings.db"))
+	repositories, err := openTestRepositories(filepath.Join(t.TempDir(), "runtime-settings.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	changes, unsubscribe := store.ChangeBus().SubscribeRuntimeChanges()
+	defer repositories.Close()
+	store := repositories.Resources
+	changes, unsubscribe := repositories.Changes.SubscribeRuntimeChanges()
 	defer unsubscribe()
 	if err := store.SetAdvancedOperationsEnabled(context.Background(), true, WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)
@@ -120,11 +122,12 @@ func TestRuntimeStoreSettingsAndSubscription(t *testing.T) {
 }
 
 func TestRuntimeTrafficRollupRefreshesPlacementIdentity(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "runtime-rollup.db"))
+	repositories, err := openTestRepositories(filepath.Join(t.TempDir(), "runtime-rollup.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer repositories.Close()
+	store, runtime := repositories.Resources, repositories.Runtime
 	ctx := context.Background()
 	if err := store.CreateNode(ctx, domain.Node{ID: "node-a", Name: "Node A", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
@@ -140,7 +143,7 @@ func TestRuntimeTrafficRollupRefreshesPlacementIdentity(t *testing.T) {
 		Protocol:     domain.ProtocolTCP,
 		BytesIn:      10,
 	}
-	tx, err := store.db.BeginTx(ctx, nil)
+	tx, err := runtime.db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +161,7 @@ func TestRuntimeTrafficRollupRefreshesPlacementIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rollups, err := store.ListRuntimeTraffic(ctx, "node-a", 10)
+	rollups, err := runtime.ListRuntimeTraffic(ctx, "node-a", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

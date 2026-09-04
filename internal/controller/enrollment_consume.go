@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-func (s *Repository) RevokeEnrollmentToken(ctx context.Context, id string) error {
+func (s *ResourceRepository) RevokeEnrollmentToken(ctx context.Context, id string) error {
 	return s.RevokeEnrollmentTokenWithOptions(ctx, id, WriteOptions{Actor: "system"})
 }
 
-func (s *Repository) RevokeEnrollmentTokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
+func (s *ResourceRepository) RevokeEnrollmentTokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -52,7 +52,7 @@ func (s *Repository) RevokeEnrollmentTokenWithOptions(ctx context.Context, id st
 // transaction. Tests exercise it directly.
 //
 //lint:ignore U1000 package tests exercise token consumption directly.
-func (s *Repository) consumeEnrollmentToken(ctx context.Context, plain string) error {
+func (s *ResourceRepository) consumeEnrollmentToken(ctx context.Context, plain string) error {
 	if strings.TrimSpace(plain) == "" {
 		return errors.New("enrollment token is required")
 	}
@@ -104,7 +104,7 @@ func consumeEnrollmentTokenTx(ctx context.Context, tx *sql.Tx, digest string) er
 	return nil
 }
 
-func (s *Repository) validateEnrollmentToken(ctx context.Context, plain string) error {
+func (s *ResourceRepository) validateEnrollmentToken(ctx context.Context, plain string) error {
 	if strings.TrimSpace(plain) == "" {
 		return ErrInvalidEnrollmentToken
 	}

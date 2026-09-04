@@ -6,11 +6,11 @@ import (
 	"asterferry/internal/domain"
 )
 
-var _ SchedulingRepository = (*Repository)(nil)
+var _ SchedulingRepository = (*ResourceRepository)(nil)
 
 // SchedulingRepository is the persistence port used by Scheduler. Keeping
 // this port at the scheduling boundary prevents placement decisions from
-// depending on SQL details or the complete Repository surface.
+// depending on SQL details or the complete resource repository surface.
 type SchedulingRepository interface {
 	GetNode(context.Context, string) (domain.Node, error)
 	GetNodeSpec(context.Context, string) (domain.NodeSpec, error)

@@ -11,7 +11,7 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		items, err := s.store.ListServices(r.Context(), r.URL.Query().Get("agent_id"))
+		items, err := s.resources.ListServices(r.Context(), r.URL.Query().Get("agent_id"))
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -32,11 +32,11 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := s.store.PutService(r.Context(), service, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutService(r.Context(), service, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	created, err := s.store.GetService(r.Context(), service.ID)
+	created, err := s.resources.GetService(r.Context(), service.ID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -55,7 +55,7 @@ func (s *Server) serviceAction(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		item, err := s.store.GetService(r.Context(), id)
+		item, err := s.resources.GetService(r.Context(), id)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -74,7 +74,7 @@ func (s *Server) serviceAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 			return
 		}
-		if err := s.store.DeleteService(r.Context(), id, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.DeleteService(r.Context(), id, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -98,7 +98,7 @@ func (s *Server) serviceAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	service, getErr := s.store.GetService(r.Context(), id)
+	service, getErr := s.resources.GetService(r.Context(), id)
 	if getErr != nil {
 		writeStoreError(w, getErr)
 		return
@@ -129,11 +129,11 @@ func (s *Server) serviceAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 		return
 	}
-	if err := s.store.PutService(r.Context(), service, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutService(r.Context(), service, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, readErr := s.store.GetService(r.Context(), id)
+	updated, readErr := s.resources.GetService(r.Context(), id)
 	if readErr != nil {
 		writeStoreError(w, readErr)
 		return

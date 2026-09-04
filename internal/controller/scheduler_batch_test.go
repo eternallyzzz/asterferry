@@ -64,7 +64,7 @@ func TestLoadGatewayCandidatesUsesBoundedBatchQueries(t *testing.T) {
 	})
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	repository := &Repository{db: db, dialect: sqliteDialect{}}
+	repository := &ResourceRepository{databaseHandle: &databaseHandle{db: db, dialect: sqliteDialect{}}, changes: newChangeBus()}
 	candidates, err := repository.LoadGatewayCandidates(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestListServicesUsesBatchAggregateLoads(t *testing.T) {
 	})
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	repository := &Repository{db: db, dialect: sqliteDialect{}}
+	repository := &ResourceRepository{databaseHandle: &databaseHandle{db: db, dialect: sqliteDialect{}}, changes: newChangeBus()}
 	services, err := repository.ListServices(ctx, "agent-1")
 	if err != nil {
 		t.Fatal(err)

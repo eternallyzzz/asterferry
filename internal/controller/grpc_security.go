@@ -23,7 +23,7 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 	if strings.TrimSpace(nodeID) == "" {
 		return errors.New("node id is required")
 	}
-	node, err := s.store.GetNode(ctx, nodeID)
+	node, err := s.resources.GetNode(ctx, nodeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNodeNotEnrolled
@@ -31,7 +31,7 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 		return storageFailure("load node for revocation", err)
 	}
 	node.CertificateState = domain.CertificateRevoked
-	if err := s.store.UpdateNode(ctx, node, WriteOptions{IfMatch: node.Revision, Actor: "system"}); err != nil {
+	if err := s.resources.UpdateNode(ctx, node, WriteOptions{IfMatch: node.Revision, Actor: "system"}); err != nil {
 		return err
 	}
 	// Revocation is an immediate data-plane security event as well as a
@@ -49,12 +49,12 @@ func (s *ControlServer) RevokeNode(ctx context.Context, nodeID string) error {
 	if send != nil {
 		if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "reconnect"}}}); err != nil {
 			slog.Default().Error("failed to deliver node revocation action", "node_id", nodeID, "error", err)
-			if eventErr := s.store.RecordEvent(context.Background(), "system", "", "action_delivery_failed", "reconnect action could not be delivered", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
+			if eventErr := s.resources.RecordEvent(context.Background(), "system", "", "action_delivery_failed", "reconnect action could not be delivered", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
 				slog.Default().Error("failed to record node revocation delivery event", "node_id", nodeID, "error", eventErr)
 			}
 		}
 	} else {
-		if eventErr := s.store.RecordEvent(context.Background(), "system", "", "action_not_delivered", "reconnect action queued for next connection", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
+		if eventErr := s.resources.RecordEvent(context.Background(), "system", "", "action_not_delivered", "reconnect action queued for next connection", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
 			slog.Default().Error("failed to record node revocation queued event", "node_id", nodeID, "error", eventErr)
 		}
 	}

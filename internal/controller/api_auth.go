@@ -35,7 +35,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many failed login attempts")
 		return
 	}
-	user, err := s.store.Authenticate(r.Context(), input.Username, input.Password)
+	user, err := s.resources.Authenticate(r.Context(), input.Username, input.Password)
 	if err != nil {
 		if !isCredentialError(err) {
 			slog.Default().Error("controller login storage failure", "error", err)
@@ -88,7 +88,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
 		parts := strings.Fields(header)
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
-			user, err = s.store.AuthenticateToken(r.Context(), parts[1])
+			user, err = s.resources.AuthenticateToken(r.Context(), parts[1])
 		}
 	} else if cookie, cookieErr := r.Cookie("af_session"); cookieErr == nil {
 		if value, ok := s.sessions.Load(cookie.Value); ok {
@@ -101,7 +101,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, required stri
 			if time.Now().Before(sess.ExpiresAt) {
 				// Do not let an in-memory session outlive an Admin revocation or
 				// role change. The database remains authoritative after login.
-				fresh, lookupErr := s.store.GetUser(r.Context(), sess.User.ID)
+				fresh, lookupErr := s.resources.GetUser(r.Context(), sess.User.ID)
 				if lookupErr != nil {
 					if !errors.Is(lookupErr, sql.ErrNoRows) {
 						slog.Default().Error("controller session lookup failed", "error", lookupErr)

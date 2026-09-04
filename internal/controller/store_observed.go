@@ -12,17 +12,17 @@ import (
 	"asterferry/internal/domain"
 )
 
-func (s *Repository) SaveObserved(ctx context.Context, record ObservedRecord) error {
+func (s *ResourceRepository) SaveObserved(ctx context.Context, record ObservedRecord) error {
 	return s.saveObserved(ctx, record, false)
 }
 
 // SaveObservedHeartbeat accepts a lower applied generation because a
 // heartbeat is a liveness report, not an authoritative monotonic write.
-func (s *Repository) SaveObservedHeartbeat(ctx context.Context, record ObservedRecord) error {
+func (s *ResourceRepository) SaveObservedHeartbeat(ctx context.Context, record ObservedRecord) error {
 	return s.saveObserved(ctx, record, true)
 }
 
-func (s *Repository) saveObserved(ctx context.Context, record ObservedRecord, allowGenerationRollback bool) error {
+func (s *ResourceRepository) saveObserved(ctx context.Context, record ObservedRecord, allowGenerationRollback bool) error {
 	if record.NodeID == "" || len(record.Document) == 0 {
 		return errors.New("observed state node and document are required")
 	}
@@ -95,7 +95,7 @@ func (s *Repository) saveObserved(ctx context.Context, record ObservedRecord, al
 	return s.commitAndNotifyResourceOnly(tx, record.NodeID)
 }
 
-func (s *Repository) LoadObserved(ctx context.Context, nodeID string) (ObservedRecord, error) {
+func (s *ResourceRepository) LoadObserved(ctx context.Context, nodeID string) (ObservedRecord, error) {
 	observed, updated, err := loadObservedStateNormalized(ctx, s.db, nodeID)
 	if err != nil {
 		return ObservedRecord{}, err
@@ -111,7 +111,7 @@ func (s *Repository) LoadObserved(ctx context.Context, nodeID string) (ObservedR
 	return ObservedRecord{NodeID: observed.NodeID, Generation: observed.AppliedGeneration, Document: document, UpdatedAt: updatedAt}, nil
 }
 
-func (s *Repository) GetObserved(ctx context.Context, nodeID string) (domain.ObservedState, error) {
+func (s *ResourceRepository) GetObserved(ctx context.Context, nodeID string) (domain.ObservedState, error) {
 	observed, _, err := loadObservedStateNormalized(ctx, s.db, nodeID)
 	return observed, err
 }

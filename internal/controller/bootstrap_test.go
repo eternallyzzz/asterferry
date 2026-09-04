@@ -155,11 +155,12 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	if err := os.WriteFile(config.CACertPath, []byte("ca"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := openTestStore(filepath.Join(dir, "controller.db"))
+	repositories, err := openTestRepositories(filepath.Join(dir, "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer repositories.Close()
+	store := repositories.Resources
 	ctx := context.Background()
 	if err := store.CreateNode(ctx, domain.Node{ID: "gw", Name: "Gateway", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
@@ -172,7 +173,7 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(config, store)
+	server, err := NewServer(config, repositories)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,16 +238,17 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStoreWithConfig(initResult.Config, masterKey)
+	repositories, err := OpenControllerRepositoriesWithConfig(initResult.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer repositories.Close()
+	store := repositories.Resources
 	adminToken, _, err := store.CreateAPIToken(context.Background(), initResult.Admin.ID, "bootstrap-test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(initResult.Config, store)
+	server, err := NewServer(initResult.Config, repositories)
 	if err != nil {
 		t.Fatal(err)
 	}

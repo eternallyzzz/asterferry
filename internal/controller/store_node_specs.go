@@ -13,11 +13,11 @@ import (
 // GetNodeSpec returns the node's typed behavior aggregate. The node_specs row
 // holds only its discriminator and repository metadata; configuration fields
 // live in the kind-specific relational tables.
-func (s *Repository) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec, error) {
+func (s *ResourceRepository) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec, error) {
 	return loadNodeSpecNormalized(ctx, s.db, nodeID)
 }
 
-func (s *Repository) decorateNodeSpecKind(ctx context.Context, node *domain.Node) error {
+func (s *ResourceRepository) decorateNodeSpecKind(ctx context.Context, node *domain.Node) error {
 	if node == nil {
 		return nil
 	}
@@ -32,7 +32,7 @@ func (s *Repository) decorateNodeSpecKind(ctx context.Context, node *domain.Node
 	return nil
 }
 
-func (s *Repository) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
+func (s *ResourceRepository) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func (s *Repository) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, opti
 
 // putNodeSpecDocument is retained as the application-level write name while
 // the physical representation is now a normalized aggregate.
-func (s *Repository) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
+func (s *ResourceRepository) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
 	requestSpec := spec
 	requestSpec.Revision = 0
 	requestSpec.UpdatedAt = time.Time{}
@@ -156,7 +156,7 @@ func (s *Repository) putNodeSpecDocument(ctx context.Context, spec domain.NodeSp
 	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
-func (s *Repository) DeleteNodeSpec(ctx context.Context, nodeID string, options WriteOptions) error {
+func (s *ResourceRepository) DeleteNodeSpec(ctx context.Context, nodeID string, options WriteOptions) error {
 	s.snapshotMu.Lock()
 	defer s.snapshotMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -227,7 +227,7 @@ func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) 
 	return dependents, nil
 }
 
-func (s *Repository) ListNodeSpecs(ctx context.Context) ([]domain.NodeSpec, error) {
+func (s *ResourceRepository) ListNodeSpecs(ctx context.Context) ([]domain.NodeSpec, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT node_id FROM node_specs ORDER BY node_id`)
 	if err != nil {
 		return nil, err

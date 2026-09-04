@@ -13,3 +13,11 @@ The production binary does not require Node.js. Node.js and npm are build-time
 dependencies only. The pinned release toolchain and the separately tested
 Node.js 22 compatibility lane are both recorded in `.toolchain.json`; neither
 lane is allowed to silently float to the newest release.
+
+The Dashboard lockfile may use an npm `overrides` entry when a transitive
+dependency needs a security fix before its parent releases a new range. The
+current `glob` override is pinned to 10.5.0 to exclude the vulnerable 10.4.x
+CLI range; keep the override until the dependency tree no longer needs it.
+Run `npm audit --audit-level=high` and the full release check after changing
+the lockfile. The final Controller image contains only the compiled binary,
+but the build and test toolchain is still part of the trusted release path.

@@ -34,11 +34,12 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := controller.OpenStoreWithConfig(configResult.Config, masterKey)
+	store, err := controller.OpenControllerRepositoriesWithConfig(configResult.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resources := store.Resources
 	grpcContext, grpcCancel := context.WithCancel(ctx)
 	defer grpcCancel()
 	grpcListener, grpcServer, serveErr, err := controller.StartGRPCWithErrors(grpcContext, configResult.Config, store)
@@ -64,31 +65,31 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	httpProxyPort := freeTCPPort(t)
 	socksProxyPort := freeTCPPort(t)
 
-	if err := store.CreateNode(ctx, domain.Node{ID: "gateway-e2e", Name: "gateway", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := resources.CreateNode(ctx, domain.Node{ID: "gateway-e2e", Name: "gateway", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateNode(ctx, domain.Node{ID: "agent-e2e", Name: "agent", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := resources.CreateNode(ctx, domain.Node{ID: "agent-e2e", Name: "agent", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gateway-e2e", PublicEndpoints: []string{net.JoinHostPort("127.0.0.1", fmt.Sprint(quicPort))}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: uint16(tcpPort), Max: uint16(tcpPort)}}, UDP: []domain.PortRange{{Min: uint16(udpPort), Max: uint16(udpPort)}}}}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := resources.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gateway-e2e", PublicEndpoints: []string{net.JoinHostPort("127.0.0.1", fmt.Sprint(quicPort))}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: uint16(tcpPort), Max: uint16(tcpPort)}}, UDP: []domain.PortRange{{Min: uint16(udpPort), Max: uint16(udpPort)}}}}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent-e2e", Proxies: []domain.ProxySpec{{ID: "http-proxy", Protocol: "http", Bind: net.JoinHostPort("127.0.0.1", fmt.Sprint(httpProxyPort)), Enabled: true}, {ID: "socks-proxy", Protocol: "socks5", Bind: net.JoinHostPort("127.0.0.1", fmt.Sprint(socksProxyPort)), Enabled: true}}, Egress: domain.EgressPolicy{Enabled: false}}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := resources.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent-e2e", Proxies: []domain.ProxySpec{{ID: "http-proxy", Protocol: "http", Bind: net.JoinHostPort("127.0.0.1", fmt.Sprint(httpProxyPort)), Enabled: true}, {ID: "socks-proxy", Protocol: "socks5", Bind: net.JoinHostPort("127.0.0.1", fmt.Sprint(socksProxyPort)), Enabled: true}}, Egress: domain.EgressPolicy{Enabled: false}}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutService(ctx, domain.Service{ID: "tcp-service", AgentID: "agent-e2e", Protocol: domain.ProtocolTCP, LocalTarget: tcpEcho, PublicBind: "127.0.0.1", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := resources.PutService(ctx, domain.Service{ID: "tcp-service", AgentID: "agent-e2e", Protocol: domain.ProtocolTCP, LocalTarget: tcpEcho, PublicBind: "127.0.0.1", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutService(ctx, domain.Service{ID: "udp-service", AgentID: "agent-e2e", Protocol: domain.ProtocolUDP, LocalTarget: udpEcho, PublicBind: "127.0.0.1", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
+	if err := resources.PutService(ctx, domain.Service{ID: "udp-service", AgentID: "agent-e2e", Protocol: domain.ProtocolUDP, LocalTarget: udpEcho, PublicBind: "127.0.0.1", Enabled: true}, controller.WriteOptions{Actor: "integration"}); err != nil {
 		t.Fatal(err)
 	}
 
 	caPath := configResult.Config.CACertPath
-	gatewayToken, _, err := store.CreateEnrollmentToken(ctx, time.Minute)
+	gatewayToken, _, err := resources.CreateEnrollmentToken(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentToken, _, err := store.CreateEnrollmentToken(ctx, time.Minute)
+	agentToken, _, err := resources.CreateEnrollmentToken(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scheduler, err := controller.NewScheduler(store, nil)
+	scheduler, err := controller.NewScheduler(resources, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +127,11 @@ func TestControllerGatewayAgentQUICEndToEnd(t *testing.T) {
 	go func() { runErr <- agentRuntime.Run(ctx) }()
 
 	waitFor(t, ctx, func() bool {
-		current, lookupErr := store.GetAssignment(ctx, assignment.ID)
+		current, lookupErr := resources.GetAssignment(ctx, assignment.ID)
 		return lookupErr == nil && current.State == domain.AssignmentApplied
 	})
 
-	current, err := store.GetAssignment(ctx, assignment.ID)
+	current, err := resources.GetAssignment(ctx, assignment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

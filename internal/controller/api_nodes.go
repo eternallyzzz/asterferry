@@ -16,7 +16,7 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		kind := r.URL.Query().Get("kind")
-		nodes, err := s.store.ListNodes(r.Context(), kind)
+		nodes, err := s.resources.ListNodes(r.Context(), kind)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -47,11 +47,11 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 		enabled = *input.Enabled
 	}
 	node := domain.Node{ID: input.ID, Name: input.Name, Labels: input.Labels, Enabled: enabled}
-	if err := s.store.CreateNode(r.Context(), node, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.CreateNode(r.Context(), node, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	created, err := s.store.GetNode(r.Context(), node.ID)
+	created, err := s.resources.GetNode(r.Context(), node.ID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -98,7 +98,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if parts[1] == "observed" {
-			observed, err := s.store.GetObserved(r.Context(), nodeID)
+			observed, err := s.resources.GetObserved(r.Context(), nodeID)
 			if err != nil {
 				writeStoreError(w, err)
 				return
@@ -110,11 +110,11 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		// Materialize the latest complete desired document on demand. The
 		// control stream also refreshes it periodically, but API callers should
 		// not observe a stale/absent snapshot merely because no node is online.
-		if _, ensureErr := s.store.EnsureDesiredSnapshot(r.Context(), nodeID); ensureErr != nil && !errors.Is(ensureErr, sql.ErrNoRows) {
+		if _, ensureErr := s.resources.EnsureDesiredSnapshot(r.Context(), nodeID); ensureErr != nil && !errors.Is(ensureErr, sql.ErrNoRows) {
 			writeStoreError(w, ensureErr)
 			return
 		}
-		snapshot, err := s.store.GetSnapshot(r.Context(), nodeID)
+		snapshot, err := s.resources.GetSnapshot(r.Context(), nodeID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -127,7 +127,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		node, err := s.store.GetNode(r.Context(), nodeID)
+		node, err := s.resources.GetNode(r.Context(), nodeID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -152,7 +152,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		node, getErr := s.store.GetNode(r.Context(), nodeID)
+		node, getErr := s.resources.GetNode(r.Context(), nodeID)
 		if getErr != nil {
 			writeStoreError(w, getErr)
 			return
@@ -177,7 +177,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 			return
 		}
-		if err := s.store.UpdateNode(r.Context(), node, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.UpdateNode(r.Context(), node, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -186,7 +186,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			// to disconnect immediately as well. Disabling, expiry and a pending
 			// certificate follow the same fail-closed path; an offline node is
 			// rejected when it reconnects.
-			delivered, actionErr := s.store.PublishAction(r.Context(), nodeID, "reconnect", "")
+			delivered, actionErr := s.resources.PublishAction(r.Context(), nodeID, "reconnect", "")
 			if actionErr != nil || !delivered {
 				if actionErr != nil {
 					slog.Default().Error("failed to publish node security action", "node_id", nodeID, "error", actionErr)
@@ -197,12 +197,12 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 				if actionErr != nil {
 					eventType = "action_delivery_failed"
 				}
-				if eventErr := s.store.RecordEvent(context.Background(), user.Username, "", eventType, "reconnect action was not delivered immediately", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
+				if eventErr := s.resources.RecordEvent(context.Background(), user.Username, "", eventType, "reconnect action was not delivered immediately", nodeID, map[string]string{"action": "reconnect"}); eventErr != nil {
 					slog.Default().Error("failed to record security action delivery event", "node_id", nodeID, "error", eventErr)
 				}
 			}
 		}
-		updated, err := s.store.GetNode(r.Context(), nodeID)
+		updated, err := s.resources.GetNode(r.Context(), nodeID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -221,7 +221,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 			return
 		}
-		if err := s.store.DeleteNode(r.Context(), nodeID, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.DeleteNode(r.Context(), nodeID, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -250,7 +250,7 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		// Persist and audit the request before publishing it to connected node
 		// streams. The idempotency key covers both operations, so a retried
 		// request cannot emit the same action twice.
-		delivered, requestErr := s.store.RequestNodeAction(r.Context(), nodeID, action, "", WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		delivered, requestErr := s.resources.RequestNodeAction(r.Context(), nodeID, action, "", WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if requestErr != nil {
 			writeStoreError(w, requestErr)
 			return

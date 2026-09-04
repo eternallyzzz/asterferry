@@ -82,6 +82,7 @@ func loadAssignmentsByIDsNormalized(ctx context.Context, q sqlQueryer, ids []str
 			if err != nil {
 				return nil, err
 			}
+			servicePositions := make(map[string]int)
 			for rows.Next() {
 				var id, serviceID string
 				var position int64
@@ -89,6 +90,12 @@ func loadAssignmentsByIDsNormalized(ctx context.Context, q sqlQueryer, ids []str
 					_ = rows.Close()
 					return nil, err
 				}
+				expected := servicePositions[id]
+				if err := requireStoredPosition(position, expected, "assignment service"); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				servicePositions[id] = expected + 1
 				if assignment := byID[id]; assignment != nil {
 					assignment.ServiceIDs = append(assignment.ServiceIDs, serviceID)
 				}
@@ -103,6 +110,7 @@ func loadAssignmentsByIDsNormalized(ctx context.Context, q sqlQueryer, ids []str
 			if err != nil {
 				return nil, err
 			}
+			bindingPositions := make(map[string]int)
 			for rows.Next() {
 				var id, serviceID, gatewayID, protocol, bind string
 				var position, port int64
@@ -110,6 +118,12 @@ func loadAssignmentsByIDsNormalized(ctx context.Context, q sqlQueryer, ids []str
 					_ = rows.Close()
 					return nil, err
 				}
+				expected := bindingPositions[id]
+				if err := requireStoredPosition(position, expected, "assignment binding"); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				bindingPositions[id] = expected + 1
 				if assignment := byID[id]; assignment != nil {
 					if gatewayID != assignment.GatewayID {
 						_ = rows.Close()

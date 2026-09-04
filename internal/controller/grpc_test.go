@@ -19,12 +19,12 @@ func (p *closeProbeGRPC) Stop()         { p.stopped = true }
 func (p *closeProbeGRPC) GracefulStop() { p.graceful = true }
 
 func TestControllerCloseForcesGRPCStop(t *testing.T) {
-	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
+	probe := &closeProbeGRPC{}
+	repositories, err := openTestRepositories(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe := &closeProbeGRPC{}
-	controller := &Controller{Repository: store, grpcServer: probe}
+	controller := &Controller{Repositories: repositories, grpcServer: probe}
 	if err := controller.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +46,12 @@ func TestEnrollmentOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStoreWithConfig(result.Config, masterKey)
+	repositories, err := OpenControllerRepositoriesWithConfig(result.Config, masterKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer repositories.Close()
+	store := repositories.Resources
 	if err := store.CreateNode(context.Background(), domain.Node{ID: "agent-grpc", Name: "agent", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestEnrollmentOverGRPC(t *testing.T) {
 	config.GRPCListen = "127.0.0.1:0"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	listener, grpcServer, err := StartGRPC(ctx, config, store)
+	listener, grpcServer, err := StartGRPC(ctx, config, repositories)
 	if err != nil {
 		t.Fatal(err)
 	}

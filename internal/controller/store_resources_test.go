@@ -55,7 +55,7 @@ func TestListResourceProjectionsUseJoinedQueries(t *testing.T) {
 	})
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	listStore := &Repository{db: db, dialect: sqliteDialect{}}
+	listStore := &ResourceRepository{databaseHandle: &databaseHandle{db: db, dialect: sqliteDialect{}}, changes: newChangeBus()}
 
 	nodes, err := listStore.ListNodes(ctx, "")
 	if err != nil {

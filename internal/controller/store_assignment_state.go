@@ -14,7 +14,7 @@ import (
 
 // UpdateAssignmentState changes only the lifecycle state of an assignment.
 // Placement and ordered child rows are left untouched.
-func (s *Repository) UpdateAssignmentState(ctx context.Context, id, state string, options WriteOptions) (domain.Assignment, error) {
+func (s *ResourceRepository) UpdateAssignmentState(ctx context.Context, id, state string, options WriteOptions) (domain.Assignment, error) {
 	if strings.TrimSpace(id) == "" {
 		return domain.Assignment{}, sql.ErrNoRows
 	}
@@ -89,11 +89,11 @@ func (s *Repository) UpdateAssignmentState(ctx context.Context, id, state string
 
 // applyNodeResult records the lifecycle consequence of a node applying its
 // complete desired snapshot.
-func (s *Repository) applyNodeResult(ctx context.Context, nodeID string, generation uint64, applied bool, actor string) ([]domain.Assignment, error) {
+func (s *ResourceRepository) applyNodeResult(ctx context.Context, nodeID string, generation uint64, applied bool, actor string) ([]domain.Assignment, error) {
 	return s.applyNodeResultWithError(ctx, nodeID, generation, applied, "", actor)
 }
 
-func (s *Repository) applyNodeResultWithError(ctx context.Context, nodeID string, generation uint64, applied bool, errorCode, actor string) ([]domain.Assignment, error) {
+func (s *ResourceRepository) applyNodeResultWithError(ctx context.Context, nodeID string, generation uint64, applied bool, errorCode, actor string) ([]domain.Assignment, error) {
 	if strings.TrimSpace(nodeID) == "" || generation == 0 {
 		return nil, errors.New("node result identity and generation are required")
 	}

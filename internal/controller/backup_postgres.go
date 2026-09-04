@@ -168,7 +168,7 @@ func restorePostgresBackup(config Config, source, destination string, manifest b
 	if err != nil {
 		return err
 	}
-	store, err := OpenStoreWithConfig(restored, key)
+	store, err := OpenControllerRepositoriesWithConfig(restored, key)
 	if err != nil {
 		return fmt.Errorf("validate restored PostgreSQL database: %w", err)
 	}

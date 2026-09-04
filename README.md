@@ -28,7 +28,7 @@ the copy-and-run guides:
 - [中文端到端快速开始](docs/quickstart.zh-CN.md)
 - [Operations and runtime visibility (English)](docs/operations.en.md)
 - [运行时观测与运维（中文）](docs/operations.zh-CN.md)
-- [Architecture and test contracts](docs/architecture.md)
+- [Architecture and test contracts](docs/architecture.md) ([implementation notes](docs/architecture-internals.md))
 
 Initialize the Controller. `--grpc-advertise` is required and must be the
 host:port that Gateway and Agent hosts can reach; it is not the local bind

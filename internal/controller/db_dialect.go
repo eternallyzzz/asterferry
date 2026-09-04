@@ -26,7 +26,7 @@ var registerPostgresDriverOnce sync.Once
 
 // databaseBackend identifies the storage implementation without exposing a
 // driver-specific type to the rest of the Controller. The logical schema and
-// Repository methods remain shared by both backends.
+// repository methods remain shared by both backends.
 type databaseBackend string
 
 const (
@@ -112,7 +112,7 @@ func newDatabaseDialect(backend databaseBackend) databaseDialect {
 // Controller's single-writer connection and does not support PostgreSQL's row
 // lock syntax; PostgreSQL needs it for read/modify/write barriers such as the
 // two-sided assignment acknowledgement.
-func (s *Repository) selectForUpdateClause() string {
+func (s *databaseHandle) selectForUpdateClause() string {
 	if s == nil || s.dialect == nil {
 		return ""
 	}
@@ -230,7 +230,7 @@ func redactPostgresURL(value string) string {
 	return parsed.String()
 }
 
-// questionMarkPostgresDriver keeps the existing Repository SQL readable while
+// questionMarkPostgresDriver keeps existing repository SQL readable while
 // making SQLite-style positional placeholders work with PostgreSQL's $N
 // syntax. Queries are rebound before they reach the pgx driver, including
 // queries executed inside database/sql transactions.

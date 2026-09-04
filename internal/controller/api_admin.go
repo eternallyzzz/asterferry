@@ -25,7 +25,7 @@ func (s *Server) enrollmentTokens(w http.ResponseWriter, r *http.Request) {
 		if input.TTLSeconds > 0 {
 			ttl = time.Duration(input.TTLSeconds) * time.Second
 		}
-		plain, token, err := s.store.CreateEnrollmentTokenWithOptions(r.Context(), ttl, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		plain, token, err := s.resources.CreateEnrollmentTokenWithOptions(r.Context(), ttl, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
 			if errors.Is(err, ErrSecretAlreadyCreated) {
 				writeAlreadyCreatedSecret(w, "token_metadata", token)
@@ -38,7 +38,7 @@ func (s *Server) enrollmentTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		items, err := s.store.ListEnrollmentTokens(r.Context())
+		items, err := s.resources.ListEnrollmentTokens(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -63,7 +63,7 @@ func (s *Server) enrollmentTokenAction(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodDelete)
 		return
 	}
-	if err := s.store.RevokeEnrollmentTokenWithOptions(r.Context(), id, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.RevokeEnrollmentTokenWithOptions(r.Context(), id, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
@@ -79,7 +79,7 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	items, err := s.store.ListAudit(r.Context(), limit)
+	items, err := s.resources.ListAudit(r.Context(), limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -92,7 +92,7 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleAdmin); !ok {
 			return
 		}
-		items, err := s.store.ListUsers(r.Context())
+		items, err := s.resources.ListUsers(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -117,7 +117,7 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	user, err := s.store.CreateUserWithOptions(r.Context(), input.Username, input.Password, input.Role, WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	user, err := s.resources.CreateUserWithOptions(r.Context(), input.Username, input.Password, input.Role, WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -134,7 +134,7 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodGet {
-			user, err := s.store.GetUser(r.Context(), parts[0])
+			user, err := s.resources.GetUser(r.Context(), parts[0])
 			if err != nil {
 				writeStoreError(w, err)
 				return
@@ -149,7 +149,7 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 				return
 			}
-			if err := s.store.DeleteUser(r.Context(), parts[0], WriteOptions{IfMatch: expected, Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+			if err := s.resources.DeleteUser(r.Context(), parts[0], WriteOptions{IfMatch: expected, Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 				writeStoreError(w, err)
 				return
 			}
@@ -175,7 +175,7 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 			return
 		}
-		updated, err := s.store.UpdateUser(r.Context(), parts[0], UserUpdate{Username: input.Username, Password: input.Password, Role: input.Role, Enabled: input.Enabled}, WriteOptions{IfMatch: expected, Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		updated, err := s.resources.UpdateUser(r.Context(), parts[0], UserUpdate{Username: input.Username, Password: input.Password, Role: input.Role, Enabled: input.Enabled}, WriteOptions{IfMatch: expected, Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -197,7 +197,7 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w, http.MethodDelete)
 			return
 		}
-		if err := s.store.RevokeAPITokenForUser(r.Context(), parts[0], parts[2], WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.RevokeAPITokenForUser(r.Context(), parts[0], parts[2], WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -205,7 +205,7 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		items, err := s.store.ListAPITokens(r.Context(), parts[0])
+		items, err := s.resources.ListAPITokens(r.Context(), parts[0])
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -225,7 +225,7 @@ func (s *Server) userAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	plain, token, err := s.store.CreateAPITokenWithOptions(r.Context(), parts[0], input.Name, input.ExpiresAt, WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	plain, token, err := s.resources.CreateAPITokenWithOptions(r.Context(), parts[0], input.Name, input.ExpiresAt, WriteOptions{Actor: actor.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		if errors.Is(err, ErrSecretAlreadyCreated) {
 			writeAlreadyCreatedSecret(w, "metadata", token)

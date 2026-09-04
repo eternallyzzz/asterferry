@@ -244,7 +244,7 @@ func TestConcurrentSchedulingRetriesDynamicPortConflictContract(t *testing.T) {
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			var store *Repository
+			var store *ResourceRepository
 			if index == 0 {
 				store = storeA
 			} else {

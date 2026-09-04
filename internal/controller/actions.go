@@ -70,7 +70,7 @@ func (b *ChangeBus) SubscribeActions(nodeID string) (<-chan RuntimeAction, func(
 // PublishAction delivers an action to every currently connected stream for a
 // node. It never blocks a Controller request on a slow node; a full channel is
 // reported as not delivered while the durable audit event remains available.
-func (s *Repository) PublishAction(ctx context.Context, nodeID, name, payload string) (bool, error) {
+func (s *ResourceRepository) PublishAction(ctx context.Context, nodeID, name, payload string) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -136,7 +136,7 @@ func (b *ChangeBus) publishAction(nodeID string, action RuntimeAction) bool {
 // connected, publishes it after the audit transaction commits. The optional
 // idempotency key covers both the audit and the delivery request, so a client
 // retry never emits the same action twice.
-func (s *Repository) RequestNodeAction(ctx context.Context, nodeID, name, payload string, options WriteOptions) (bool, error) {
+func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name, payload string, options WriteOptions) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}

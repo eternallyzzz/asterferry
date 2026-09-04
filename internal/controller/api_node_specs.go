@@ -16,7 +16,7 @@ func (s *Server) nodeSpecAction(w http.ResponseWriter, r *http.Request, nodeID s
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		spec, err := s.store.GetNodeSpec(r.Context(), nodeID)
+		spec, err := s.resources.GetNodeSpec(r.Context(), nodeID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -35,7 +35,7 @@ func (s *Server) nodeSpecAction(w http.ResponseWriter, r *http.Request, nodeID s
 			writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 			return
 		}
-		if err := s.store.DeleteNodeSpec(r.Context(), nodeID, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		if err := s.resources.DeleteNodeSpec(r.Context(), nodeID, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 			writeStoreError(w, err)
 			return
 		}
@@ -71,11 +71,11 @@ func (s *Server) nodeSpecAction(w http.ResponseWriter, r *http.Request, nodeID s
 		writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())
 		return
 	}
-	if err := s.store.PutNodeSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.PutNodeSpec(r.Context(), spec, WriteOptions{IfMatch: expected, Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	updated, err := s.store.GetNodeSpec(r.Context(), nodeID)
+	updated, err := s.resources.GetNodeSpec(r.Context(), nodeID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -98,7 +98,7 @@ func (s *Server) nodeEgressAction(w http.ResponseWriter, r *http.Request, nodeID
 			return
 		}
 	}
-	spec, err := s.store.GetNodeSpec(r.Context(), nodeID)
+	spec, err := s.resources.GetNodeSpec(r.Context(), nodeID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -123,7 +123,7 @@ func (s *Server) nodeAgentSpecSubresource(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	spec, err := s.store.GetNodeSpec(r.Context(), nodeID)
+	spec, err := s.resources.GetNodeSpec(r.Context(), nodeID)
 	if err != nil {
 		writeStoreError(w, err)
 		return

@@ -12,7 +12,8 @@ generated Dashboard assets or GeoIP binaries. Use temporary directories for
 fixtures and run `pwsh -NoProfile -File scripts/secret-scan.ps1` before
 staging.
 
-Use the test taxonomy in [`docs/architecture.md`](docs/architecture.md):
+Use the stable test taxonomy in [`docs/architecture.md`](docs/architecture.md);
+volatile navigation details are in [`docs/architecture-internals.md`](docs/architecture-internals.md):
 `*_contract_test.go` files specify observable behavior, `*_state_machine_test.go`
 files compare deterministic lifecycle models with the implementation,
 `*_fuzz_test.go` files cover decoder robustness, and `*_bench_test.go` files

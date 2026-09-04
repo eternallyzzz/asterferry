@@ -5,8 +5,10 @@ FROM docker.io/library/node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c62
 WORKDIR /src
 
 COPY web/dashboard/package.json web/dashboard/package-lock.json ./web/dashboard/
-RUN npm install --global npm@12.0.2 \
-	&& npm --prefix web/dashboard ci
+# npm 12 treats lockfile tarballs from alternate registries as remote packages.
+# Keep the release build on the canonical registry while accepting a mirrored lockfile.
+RUN npm install --global npm@12.0.2 --registry=https://registry.npmjs.org \
+	&& npm --prefix web/dashboard ci --audit=false --registry=https://registry.npmjs.org --replace-registry-host=always
 
 COPY web/dashboard ./web/dashboard
 RUN npm --prefix web/dashboard run build

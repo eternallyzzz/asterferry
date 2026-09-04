@@ -17,7 +17,7 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
 		}
-		items, err := s.store.ListPendingNodeBootstraps(r.Context())
+		items, err := s.resources.ListPendingNodeBootstraps(r.Context())
 		if err != nil {
 			writeStoreError(w, err)
 			return
@@ -93,7 +93,7 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	plain, pending, err := s.store.CreatePendingNodeBootstrap(r.Context(), node, platform, arch, spec, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	plain, pending, err := s.resources.CreatePendingNodeBootstrap(r.Context(), node, platform, arch, spec, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		if errors.Is(err, ErrSecretAlreadyCreated) {
 			writeAlreadyCreatedSecret(w, "installation", pending)
@@ -134,7 +134,7 @@ func (s *Server) nodeInstallationAction(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusServiceUnavailable, "bootstrap_unavailable", err.Error())
 			return
 		}
-		plain, pending, err := s.store.ReissuePendingNodeBootstrap(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		plain, pending, err := s.resources.ReissuePendingNodeBootstrap(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		if err != nil {
 			if errors.Is(err, ErrSecretAlreadyCreated) {
 				writeAlreadyCreatedSecret(w, "installation", pending)
@@ -158,7 +158,7 @@ func (s *Server) nodeInstallationAction(w http.ResponseWriter, r *http.Request) 
 		methodNotAllowed(w, http.MethodDelete)
 		return
 	}
-	if err := s.store.DeletePendingNodeBootstrap(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+	if err := s.resources.DeletePendingNodeBootstrap(r.Context(), nodeID, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
 		writeStoreError(w, err)
 		return
 	}

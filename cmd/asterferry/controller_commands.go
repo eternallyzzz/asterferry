@@ -195,17 +195,17 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := controller.OpenStoreWithConfig(config, masterKey)
+		repositories, err := controller.OpenControllerRepositoriesWithConfig(config, masterKey)
 		if err != nil {
 			return err
 		}
-		defer store.Close()
+		defer repositories.Close()
 		var plain string
 		var token controller.EnrollmentToken
 		if strings.TrimSpace(nodeID) != "" {
-			plain, token, err = store.CreateNodeEnrollmentToken(cmd.Context(), nodeID, ttl)
+			plain, token, err = repositories.Resources.CreateNodeEnrollmentToken(cmd.Context(), nodeID, ttl)
 		} else {
-			plain, token, err = store.CreateEnrollmentToken(cmd.Context(), ttl)
+			plain, token, err = repositories.Resources.CreateEnrollmentToken(cmd.Context(), ttl)
 		}
 		if err != nil {
 			return err
@@ -236,12 +236,12 @@ func newEnrollTokenRevokeCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		store, err := controller.OpenStoreWithConfig(config, masterKey)
+		repositories, err := controller.OpenControllerRepositoriesWithConfig(config, masterKey)
 		if err != nil {
 			return err
 		}
-		defer store.Close()
-		if err := store.RevokeEnrollmentToken(cmd.Context(), id); err != nil {
+		defer repositories.Close()
+		if err := repositories.Resources.RevokeEnrollmentToken(cmd.Context(), id); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), "enrollment token revoked")
