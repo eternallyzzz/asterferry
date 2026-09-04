@@ -3,7 +3,22 @@ set -euo pipefail
 
 root="${ASTERFERRY_WSL_ROOT:-$(git rev-parse --show-toplevel)}"
 output_dir="${ASTERFERRY_TEST_OUTPUT_DIR:-$root/tmp/test/wsl}"
-expected_go_version="${ASTERFERRY_EXPECTED_GO_VERSION:-go1.26.7}"
+toolchain_go_version=""
+if [[ -z "${ASTERFERRY_EXPECTED_GO_VERSION:-}" && -f "$root/.toolchain.json" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    toolchain_go_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["release"]["go"])' "$root/.toolchain.json")"
+  else
+    toolchain_go_version="$(sed -nE 's/^[[:space:]]*"go":[[:space:]]*"([^"]+)".*/\1/p' "$root/.toolchain.json" | head -n 1)"
+  fi
+fi
+if [[ -n "${ASTERFERRY_EXPECTED_GO_VERSION:-}" ]]; then
+  expected_go_version="$ASTERFERRY_EXPECTED_GO_VERSION"
+elif [[ -n "$toolchain_go_version" ]]; then
+  expected_go_version="go$toolchain_go_version"
+else
+  echo "test-wsl: unable to read release Go version from $root/.toolchain.json" >&2
+  exit 1
+fi
 skip_race="${ASTERFERRY_SKIP_RACE:-0}"
 fallback_bin_dir="${ASTERFERRY_WSL_TEST_BIN_DIR:-}"
 mkdir -p "$output_dir"
@@ -24,6 +39,12 @@ fail() {
 
 commit="$(git -C "$root" rev-parse HEAD)"
 cd "$root"
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 scripts/check-source-layout.py
+  python3 scripts/check-toolchain.py
+  python3 scripts/secret-scan.py
+fi
 
 cleanup_frontend_scratch() {
   [[ -d "$root/tmp" ]] || return 0
@@ -98,12 +119,13 @@ fi
 
 go vet ./...
 if command -v staticcheck >/dev/null 2>&1; then
-  staticcheck ./...
+  staticcheck -checks=all,-SA1019 ./...
 fi
 if command -v govulncheck >/dev/null 2>&1; then
   govulncheck ./...
 fi
 go test -count=1 ./...
+go test -count=1 ./internal/afdp ./internal/controller ./internal/dataplane ./internal/duplex ./internal/node -run 'Contract|StateMachine'
 go test -tags=integration -count=1 -timeout=5m ./internal/integration
 go test ./internal/afdp -run '^$' -fuzz FuzzDecodeAFDPFrames -fuzztime 10s
 go test ./internal/controlwire -run '^$' -fuzz FuzzControlwireDecoders -fuzztime 10s

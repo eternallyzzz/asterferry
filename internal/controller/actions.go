@@ -30,42 +30,47 @@ var nextActionSubscription atomic.Uint64
 // SubscribeActions registers a node control stream as a runtime-action
 // recipient. The returned unsubscribe function is idempotent and must be
 // called when the stream ends.
-func (s *Store) SubscribeActions(nodeID string) (<-chan RuntimeAction, func()) {
+func (b *ChangeBus) SubscribeActions(nodeID string) (<-chan RuntimeAction, func()) {
 	ch := make(chan RuntimeAction, 16)
 	nodeID = strings.TrimSpace(nodeID)
 	sub := &actionSubscription{id: nextActionSubscription.Add(1), ch: ch}
-	s.actionMu.Lock()
-	if s.actionSubs == nil {
-		s.actionSubs = make(map[string]map[uint64]*actionSubscription)
+	b.actionMu.Lock()
+	if b.closed.Load() {
+		close(ch)
+		b.actionMu.Unlock()
+		return ch, func() {}
 	}
-	if s.actionSubs[nodeID] == nil {
-		s.actionSubs[nodeID] = make(map[uint64]*actionSubscription)
+	if b.actionSubs == nil {
+		b.actionSubs = make(map[string]map[uint64]*actionSubscription)
 	}
-	s.actionSubs[nodeID][sub.id] = sub
-	s.actionMu.Unlock()
+	if b.actionSubs[nodeID] == nil {
+		b.actionSubs[nodeID] = make(map[uint64]*actionSubscription)
+	}
+	b.actionSubs[nodeID][sub.id] = sub
+	b.actionMu.Unlock()
 	var once atomic.Bool
 	return ch, func() {
 		if once.Swap(true) {
 			return
 		}
-		s.actionMu.Lock()
-		if subscribers := s.actionSubs[nodeID]; subscribers != nil {
+		b.actionMu.Lock()
+		if subscribers := b.actionSubs[nodeID]; subscribers != nil {
 			if current := subscribers[sub.id]; current == sub {
 				delete(subscribers, sub.id)
 				close(current.ch)
 			}
 			if len(subscribers) == 0 {
-				delete(s.actionSubs, nodeID)
+				delete(b.actionSubs, nodeID)
 			}
 		}
-		s.actionMu.Unlock()
+		b.actionMu.Unlock()
 	}
 }
 
 // PublishAction delivers an action to every currently connected stream for a
 // node. It never blocks a Controller request on a slow node; a full channel is
 // reported as not delivered while the durable audit event remains available.
-func (s *Store) PublishAction(ctx context.Context, nodeID, name, payload string) (bool, error) {
+func (s *Repository) PublishAction(ctx context.Context, nodeID, name, payload string) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -89,7 +94,7 @@ func (s *Store) PublishAction(ctx context.Context, nodeID, name, payload string)
 	if err != nil {
 		return false, err
 	}
-	return s.publishAction(nodeID, RuntimeAction{ID: id, Name: name, Payload: []byte(payload)}), nil
+	return s.ChangeBus().publishAction(nodeID, RuntimeAction{ID: id, Name: name, Payload: []byte(payload)}), nil
 }
 
 func validateRuntimeAction(name string) error {
@@ -99,10 +104,10 @@ func validateRuntimeAction(name string) error {
 	return nil
 }
 
-func (s *Store) actionCanDeliver(nodeID string) bool {
-	s.actionMu.Lock()
-	defer s.actionMu.Unlock()
-	for _, sub := range s.actionSubs[nodeID] {
+func (b *ChangeBus) actionCanDeliver(nodeID string) bool {
+	b.actionMu.Lock()
+	defer b.actionMu.Unlock()
+	for _, sub := range b.actionSubs[nodeID] {
 		if len(sub.ch) < cap(sub.ch) {
 			return true
 		}
@@ -110,17 +115,20 @@ func (s *Store) actionCanDeliver(nodeID string) bool {
 	return false
 }
 
-func (s *Store) publishAction(nodeID string, action RuntimeAction) bool {
+func (b *ChangeBus) publishAction(nodeID string, action RuntimeAction) bool {
 	delivered := false
-	s.actionMu.Lock()
-	for _, sub := range s.actionSubs[nodeID] {
+	b.actionMu.Lock()
+	defer b.actionMu.Unlock()
+	if b.closed.Load() {
+		return false
+	}
+	for _, sub := range b.actionSubs[nodeID] {
 		select {
 		case sub.ch <- RuntimeAction{ID: action.ID, Name: action.Name, Payload: append([]byte(nil), action.Payload...)}:
 			delivered = true
 		default:
 		}
 	}
-	s.actionMu.Unlock()
 	return delivered
 }
 
@@ -128,7 +136,7 @@ func (s *Store) publishAction(nodeID string, action RuntimeAction) bool {
 // connected, publishes it after the audit transaction commits. The optional
 // idempotency key covers both the audit and the delivery request, so a client
 // retry never emits the same action twice.
-func (s *Store) RequestNodeAction(ctx context.Context, nodeID, name, payload string, options WriteOptions) (bool, error) {
+func (s *Repository) RequestNodeAction(ctx context.Context, nodeID, name, payload string, options WriteOptions) (bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -192,14 +200,14 @@ func (s *Store) RequestNodeAction(ctx context.Context, nodeID, name, payload str
 	// without re-publishing the action. The hint is intentionally conservative:
 	// an available subscriber is expected to receive the message, while a full
 	// broker is reported as queued for an explicit retry.
-	deliveryHint := s.actionCanDeliver(nodeID)
+	deliveryHint := s.ChangeBus().actionCanDeliver(nodeID)
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"action_id": actionID, "delivered": deliveryHint}); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	delivered := s.publishAction(nodeID, RuntimeAction{ID: actionID, Name: name, Payload: []byte(payload)})
+	delivered := s.ChangeBus().publishAction(nodeID, RuntimeAction{ID: actionID, Name: name, Payload: []byte(payload)})
 	if strings.TrimSpace(options.IdempotencyKey) != "" {
 		// Return the durable result for idempotent requests. A concurrent stream
 		// close may make the best-effort publish return false even though the

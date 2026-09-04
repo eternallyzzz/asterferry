@@ -206,7 +206,7 @@ type RuntimeSnapshot struct {
 	NodeID      string              `json:"node_id"`
 	ObservedAt  time.Time           `json:"observed_at"`
 	Connections []RuntimeConnection `json:"connections,omitempty"`
-	Metrics     map[string]float64  `json:"metrics,omitempty"`
+	Metrics     RuntimeMetrics      `json:"metrics,omitempty"`
 }
 
 func (s RuntimeSnapshot) Validate() error {
@@ -216,7 +216,7 @@ func (s RuntimeSnapshot) Validate() error {
 	if s.ObservedAt.IsZero() {
 		return errors.New("runtime snapshot timestamp is required")
 	}
-	if len(s.Connections) > 4096 || len(s.Metrics) > 128 {
+	if len(s.Connections) > 4096 {
 		return errors.New("runtime snapshot is too large")
 	}
 	for _, connection := range s.Connections {
@@ -225,11 +225,6 @@ func (s RuntimeSnapshot) Validate() error {
 		}
 		if connection.NodeID != s.NodeID {
 			return errors.New("runtime snapshot connection node does not match snapshot node")
-		}
-	}
-	for key, value := range s.Metrics {
-		if len(key) > 128 || strings.ContainsAny(key, "\x00\r\n") || value != value || value > 1e18 || value < -1e18 {
-			return errors.New("runtime snapshot metric is invalid")
 		}
 	}
 	return nil

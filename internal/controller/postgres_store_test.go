@@ -237,7 +237,7 @@ func TestPostgresAssignmentAcknowledgementsSerializeByAssignment(t *testing.T) {
 	}
 }
 
-func openTwoPostgresTestStores(t *testing.T) (*Store, *Store) {
+func openTwoPostgresTestStores(t *testing.T) (*Repository, *Repository) {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("ASTERFERRY_TEST_POSTGRES_URL"))
 	if baseURL == "" {

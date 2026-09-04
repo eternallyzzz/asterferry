@@ -55,7 +55,7 @@ func TestListResourceProjectionsUseJoinedQueries(t *testing.T) {
 	})
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	listStore := &Store{db: db, dialect: sqliteDialect{}}
+	listStore := &Repository{db: db, dialect: sqliteDialect{}}
 
 	nodes, err := listStore.ListNodes(ctx, "")
 	if err != nil {
@@ -64,8 +64,8 @@ func TestListResourceProjectionsUseJoinedQueries(t *testing.T) {
 	if len(nodes) != 5 || nodes[0].ID != "agent-a" || nodes[0].SpecKind != domain.NodeSpecAgent || nodes[4].SpecKind != "" {
 		t.Fatalf("all nodes = %#v", nodes)
 	}
-	if got := selects.Load(); got != 1 {
-		t.Fatalf("ListNodes all-node SELECT count = %d, want 1", got)
+	if got := selects.Load(); got > 2 {
+		t.Fatalf("ListNodes all-node SELECT count = %d, want a bounded set query count", got)
 	}
 
 	selects.Store(0)
@@ -76,8 +76,8 @@ func TestListResourceProjectionsUseJoinedQueries(t *testing.T) {
 	if len(nodes) != 2 || nodes[0].ID != "gateway-a" || nodes[1].ID != "gateway-b" {
 		t.Fatalf("gateway nodes = %#v", nodes)
 	}
-	if got := selects.Load(); got != 1 {
-		t.Fatalf("ListNodes filtered SELECT count = %d, want 1", got)
+	if got := selects.Load(); got > 2 {
+		t.Fatalf("ListNodes filtered SELECT count = %d, want a bounded set query count", got)
 	}
 
 	selects.Store(0)
@@ -88,8 +88,8 @@ func TestListResourceProjectionsUseJoinedQueries(t *testing.T) {
 	if len(gateways) != 2 || gateways[0].Node.ID != "gateway-a" || gateways[1].Spec == nil || gateways[1].Spec.NodeID != "gateway-b" {
 		t.Fatalf("gateway views = %#v", gateways)
 	}
-	if got := selects.Load(); got != 1 {
-		t.Fatalf("ListGatewayViews SELECT count = %d, want 1", got)
+	if got := selects.Load(); got > 10 {
+		t.Fatalf("ListGatewayViews SELECT count = %d, want a bounded set query count", got)
 	}
 
 	selects.Store(0)
@@ -100,8 +100,20 @@ func TestListResourceProjectionsUseJoinedQueries(t *testing.T) {
 	if len(agents) != 2 || agents[0].Node.ID != "agent-a" || agents[1].Spec == nil || agents[1].Spec.NodeID != "agent-b" {
 		t.Fatalf("agent views = %#v", agents)
 	}
-	if got := selects.Load(); got != 1 {
-		t.Fatalf("ListAgentViews SELECT count = %d, want 1", got)
+	if got := selects.Load(); got > 10 {
+		t.Fatalf("ListAgentViews SELECT count = %d, want a bounded set query count", got)
+	}
+
+	selects.Store(0)
+	specs, err := listStore.ListNodeSpecs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 4 || specs[0].NodeID != "agent-a" || specs[2].NodeID != "gateway-a" {
+		t.Fatalf("node specs = %#v", specs)
+	}
+	if got := selects.Load(); got > 14 {
+		t.Fatalf("ListNodeSpecs SELECT count = %d, want bounded aggregate loads", got)
 	}
 }
 

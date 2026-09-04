@@ -124,24 +124,26 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 		return domain.ObservedState{}, false
 	}
 	observed := domain.ObservedState{
-		SchemaVersion:     domain.SchemaVersion,
+		SchemaVersion:     domain.CurrentControlProtocolVersion,
 		NodeID:            d.engine.NodeID(),
 		AppliedGeneration: state.snap.Generation,
 		Healthy:           state.ctx.Err() == nil,
 		ObservedAt:        time.Now().UTC(),
-		Metrics: map[string]float64{
-			"active_streams":     float64(d.engine.ActiveStreams()),
-			"active_sessions":    float64(d.engine.ActiveSessions()),
-			"active_egress":      float64(d.engine.ActiveEgress()),
-			"udp_oversize_drops": float64(d.oversizeDatagrams.Load()),
-			"geoip_up":           boolMetric(dataplane.GeoIPAvailable(d.geoIP)),
+		Metrics: domain.RuntimeMetrics{
+			ActiveStreams:    uint64(d.engine.ActiveStreams()),
+			ActiveSessions:   uint64(d.engine.ActiveSessions()),
+			ActiveEgress:     uint64(d.engine.ActiveEgress()),
+			UDPOversizeDrops: d.oversizeDatagrams.Load(),
+			GeoIPUp:          dataplane.GeoIPAvailable(d.geoIP),
 		},
 	}
 	runtimeSnapshot := d.telemetry.snapshot(observed.NodeID)
-	for key, value := range runtimeSnapshot.Metrics {
-		observed.Metrics[key] = value
-	}
-	observed.Metrics["active_connections"] = float64(len(runtimeSnapshot.Connections))
+	observed.Metrics.RuntimeOpenedTotal = runtimeSnapshot.Metrics.RuntimeOpenedTotal
+	observed.Metrics.RuntimeClosedTotal = runtimeSnapshot.Metrics.RuntimeClosedTotal
+	observed.Metrics.RuntimeRejectedTotal = runtimeSnapshot.Metrics.RuntimeRejectedTotal
+	observed.Metrics.RuntimeRateLimitedTotal = runtimeSnapshot.Metrics.RuntimeRateLimitedTotal
+	observed.Metrics.RuntimeTelemetryDroppedTotal = runtimeSnapshot.Metrics.RuntimeTelemetryDroppedTotal
+	observed.Metrics.ActiveConnections = uint64(len(runtimeSnapshot.Connections))
 	activeFlows := 0
 	var bytesIn, bytesOut uint64
 	for _, connection := range runtimeSnapshot.Connections {
@@ -151,9 +153,9 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 			activeFlows++
 		}
 	}
-	observed.Metrics["active_flows"] = float64(activeFlows)
-	observed.Metrics["runtime_bytes_in_total"] = float64(bytesIn)
-	observed.Metrics["runtime_bytes_out_total"] = float64(bytesOut)
+	observed.Metrics.ActiveFlows = uint64(activeFlows)
+	observed.Metrics.RuntimeBytesInTotal = bytesIn
+	observed.Metrics.RuntimeBytesOutTotal = bytesOut
 	state.sessionMu.RLock()
 	for assignmentID, session := range state.gatewaySessions {
 		if session == nil {
@@ -185,13 +187,6 @@ func (d *DataPlaneRuntime) ObservedState() (domain.ObservedState, bool) {
 		}
 	}
 	return observed, true
-}
-
-func boolMetric(value bool) float64 {
-	if value {
-		return 1
-	}
-	return 0
 }
 
 // UpdateBootstrap replaces the certificate material used by future AFDP

@@ -188,7 +188,7 @@ func TestScheduleAgentUpdatesBothNodeSnapshots(t *testing.T) {
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	assignments, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
+	assignments, err := schedulerForTest(store).ScheduleAgent(ctx, "agent", WriteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,16 +431,16 @@ func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
 	if err := store.PutService(ctx, domain.Service{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}, WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	assignments, err := store.ScheduleAgent(ctx, "agent", WriteOptions{})
+	assignments, err := schedulerForTest(store).ScheduleAgent(ctx, "agent", WriteOptions{})
 	if err != nil || len(assignments) != 1 || assignments[0].GatewayID != "gw-a" {
 		t.Fatalf("initial assignment = %#v, err=%v", assignments, err)
 	}
-	observed := domain.ObservedState{SchemaVersion: domain.SchemaVersion, NodeID: "gw-a", AppliedGeneration: 1, Healthy: true, ObservedAt: time.Now().Add(-time.Hour)}
+	observed := domain.ObservedState{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "gw-a", AppliedGeneration: 1, Healthy: true, ObservedAt: time.Now().Add(-time.Hour)}
 	document, _ := json.Marshal(observed)
 	if err := store.SaveObserved(ctx, ObservedRecord{NodeID: "gw-a", Generation: 1, Document: document, UpdatedAt: observed.ObservedAt}); err != nil {
 		t.Fatal(err)
 	}
-	failedOver, err := store.ReconcileAssignments(ctx, time.Minute)
+	failedOver, err := schedulerForTest(store).ReconcileAssignments(ctx, time.Minute)
 	if err != nil || len(failedOver) != 1 || failedOver[0].GatewayID != "gw-b" {
 		t.Fatalf("failover result = %#v, err=%v", failedOver, err)
 	}

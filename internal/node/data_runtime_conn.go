@@ -119,7 +119,7 @@ func (c *egressConn) CloseWrite() error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	if halfCloser, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+	if halfCloser, ok := c.Conn.(duplex.WriteHalfCloser); ok {
 		return halfCloser.CloseWrite()
 	}
 	return duplex.ErrHalfCloseUnsupported
@@ -361,6 +361,9 @@ func (g *dataGeneration) addUDPFlow(flow *dataUDPFlow) (*dataUDPFlow, bool) {
 	defer g.udpMu.Unlock()
 	if g.closed.Load() {
 		return nil, false
+	}
+	if existing := g.udpFlows[flow.id]; existing != nil {
+		return existing, false
 	}
 	if existing := g.udpByKey[flow.key]; existing != nil {
 		return existing, false

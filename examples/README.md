@@ -32,7 +32,7 @@ to `/api/v1/services`; the scheduler assigns each enabled service to a healthy
 Gateway and allocates a port from that Gateway's configured pool.
 
 Never commit bootstrap files, private keys, passwords, or API tokens. The
-Controller database defaults to the v10 SQLite store. Larger deployments can
+Controller database defaults to the v11 SQLite store. Larger deployments can
 initialize with `--database-driver postgres --database-url 'postgres://...'`.
 Backend changes are clean-break development operations: initialize a new
 Controller and recreate resources; there is no SQLite-to-PostgreSQL migration

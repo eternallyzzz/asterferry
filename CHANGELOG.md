@@ -1,9 +1,9 @@
 # Changelog
 
-## [1.0.0] - Unreleased
+## [2.0.0] - Unreleased
 
-This release is a deliberate breaking cutover to the Controller/data-plane
-architecture.
+This release is a deliberate breaking cutover to the normalized Controller/
+data-plane architecture.
 
 - Adds the SQLite-backed Controller with RBAC, audit, enrollment, scheduling,
   revision checks and encrypted node snapshots; PostgreSQL is now supported as
@@ -22,8 +22,9 @@ architecture.
   30 days.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
   protocol. Existing node configurations and Controller databases must be
-  initialized again. The Controller store is now a fresh schema v10 with a
-  single canonical schema marker; old databases and backup manifests are
+  initialized again. The Controller store is now a fresh database schema v11
+  with a relational aggregate layout and a single canonical database marker;
+  old databases and backup manifests are
   rejected without migration.
 - The `node_bootstraps` table stores pending installation intents and
   `node_specs` stores the behavior envelope without pre-creating node
@@ -40,7 +41,10 @@ architecture.
   Controller HA.
 - Hardens storage error classification, PostgreSQL connection lifetime,
   idempotency retention, schema probing, joined resource reads and UDP flow
-  cleanup, with regression coverage for the affected paths.
+  cleanup, with behavior contracts for the affected paths.
+- Adds deterministic QUIC half-close, AFDP reassembly, UDP lifecycle and
+  reconnect state-machine tests, real loopback transport contracts, and the
+  maintainer-facing architecture document.
 - Adds an opt-in, separately bound Prometheus listener with a loopback default;
   management HTTPS metrics remain authenticated. GeoIP routing is now an
   optional external, freshness-checked resource instead of a repository or

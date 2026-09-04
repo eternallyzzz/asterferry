@@ -3,10 +3,7 @@ package controller
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -14,7 +11,7 @@ import (
 )
 
 // CreateNode persists a node identity and its initial lifecycle state.
-func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
+func (s *Repository) CreateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
 	if err := validateNode(node); err != nil {
 		return err
 	}
@@ -32,10 +29,6 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 	now := time.Now().UTC()
 	node.CreatedAt = now
 	node.UpdatedAt = now
-	labels, err := json.Marshal(node.Labels)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -48,9 +41,12 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 	if hit {
 		return nil
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO nodes(id, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, node.CreatedAt.Format(time.RFC3339Nano), node.UpdatedAt.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO nodes(id,name,enabled,certificate_state,certificate_serial,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`, node.ID, node.Name, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, node.CreatedAt.Format(time.RFC3339Nano), node.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("create node: %w", err)
+	}
+	if err := insertNodeLabelsTx(ctx, tx, node.ID, node.Labels); err != nil {
+		return fmt.Errorf("create node labels: %w", err)
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "create", "node", node.ID, node.Revision, nil); err != nil {
 		return err
@@ -61,9 +57,8 @@ func (s *Store) CreateNode(ctx context.Context, node domain.Node, options WriteO
 	return s.commitAndNotifyResources(tx, node.ID)
 }
 
-func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, labels_json, enabled, certificate_state, certificate_serial, revision, created_at, updated_at FROM nodes WHERE id = ?`, id)
-	node, err := scanNode(row)
+func (s *Repository) GetNode(ctx context.Context, id string) (domain.Node, error) {
+	node, err := loadNodeIdentity(ctx, s.db, id)
 	if err != nil {
 		return domain.Node{}, err
 	}
@@ -73,9 +68,9 @@ func (s *Store) GetNode(ctx context.Context, id string) (domain.Node, error) {
 	return node, nil
 }
 
-func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
+func (s *Repository) ListNodes(ctx context.Context, kind string) ([]domain.Node, error) {
 	kind = strings.TrimSpace(kind)
-	query := `SELECT n.id, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at, ns.kind FROM nodes n LEFT JOIN node_specs ns ON ns.node_id=n.id`
+	query := `SELECT n.id,n.name,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,ns.kind FROM nodes n LEFT JOIN node_specs ns ON ns.node_id=n.id`
 	args := []any{}
 	if kind != "" {
 		query += ` WHERE ns.kind = ?`
@@ -86,19 +81,55 @@ func (s *Store) ListNodes(ctx context.Context, kind string) ([]domain.Node, erro
 	if err != nil {
 		return nil, err
 	}
-	result := []domain.Node{}
+	type nodeRow struct {
+		node domain.Node
+		kind sql.NullString
+	}
+	rowsData := make([]nodeRow, 0)
 	for rows.Next() {
-		node, err := scanNodeWithSpecKind(rows)
+		var node domain.Node
+		var enabled int
+		var created, updated string
+		var specKind sql.NullString
+		err := rows.Scan(&node.ID, &node.Name, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &updated, &specKind)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, node)
+		node.Enabled = enabled != 0
+		node.CreatedAt, err = parseStoredTime("node.created_at", created)
+		if err != nil {
+			return nil, err
+		}
+		node.UpdatedAt, err = parseStoredTime("node.updated_at", updated)
+		if err != nil {
+			return nil, err
+		}
+		if err := node.Validate(); err != nil {
+			return nil, fmt.Errorf("stored node is invalid: %w", err)
+		}
+		rowsData = append(rowsData, nodeRow{node: node, kind: specKind})
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	nodeIDs := make([]string, 0, len(rowsData))
+	for _, row := range rowsData {
+		nodeIDs = append(nodeIDs, row.node.ID)
+	}
+	labelsByNode, err := loadNodeLabelsForIDs(ctx, s.db, nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.Node, 0, len(rowsData))
+	for _, row := range rowsData {
+		row.node.Labels = labelsByNode[row.node.ID]
+		if row.kind.Valid {
+			row.node.SpecKind = domain.NodeSpecKind(row.kind.String)
+		}
+		result = append(result, row.node)
 	}
 	return result, nil
 }
@@ -114,7 +145,7 @@ type AgentView struct {
 	Spec *domain.AgentSpec
 }
 
-func (s *Store) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
+func (s *Repository) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
 	views, err := s.listNodeSpecViews(ctx, domain.NodeSpecGateway)
 	if err != nil {
 		return nil, err
@@ -131,7 +162,7 @@ func (s *Store) ListGatewayViews(ctx context.Context) ([]GatewayView, error) {
 	return result, nil
 }
 
-func (s *Store) ListAgentViews(ctx context.Context) ([]AgentView, error) {
+func (s *Repository) ListAgentViews(ctx context.Context) ([]AgentView, error) {
 	views, err := s.listNodeSpecViews(ctx, domain.NodeSpecAgent)
 	if err != nil {
 		return nil, err
@@ -153,27 +184,78 @@ type nodeSpecView struct {
 	Spec domain.NodeSpec
 }
 
-func (s *Store) listNodeSpecViews(ctx context.Context, kind domain.NodeSpecKind) ([]nodeSpecView, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id, n.name, n.labels_json, n.enabled, n.certificate_state, n.certificate_serial, n.revision, n.created_at, n.updated_at, ns.kind, ns.document_json, ns.revision, ns.updated_at FROM nodes n INNER JOIN node_specs ns ON ns.node_id=n.id WHERE ns.kind=? ORDER BY n.id`, string(kind))
+func (s *Repository) listNodeSpecViews(ctx context.Context, kind domain.NodeSpecKind) ([]nodeSpecView, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled,n.certificate_state,n.certificate_serial,n.revision,n.created_at,n.updated_at,ns.node_id,ns.kind,ns.revision,ns.updated_at FROM nodes n INNER JOIN node_specs ns ON ns.node_id=n.id WHERE ns.kind=? ORDER BY n.id`, string(kind))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := make([]nodeSpecView, 0)
+	type viewRow struct {
+		nodeID, storedKind, created, nodeUpdated, specUpdated string
+		node                                                  domain.Node
+		specRevision                                          int64
+	}
+	baseRows := make([]viewRow, 0)
 	for rows.Next() {
-		node, spec, err := scanNodeAndSpec(rows)
+		var node domain.Node
+		var enabled int
+		var created, nodeUpdated string
+		var nodeID, storedKind, specUpdated string
+		var revision int64
+		if err := rows.Scan(&node.ID, &node.Name, &enabled, &node.CertificateState, &node.CertificateSerial, &node.Revision, &created, &nodeUpdated, &nodeID, &storedKind, &revision, &specUpdated); err != nil {
+			return nil, err
+		}
+		node.Enabled = enabled != 0
+		node.CreatedAt, err = parseStoredTime("node.created_at", created)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, nodeSpecView{Node: node, Spec: spec})
+		node.UpdatedAt, err = parseStoredTime("node.updated_at", nodeUpdated)
+		if err != nil {
+			return nil, err
+		}
+		node.SpecKind = domain.NodeSpecKind(storedKind)
+		baseRows = append(baseRows, viewRow{nodeID: nodeID, storedKind: storedKind, node: node, specRevision: revision, created: created, nodeUpdated: nodeUpdated, specUpdated: specUpdated})
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	nodes := make([]domain.Node, 0, len(baseRows))
+	for _, base := range baseRows {
+		nodes = append(nodes, base.node)
+	}
+	var specs map[string]domain.NodeSpec
+	if kind == domain.NodeSpecGateway {
+		specs, err = loadGatewaySpecsBatchNormalized(ctx, s.db, nodes)
+	} else {
+		specs, err = loadAgentSpecsBatchNormalized(ctx, s.db, nodes)
+	}
+	if err != nil {
+		return nil, err
+	}
+	nodeIDs := make([]string, 0, len(baseRows))
+	for _, base := range baseRows {
+		nodeIDs = append(nodeIDs, base.node.ID)
+	}
+	labelsByNode, err := loadNodeLabelsForIDs(ctx, s.db, nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]nodeSpecView, 0, len(baseRows))
+	for _, base := range baseRows {
+		base.node.Labels = labelsByNode[base.node.ID]
+		spec, ok := specs[base.nodeID]
+		if !ok {
+			return nil, fmt.Errorf("stored %s spec %q is missing", kind, base.nodeID)
+		}
+		result = append(result, nodeSpecView{Node: base.node, Spec: spec})
+	}
 	return result, nil
 }
 
-func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
+func (s *Repository) UpdateNode(ctx context.Context, node domain.Node, options WriteOptions) error {
 	if err := validateNode(node); err != nil {
 		return err
 	}
@@ -185,10 +267,6 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 		Node    domain.Node `json:"node"`
 		IfMatch int64       `json:"if_match"`
 	}{Node: requestNode, IfMatch: options.IfMatch}
-	labels, err := json.Marshal(node.Labels)
-	if err != nil {
-		return err
-	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -217,11 +295,14 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 	}
 	affectedNodes = append(affectedNodes, node.ID)
 	node.Revision = current + 1
-	result, err := tx.ExecContext(ctx, `UPDATE nodes SET name=?, labels_json=?, enabled=?, certificate_state=?, certificate_serial=?, revision=?, updated_at=? WHERE id=? AND revision=?`, node.Name, labels, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET name=?,enabled=?,certificate_state=?,certificate_serial=?,revision=?,updated_at=? WHERE id=? AND revision=?`, node.Name, boolInt(node.Enabled), defaultCertificateState(node.CertificateState), node.CertificateSerial, node.Revision, now.Format(time.RFC3339Nano), node.ID, current)
 	if err != nil {
 		return err
 	}
 	if err := requireRevisionWrite(ctx, tx, result, "node", current, `SELECT revision FROM nodes WHERE id=?`, node.ID); err != nil {
+		return err
+	}
+	if err := insertNodeLabelsTx(ctx, tx, node.ID, node.Labels); err != nil {
 		return err
 	}
 	// A disabled or non-active identity must not retain an applied placement.
@@ -263,7 +344,7 @@ func (s *Store) UpdateNode(ctx context.Context, node domain.Node, options WriteO
 // pass can replace the Gateway while both peers still have to acknowledge the
 // new placement before it becomes applied again.
 func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID string) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id,gateway_id,agent_id,document_json,revision,generation FROM assignments WHERE gateway_id=? OR agent_id=? ORDER BY id`, nodeID, nodeID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,gateway_id,agent_id,revision,generation FROM assignments WHERE gateway_id=? OR agent_id=? ORDER BY id`, nodeID, nodeID)
 	if err != nil {
 		return err
 	}
@@ -271,14 +352,13 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 		id                string
 		gatewayID         string
 		agentID           string
-		document          []byte
 		revision          int64
-		indexedGeneration uint64
+		indexedGeneration int64
 	}
 	assignmentRows := make([]assignmentQuarantineRow, 0)
 	for rows.Next() {
 		var row assignmentQuarantineRow
-		if err := rows.Scan(&row.id, &row.gatewayID, &row.agentID, &row.document, &row.revision, &row.indexedGeneration); err != nil {
+		if err := rows.Scan(&row.id, &row.gatewayID, &row.agentID, &row.revision, &row.indexedGeneration); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -294,12 +374,12 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 	now := time.Now().UTC()
 	for _, row := range assignmentRows {
 		id, gatewayID, agentID := row.id, row.gatewayID, row.agentID
-		document, revision, indexedGeneration := row.document, row.revision, row.indexedGeneration
-		var assignment domain.Assignment
-		if err := json.Unmarshal(document, &assignment); err != nil {
-			return fmt.Errorf("decode assignment %q: %w", id, err)
+		revision, indexedGeneration := row.revision, row.indexedGeneration
+		assignment, err := loadAssignmentNormalized(ctx, tx, id)
+		if err != nil {
+			return fmt.Errorf("load assignment %q: %w", id, err)
 		}
-		if assignment.ID != id || assignment.GatewayID != gatewayID || assignment.AgentID != agentID || assignment.Generation != indexedGeneration {
+		if assignment.ID != id || assignment.GatewayID != gatewayID || assignment.AgentID != agentID || int64(assignment.Generation) != indexedGeneration {
 			return &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "assignment", Message: "stored assignment metadata does not match its row"}
 		}
 		if assignment.State == "" {
@@ -316,17 +396,13 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 			}
 			continue
 		}
-		if revision == math.MaxInt64 {
+		if revision == int64(^uint64(0)>>1) {
 			return &domain.ApplyError{Code: "invalid_revision", Path: "assignment.revision", Message: "assignment revision is exhausted"}
 		}
 		assignment.State = domain.AssignmentDegraded
 		assignment.Revision = revision + 1
 		assignment.UpdatedAt = now
-		updated, err := json.Marshal(assignment)
-		if err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE assignments SET document_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, updated, assignment.Revision, now.Format(time.RFC3339Nano), id, revision)
+		result, err := updateAssignmentColumnsTx(ctx, tx, assignment, revision)
 		if err != nil {
 			return err
 		}
@@ -346,7 +422,7 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 	return nil
 }
 
-func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions) error {
+func (s *Repository) DeleteNode(ctx context.Context, id string, options WriteOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -399,168 +475,5 @@ func (s *Store) DeleteNode(ctx context.Context, id string, options WriteOptions)
 	if err := s.commitAndNotifyResources(tx, id); err != nil {
 		return err
 	}
-	if s.metrics != nil {
-		s.metrics.removeNode(id)
-	}
 	return nil
-}
-
-func (s *Store) PutGatewaySpec(ctx context.Context, spec domain.GatewaySpec, options WriteOptions) error {
-	return s.PutNodeSpec(ctx, domain.NewGatewayNodeSpec(spec), options)
-}
-
-func (s *Store) DeleteGatewaySpec(ctx context.Context, nodeID string, options WriteOptions) error {
-	return s.DeleteNodeSpec(ctx, nodeID, options)
-}
-
-func (s *Store) GetGatewaySpec(ctx context.Context, nodeID string) (domain.GatewaySpec, error) {
-	spec, err := s.GetNodeSpec(ctx, nodeID)
-	if err != nil {
-		return domain.GatewaySpec{}, err
-	}
-	if spec.Kind != domain.NodeSpecGateway || spec.Gateway == nil {
-		return domain.GatewaySpec{}, sql.ErrNoRows
-	}
-	value := *spec.Gateway
-	value.Revision = spec.Revision
-	return value, nil
-}
-
-func (s *Store) PutAgentSpec(ctx context.Context, spec domain.AgentSpec, options WriteOptions) error {
-	return s.PutNodeSpec(ctx, domain.NewAgentNodeSpec(spec), options)
-}
-
-func (s *Store) DeleteAgentSpec(ctx context.Context, nodeID string, options WriteOptions) error {
-	return s.DeleteNodeSpec(ctx, nodeID, options)
-}
-
-func (s *Store) GetAgentSpec(ctx context.Context, nodeID string) (domain.AgentSpec, error) {
-	spec, err := s.GetNodeSpec(ctx, nodeID)
-	if err != nil {
-		return domain.AgentSpec{}, err
-	}
-	if spec.Kind != domain.NodeSpecAgent || spec.Agent == nil {
-		return domain.AgentSpec{}, sql.ErrNoRows
-	}
-	value := *spec.Agent
-	value.Revision = spec.Revision
-	return value, nil
-}
-
-func (s *Store) PutService(ctx context.Context, service domain.Service, options WriteOptions) error {
-	if err := service.Validate(); err != nil {
-		return err
-	}
-	spec, specErr := s.GetNodeSpec(ctx, service.AgentID)
-	if specErr != nil {
-		return specErr
-	}
-	if spec.Kind != domain.NodeSpecAgent {
-		return errors.New("service agent has the wrong node kind")
-	}
-	return s.putServiceDocument(ctx, service, options)
-}
-
-func (s *Store) GetService(ctx context.Context, id string) (domain.Service, error) {
-	var data []byte
-	var revision int64
-	var indexedAgent string
-	if err := s.db.QueryRowContext(ctx, `SELECT agent_id,document_json,revision FROM services WHERE id=?`, id).Scan(&indexedAgent, &data, &revision); err != nil {
-		return domain.Service{}, err
-	}
-	var service domain.Service
-	if err := json.Unmarshal(data, &service); err != nil {
-		return domain.Service{}, err
-	}
-	if service.ID != id || service.AgentID != indexedAgent {
-		return domain.Service{}, &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "service", Message: "stored service metadata does not match its row"}
-	}
-	service.Revision = revision
-	if err := service.Validate(); err != nil {
-		return domain.Service{}, fmt.Errorf("stored service is invalid: %w", err)
-	}
-	return service, nil
-}
-
-func (s *Store) ListServices(ctx context.Context, agentID string) ([]domain.Service, error) {
-	query := `SELECT id,agent_id,document_json,revision FROM services`
-	args := []any{}
-	if strings.TrimSpace(agentID) != "" {
-		query += ` WHERE agent_id=?`
-		args = append(args, agentID)
-	}
-	query += ` ORDER BY id`
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := []domain.Service{}
-	for rows.Next() {
-		var id, indexedAgent string
-		var data []byte
-		var revision int64
-		if err := rows.Scan(&id, &indexedAgent, &data, &revision); err != nil {
-			return nil, err
-		}
-		var service domain.Service
-		if err := json.Unmarshal(data, &service); err != nil {
-			return nil, err
-		}
-		if service.ID != id || service.AgentID != indexedAgent {
-			return nil, &domain.ApplyError{Code: "resource_metadata_mismatch", Path: "service", Message: "stored service metadata does not match its row"}
-		}
-		service.Revision = revision
-		if err := service.Validate(); err != nil {
-			return nil, fmt.Errorf("stored service is invalid: %w", err)
-		}
-		result = append(result, service)
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) DeleteService(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	request := struct {
-		ID      string `json:"id"`
-		IfMatch int64  `json:"if_match"`
-	}{ID: id, IfMatch: options.IfMatch}
-	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
-	if err != nil {
-		return err
-	}
-	if hit {
-		return nil
-	}
-	var revision int64
-	var agentID string
-	if err := tx.QueryRowContext(ctx, `SELECT revision,agent_id FROM services WHERE id=?`, id).Scan(&revision, &agentID); err != nil {
-		return err
-	}
-	if options.IfMatch <= 0 || options.IfMatch != revision {
-		return &RevisionConflictError{Resource: "service", Expected: options.IfMatch, Actual: revision}
-	}
-	if assigned, assignmentErr := serviceHasAssignment(ctx, tx, id); assignmentErr != nil {
-		return assignmentErr
-	} else if assigned {
-		return &domain.ApplyError{Code: "resource_conflict", Path: "service", Message: "assigned service cannot be deleted"}
-	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM services WHERE id=? AND revision=?`, id, revision)
-	if err != nil {
-		return err
-	}
-	if err := requireRevisionWrite(ctx, tx, result, "service", revision, `SELECT revision FROM services WHERE id=?`, id); err != nil {
-		return err
-	}
-	if err := insertAudit(ctx, tx, options.Actor, "delete", "service", id, revision, nil); err != nil {
-		return err
-	}
-	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
-		return err
-	}
-	return s.commitAndNotifyResources(tx, agentID)
 }

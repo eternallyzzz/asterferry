@@ -18,7 +18,7 @@ if (Test-Path -LiteralPath $destinationFull) {
     throw "quarantine destination already exists: $destinationFull"
 }
 
-$targetNames = @("tmp", "dist", "controller", "asterferry.exe", "integration.test.exe")
+$targetNames = @("tmp", "dist", "controller", "internal/dashboard/dist", "asterferry.exe", "integration.test.exe")
 $targets = @()
 foreach ($name in $targetNames) {
     $path = Join-Path $root $name

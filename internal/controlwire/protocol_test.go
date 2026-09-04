@@ -12,7 +12,7 @@ import (
 )
 
 func TestSnapshotProtoRoundTripAndChecksum(t *testing.T) {
-	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.SchemaVersion, NodeID: "agent-1", Generation: 3, Agent: &domain.AgentSpec{NodeID: "agent-1"}}
+	snapshot := domain.DesiredSnapshot{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: "agent-1", Generation: 3, Agent: &domain.AgentSpec{NodeID: "agent-1"}}
 	encoded, err := SnapshotToProto(snapshot)
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestBoundedMessageFraming(t *testing.T) {
 
 func TestObservedProtoRejectsDuplicatedTimestampMismatch(t *testing.T) {
 	state := domain.ObservedState{
-		SchemaVersion:     domain.SchemaVersion,
+		SchemaVersion:     domain.CurrentControlProtocolVersion,
 		NodeID:            "agent-1",
 		AppliedGeneration: 1,
 		Healthy:           true,

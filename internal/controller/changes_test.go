@@ -14,12 +14,12 @@ func TestSnapshotChangeNotificationTargetsOnlyAffectedNode(t *testing.T) {
 	}
 	defer store.Close()
 
-	gatewayChanges, unsubscribeGateway := store.SubscribeSnapshotChanges("gw")
+	gatewayChanges, unsubscribeGateway := store.ChangeBus().SubscribeSnapshotChanges("gw")
 	defer unsubscribeGateway()
-	agentChanges, unsubscribeAgent := store.SubscribeSnapshotChanges("agent")
+	agentChanges, unsubscribeAgent := store.ChangeBus().SubscribeSnapshotChanges("agent")
 	defer unsubscribeAgent()
 
-	store.notifySnapshotChanges("gw")
+	store.ChangeBus().notifySnapshotChanges("gw")
 	select {
 	case <-gatewayChanges:
 	default:
@@ -39,10 +39,10 @@ func TestResourceChangeNotificationCoalescesIDsWithoutDroppingWrites(t *testing.
 	}
 	defer store.Close()
 
-	changes, unsubscribe := store.SubscribeResourceChanges()
+	changes, unsubscribe := store.ChangeBus().SubscribeResourceChanges()
 	defer unsubscribe()
-	store.notifyResourceChanges("gw", "agent", "gw", "")
-	store.notifyResourceChanges("agent", "other")
+	store.ChangeBus().notifyResourceChanges("gw", "agent", "gw", "")
+	store.ChangeBus().notifyResourceChanges("agent", "other")
 
 	change := <-changes
 	seen := make(map[string]bool)
@@ -61,10 +61,10 @@ func TestResourceChangeNotificationPreservesPendingServiceHint(t *testing.T) {
 	}
 	defer store.Close()
 
-	changes, unsubscribe := store.SubscribeResourceChanges()
+	changes, unsubscribe := store.ChangeBus().SubscribeResourceChanges()
 	defer unsubscribe()
-	store.notifyResourceChanges("agent")
-	store.notifyPendingServiceChanges("gateway")
+	store.ChangeBus().notifyResourceChanges("agent")
+	store.ChangeBus().notifyPendingServiceChanges("gateway")
 
 	change := <-changes
 	if !change.PendingServices {
@@ -82,14 +82,14 @@ func TestResourceChangeNotificationDoesNotDropConcurrentWrites(t *testing.T) {
 	}
 	defer store.Close()
 
-	changes, unsubscribe := store.SubscribeResourceChanges()
+	changes, unsubscribe := store.ChangeBus().SubscribeResourceChanges()
 	defer unsubscribe()
 	const count = 512
 	producerDone := make(chan struct{})
 	go func() {
 		defer close(producerDone)
 		for index := 0; index < count; index++ {
-			store.notifyResourceChanges(fmt.Sprintf("node-%d", index))
+			store.ChangeBus().notifyResourceChanges(fmt.Sprintf("node-%d", index))
 		}
 	}()
 

@@ -18,7 +18,7 @@ import (
 // pending intent, enrollment token, node identity and initial spec are all
 // committed together, so a failed or racing enrollment cannot leave a node
 // that has no certificate, or a certificate for a node that has no spec.
-func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
+func (s *Repository) issuePendingNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
 	if pending.NodeID != nodeID {
 		return Certificate{}, ErrEnrollmentNodeMismatch
 	}
@@ -77,12 +77,11 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 		return Certificate{}, err
 	}
 	now := time.Now().UTC()
-	labels, err := json.Marshal(current.Labels)
-	if err != nil {
-		return Certificate{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id,name,labels_json,enabled,certificate_state,certificate_serial,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, nodeID, current.Name, labels, boolInt(current.Enabled), domain.CertificateActive, certificate.Serial, 1, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(id,name,enabled,certificate_state,certificate_serial,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, nodeID, current.Name, boolInt(current.Enabled), domain.CertificateActive, certificate.Serial, 1, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return Certificate{}, storageFailure("create enrolled node", err)
+	}
+	if err := insertNodeLabelsTx(ctx, tx, nodeID, current.Labels); err != nil {
+		return Certificate{}, storageFailure("create enrolled node labels", err)
 	}
 	if len(current.SpecJSON) > 0 {
 		var spec domain.NodeSpec
@@ -95,12 +94,11 @@ func (s *Store) issuePendingNodeCertificate(ctx context.Context, config Config, 
 		if err := spec.Validate(); err != nil {
 			return Certificate{}, err
 		}
-		envelope, err := json.Marshal(spec)
-		if err != nil {
-			return Certificate{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, nodeID, string(spec.Kind), envelope, 1, now.Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,revision,updated_at) VALUES(?,?,?,?)`, nodeID, string(spec.Kind), 1, now.Format(time.RFC3339Nano)); err != nil {
 			return Certificate{}, storageFailure("create enrolled node spec", err)
+		}
+		if err := writeNodeSpecNormalizedTx(ctx, tx, spec); err != nil {
+			return Certificate{}, storageFailure("create enrolled node spec fields", err)
 		}
 	}
 	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial}); err != nil {

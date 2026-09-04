@@ -155,7 +155,7 @@ func NewReconcilerWithReset(cache *SnapshotCache, apply ApplyFunc, reset ResetFu
 	if apply == nil {
 		apply = func(context.Context, domain.DesiredSnapshot, *domain.DesiredSnapshot) error { return nil }
 	}
-	reconciler := &Reconciler{cache: cache, apply: apply, reset: reset, state: domain.ObservedState{SchemaVersion: domain.SchemaVersion}}
+	reconciler := &Reconciler{cache: cache, apply: apply, reset: reset, state: domain.ObservedState{SchemaVersion: domain.CurrentControlProtocolVersion}}
 	if snapshot, err := cache.Read(); err == nil {
 		reconciler.last = snapshot.Generation
 		reconciler.lastChecksum = snapshot.Checksum
@@ -192,12 +192,6 @@ func (r *Reconciler) State() domain.ObservedState {
 	clone := r.state
 	clone.Sessions = append([]domain.SessionSummary(nil), r.state.Sessions...)
 	clone.Listeners = append([]domain.ListenerState(nil), r.state.Listeners...)
-	if r.state.Metrics != nil {
-		clone.Metrics = make(map[string]float64, len(r.state.Metrics))
-		for key, value := range r.state.Metrics {
-			clone.Metrics[key] = value
-		}
-	}
 	return clone
 }
 
@@ -319,7 +313,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 	r.mu.Lock()
 	r.last = snapshot.Generation
 	r.lastChecksum = snapshot.Checksum
-	r.state = domain.ObservedState{SchemaVersion: domain.SchemaVersion, NodeID: snapshot.NodeID, AppliedGeneration: snapshot.Generation, Healthy: true, ObservedAt: time.Now().UTC()}
+	r.state = domain.ObservedState{SchemaVersion: domain.CurrentControlProtocolVersion, NodeID: snapshot.NodeID, AppliedGeneration: snapshot.Generation, Healthy: true, ObservedAt: time.Now().UTC()}
 	r.disconnectedAt = time.Time{}
 	r.mu.Unlock()
 	return controlwire.ApplyResult(snapshot.Generation, snapshot.Checksum, v1.ApplyStatus_APPLY_STATUS_APPLIED, nil)

@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: AsterFerry Controller API
-  version: 1.0.0
-  description: Authoritative control-plane API for the AsterFerry v1.0.0 current architecture. Gateway and Agent business traffic never traverses this API.
+  version: 2.0.0
+  description: Authoritative control-plane API for the AsterFerry v2.0.0 normalized architecture. Gateway and Agent business traffic never traverses this API.
 servers:
   - url: /api/v1
 tags:
@@ -203,7 +203,7 @@ paths:
       tags: [nodes]
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }]
-      responses: { '200': { description: Latest observed state }, '404': { $ref: '#/components/responses/Unauthorized' } }
+      responses: { '200': { description: Latest observed state, content: { application/json: { schema: { $ref: '#/components/schemas/ObservedState' } } } }, '404': { $ref: '#/components/responses/Unauthorized' } }
   /nodes/{nodeId}/actions/{action}:
     post:
       tags: [operations]
@@ -595,6 +595,40 @@ components:
     NodeList: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Node' } } } }
     GatewaySpec: { type: object, required: [node_id, public_endpoints], properties: { node_id: { type: string }, public_endpoints: { type: array, items: { type: string } }, listeners: { type: array, items: { type: object } }, capacity: { type: object }, port_pool: { type: object }, transport: { type: object }, obfuscation: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, revision: { type: integer, format: int64 } } }
     AgentSpec: { type: object, required: [node_id], properties: { node_id: { type: string }, gateway_selector: { type: object }, proxies: { type: array, items: { type: object } }, routes: { type: array, items: { type: object } }, limits: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, logging: { type: object }, revision: { type: integer, format: int64 } } }
+    RuntimeMetrics:
+      type: object
+      description: Explicit controller-visible runtime metrics. New fields are protocol/API contract changes.
+      properties:
+        active_streams: { type: integer, format: int64, minimum: 0 }
+        active_sessions: { type: integer, format: int64, minimum: 0 }
+        active_egress: { type: integer, format: int64, minimum: 0 }
+        udp_oversize_drops: { type: integer, format: int64, minimum: 0 }
+        geoip_up: { type: boolean }
+        active_connections: { type: integer, format: int64, minimum: 0 }
+        active_flows: { type: integer, format: int64, minimum: 0 }
+        runtime_bytes_in_total: { type: integer, format: int64, minimum: 0 }
+        runtime_bytes_out_total: { type: integer, format: int64, minimum: 0 }
+        runtime_opened_total: { type: integer, format: int64, minimum: 0 }
+        runtime_closed_total: { type: integer, format: int64, minimum: 0 }
+        runtime_rejected_total: { type: integer, format: int64, minimum: 0 }
+        runtime_rate_limited_total: { type: integer, format: int64, minimum: 0 }
+        runtime_telemetry_dropped_total: { type: integer, format: int64, minimum: 0 }
+    SessionSummary: { type: object, properties: { id: { type: string }, peer_id: { type: string }, started_at: { type: string, format: date-time }, streams: { type: integer, minimum: 0 } } }
+    ListenerState: { type: object, properties: { protocol: { type: string, enum: [tcp, udp] }, bind: { type: string }, port: { type: integer, minimum: 1, maximum: 65535 }, ready: { type: boolean } } }
+    ObservedState:
+      type: object
+      required: [schema_version, node_id, applied_generation, healthy, degraded, metrics, observed_at]
+      properties:
+        schema_version: { type: integer, format: int32, enum: [1] }
+        node_id: { type: string }
+        applied_generation: { type: integer, format: int64, minimum: 0 }
+        healthy: { type: boolean }
+        degraded: { type: boolean }
+        last_error: { $ref: '#/components/schemas/ErrorDetail' }
+        sessions: { type: array, items: { $ref: '#/components/schemas/SessionSummary' } }
+        listeners: { type: array, items: { $ref: '#/components/schemas/ListenerState' } }
+        metrics: { $ref: '#/components/schemas/RuntimeMetrics' }
+        observed_at: { type: string, format: date-time }
     EgressPolicy: { type: object, properties: { enabled: { type: boolean }, tcp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, udp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, allow_cidrs: { type: array, items: { type: string } }, allow_special_cidrs: { type: array, items: { type: string } }, max_connections: { type: integer, minimum: 0, maximum: 1048576 } } }
     Service: { type: object, required: [id, agent_id, protocol, local_target, public_bind], properties: { id: { type: string }, agent_id: { type: string }, protocol: { type: string, enum: [tcp, udp] }, local_target: { type: string }, public_bind: { type: string }, public_port: { type: integer, minimum: 0, maximum: 65535 }, gateway_selector: { type: object }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
     Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
@@ -647,4 +681,5 @@ components:
         token_recoverable: { type: boolean, enum: [false] }
         metadata: { type: object }
         token_metadata: { type: object }
-    ErrorResponse: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, path: { type: string }, retryable: { type: boolean } } } } }
+    ErrorDetail: { type: object, properties: { code: { type: string }, message: { type: string }, path: { type: string }, retryable: { type: boolean } } }
+    ErrorResponse: { type: object, properties: { error: { $ref: '#/components/schemas/ErrorDetail' } } }

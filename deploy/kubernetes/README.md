@@ -17,13 +17,13 @@ helm upgrade --install asterferry-controller ./deploy/helm/asterferry-controller
   --set image.repository=ghcr.io/eternallyzzz/asterferry
 ```
 
-After the `v1.0.0` release is published, the same installation can use the
+After the `v2.0.0` release is published, the same installation can use the
 immutable OCI chart instead of the checked-out path:
 
 ```sh
 helm upgrade --install asterferry-controller \
   oci://ghcr.io/eternallyzzz/charts/asterferry-controller \
-  --version 1.0.0 --namespace asterferry --create-namespace
+  --version 2.0.0 --namespace asterferry --create-namespace
 ```
 
 Run `controller init` once against the mounted data directory (for example in
@@ -69,7 +69,7 @@ helm upgrade --install agent-east ./deploy/helm/asterferry-node \
 ```
 
 For the published chart, use
-`oci://ghcr.io/eternallyzzz/charts/asterferry-node --version 1.0.0` in place
+`oci://ghcr.io/eternallyzzz/charts/asterferry-node --version 2.0.0` in place
 of the local chart path. Set `image.digest` from the release manifest when a
 digest-pinned image deployment is required; it takes precedence over the
 chart's tag.

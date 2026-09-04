@@ -68,7 +68,7 @@ func SnapshotFromProto(value *v1.DesiredSnapshot) (domain.DesiredSnapshot, error
 	if value == nil {
 		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "missing_snapshot", Message: "desired snapshot is required"}
 	}
-	if value.SchemaVersion != domain.SchemaVersion {
+	if value.SchemaVersion != domain.CurrentControlProtocolVersion {
 		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "unknown_schema", Path: "schema_version", Message: ErrUnknownSchema.Error()}
 	}
 	if value.NodeId == "" || value.Generation == 0 || value.Checksum == "" {
@@ -81,7 +81,7 @@ func SnapshotFromProto(value *v1.DesiredSnapshot) (domain.DesiredSnapshot, error
 	if err := jsonutil.DecodeStrict(value.DocumentJson, &snapshot); err != nil {
 		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "invalid_snapshot", Path: "document_json", Message: "snapshot document is not valid JSON"}
 	}
-	if snapshot.SchemaVersion != uint32(domain.SchemaVersion) || snapshot.SchemaVersion != value.SchemaVersion || snapshot.NodeID != value.NodeId || snapshot.Generation != value.Generation || !strings.EqualFold(snapshot.Checksum, value.Checksum) {
+	if snapshot.SchemaVersion != domain.CurrentControlProtocolVersion || snapshot.SchemaVersion != value.SchemaVersion || snapshot.NodeID != value.NodeId || snapshot.Generation != value.Generation || !strings.EqualFold(snapshot.Checksum, value.Checksum) {
 		return domain.DesiredSnapshot{}, &domain.ApplyError{Code: "snapshot_metadata_mismatch", Message: "protobuf metadata does not match snapshot document"}
 	}
 	if err := snapshot.Validate(); err != nil {
@@ -96,12 +96,12 @@ func SnapshotFromProto(value *v1.DesiredSnapshot) (domain.DesiredSnapshot, error
 
 func ObservedToProto(state domain.ObservedState) (*v1.ObservedState, error) {
 	if state.SchemaVersion == 0 {
-		state.SchemaVersion = domain.SchemaVersion
+		state.SchemaVersion = domain.CurrentControlProtocolVersion
 	}
 	if state.NodeID == "" {
 		return nil, errors.New("observed state node id is required")
 	}
-	if state.SchemaVersion != domain.SchemaVersion {
+	if state.SchemaVersion != domain.CurrentControlProtocolVersion {
 		return nil, ErrUnknownSchema
 	}
 	if state.ObservedAt.IsZero() {
@@ -136,7 +136,7 @@ func ObservedFromProto(value *v1.ObservedState) (domain.ObservedState, error) {
 	if value == nil || len(value.DocumentJson) == 0 || len(value.DocumentJson) > MaxControlMessageBytes {
 		return domain.ObservedState{}, errors.New("invalid observed state")
 	}
-	if value.SchemaVersion != domain.SchemaVersion || value.NodeId == "" {
+	if value.SchemaVersion != domain.CurrentControlProtocolVersion || value.NodeId == "" {
 		return domain.ObservedState{}, ErrUnknownSchema
 	}
 	var state domain.ObservedState

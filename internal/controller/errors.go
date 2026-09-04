@@ -21,6 +21,7 @@ var (
 	ErrInvalidEnrollmentRequest = errors.New("invalid enrollment request")
 	ErrNodeEnrollmentNotAllowed = errors.New("node enrollment is not allowed")
 	ErrStorageFailure           = errors.New("controller storage failure")
+	ErrRepositoryRequired       = errors.New("controller repository is required")
 )
 
 func isCredentialError(err error) bool {

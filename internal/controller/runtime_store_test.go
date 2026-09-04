@@ -103,7 +103,7 @@ func TestRuntimeStoreSettingsAndSubscription(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	changes, unsubscribe := store.SubscribeRuntimeChanges()
+	changes, unsubscribe := store.ChangeBus().SubscribeRuntimeChanges()
 	defer unsubscribe()
 	if err := store.SetAdvancedOperationsEnabled(context.Background(), true, WriteOptions{Actor: "test"}); err != nil {
 		t.Fatal(err)

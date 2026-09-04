@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -11,41 +10,14 @@ import (
 	"asterferry/internal/domain"
 )
 
-// GetNodeSpec returns the node's one authoritative behavior document. A
-// missing row is intentional: enrollment creates an identity, and the
-// operator may choose its behavior later.
-func (s *Store) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec, error) {
-	var data []byte
-	var kind string
-	var revision int64
-	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT kind,document_json,revision,updated_at FROM node_specs WHERE node_id=?`, nodeID).Scan(&kind, &data, &revision, &updated)
-	if err != nil {
-		return domain.NodeSpec{}, err
-	}
-	return decodeStoredNodeSpec(nodeID, kind, data, revision, updated)
+// GetNodeSpec returns the node's typed behavior aggregate. The node_specs row
+// holds only its discriminator and repository metadata; configuration fields
+// live in the kind-specific relational tables.
+func (s *Repository) GetNodeSpec(ctx context.Context, nodeID string) (domain.NodeSpec, error) {
+	return loadNodeSpecNormalized(ctx, s.db, nodeID)
 }
 
-func decodeStoredNodeSpec(nodeID, kind string, data []byte, revision int64, updated string) (domain.NodeSpec, error) {
-	var spec domain.NodeSpec
-	if err := json.Unmarshal(data, &spec); err != nil {
-		return domain.NodeSpec{}, fmt.Errorf("decode node spec %q: %w", nodeID, err)
-	}
-	spec.NodeID = nodeID
-	spec.Kind = domain.NodeSpecKind(kind)
-	spec.Revision = revision
-	parsed, err := parseStoredTime("node_spec.updated_at", updated)
-	if err != nil {
-		return domain.NodeSpec{}, err
-	}
-	spec.UpdatedAt = parsed
-	if err := spec.Validate(); err != nil {
-		return domain.NodeSpec{}, fmt.Errorf("stored node spec is invalid: %w", err)
-	}
-	return spec, nil
-}
-
-func (s *Store) decorateNodeSpecKind(ctx context.Context, node *domain.Node) error {
+func (s *Repository) decorateNodeSpecKind(ctx context.Context, node *domain.Node) error {
 	if node == nil {
 		return nil
 	}
@@ -60,10 +32,7 @@ func (s *Store) decorateNodeSpecKind(ctx context.Context, node *domain.Node) err
 	return nil
 }
 
-// PutNodeSpec is the sole behavior write path. Storage and wire lifecycle
-// conversions happen around this envelope; no parallel typed spec table is
-// maintained.
-func (s *Store) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
+func (s *Repository) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
@@ -75,20 +44,16 @@ func (s *Store) PutNodeSpec(ctx context.Context, spec domain.NodeSpec, options W
 	return s.putNodeSpecDocument(ctx, spec, options)
 }
 
-func (s *Store) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
+// putNodeSpecDocument is retained as the application-level write name while
+// the physical representation is now a normalized aggregate.
+func (s *Repository) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, options WriteOptions) error {
 	requestSpec := spec
-	if spec.Gateway != nil {
-		gateway := *spec.Gateway
-		requestSpec.Gateway = &gateway
-	}
-	if spec.Agent != nil {
-		agent := *spec.Agent
-		requestSpec.Agent = &agent
-	}
 	requestSpec.Revision = 0
 	requestSpec.UpdatedAt = time.Time{}
 	if requestSpec.Gateway != nil {
-		requestSpec.Gateway.Obfuscation = obfuscationRequestPolicy(requestSpec.Gateway.Obfuscation)
+		value := *requestSpec.Gateway
+		value.Obfuscation = obfuscationRequestPolicy(value.Obfuscation)
+		requestSpec.Gateway = &value
 	}
 	idempotentRequest := struct {
 		Spec    domain.NodeSpec `json:"spec"`
@@ -152,21 +117,20 @@ func (s *Store) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, o
 	if spec.Agent != nil {
 		spec.Agent.Revision = revision
 	}
-	document, err := json.Marshal(spec)
-	if err != nil {
-		return err
-	}
 	now := spec.UpdatedAt.Format(time.RFC3339Nano)
 	if isInsert {
-		_, err = tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,document_json,revision,updated_at) VALUES(?,?,?,?,?)`, spec.NodeID, string(spec.Kind), document, revision, now)
+		_, err = tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,revision,updated_at) VALUES(?,?,?,?)`, spec.NodeID, string(spec.Kind), revision, now)
 	} else {
 		var result sql.Result
-		result, err = tx.ExecContext(ctx, `UPDATE node_specs SET kind=?,document_json=?,revision=?,updated_at=? WHERE node_id=? AND revision=?`, string(spec.Kind), document, revision, now, spec.NodeID, revision-1)
+		result, err = tx.ExecContext(ctx, `UPDATE node_specs SET kind=?,revision=?,updated_at=? WHERE node_id=? AND revision=?`, string(spec.Kind), revision, now, spec.NodeID, revision-1)
 		if err == nil {
 			err = requireRevisionWrite(ctx, tx, result, "node_spec", revision-1, `SELECT revision FROM node_specs WHERE node_id=?`, spec.NodeID)
 		}
 	}
 	if err != nil {
+		return err
+	}
+	if err := writeNodeSpecNormalizedTx(ctx, tx, spec); err != nil {
 		return err
 	}
 	affectedNodes := []string{spec.NodeID}
@@ -192,10 +156,7 @@ func (s *Store) putNodeSpecDocument(ctx context.Context, spec domain.NodeSpec, o
 	return s.commitAndNotifyResources(tx, affectedNodes...)
 }
 
-func (s *Store) DeleteNodeSpec(ctx context.Context, nodeID string, options WriteOptions) error {
-	// Deleting a behavior publishes an empty desired snapshot. Serialize the
-	// read/clear/write sequence with EnsureDesiredSnapshot so a reconnect cannot
-	// materialize the retired behavior after this transaction commits.
+func (s *Repository) DeleteNodeSpec(ctx context.Context, nodeID string, options WriteOptions) error {
 	s.snapshotMu.Lock()
 	defer s.snapshotMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -249,10 +210,6 @@ func (s *Store) DeleteNodeSpec(ctx context.Context, nodeID string, options Write
 	return s.commitAndNotifyResources(tx, append(participants, nodeID)...)
 }
 
-// nodeSpecDependentsTx is the storage invariant behind behavior replacement
-// and deletion. A Node can be reconfigured only after its old behavior has no
-// live business resources; otherwise the same identity could silently change
-// from a Gateway to an Agent while assignments/services still point at it.
 func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) (int, error) {
 	var dependents int
 	switch domain.NodeSpecKind(kind) {
@@ -261,9 +218,7 @@ func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) 
 			return 0, err
 		}
 	case domain.NodeSpecAgent:
-		if err := tx.QueryRowContext(ctx, `SELECT
-			(SELECT COUNT(*) FROM services WHERE agent_id=?) +
-			(SELECT COUNT(*) FROM assignments WHERE agent_id=?)`, nodeID, nodeID).Scan(&dependents); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM services WHERE agent_id=?) + (SELECT COUNT(*) FROM assignments WHERE agent_id=?)`, nodeID, nodeID).Scan(&dependents); err != nil {
 			return 0, err
 		}
 	default:
@@ -272,33 +227,36 @@ func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) 
 	return dependents, nil
 }
 
-func (s *Store) ListNodeSpecs(ctx context.Context) ([]domain.NodeSpec, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id,kind,document_json,revision,updated_at FROM node_specs ORDER BY node_id`)
+func (s *Repository) ListNodeSpecs(ctx context.Context) ([]domain.NodeSpec, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id FROM node_specs ORDER BY node_id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	result := make([]domain.NodeSpec, 0)
+	ids := make([]string, 0)
 	for rows.Next() {
-		var nodeID, kind, updated string
-		var data []byte
-		var revision int64
-		if err := rows.Scan(&nodeID, &kind, &data, &revision, &updated); err != nil {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
 			return nil, err
 		}
-		var spec domain.NodeSpec
-		if err := json.Unmarshal(data, &spec); err != nil {
-			return nil, err
-		}
-		spec.NodeID, spec.Kind, spec.Revision = nodeID, domain.NodeSpecKind(kind), revision
-		spec.UpdatedAt, err = parseStoredTime("node_spec.updated_at", updated)
-		if err != nil {
-			return nil, err
-		}
-		if err := spec.Validate(); err != nil {
-			return nil, err
+		ids = append(ids, nodeID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	specs, err := loadNodeSpecsBatchNormalized(ctx, s.db, ids)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.NodeSpec, 0, len(ids))
+	for _, nodeID := range ids {
+		spec, ok := specs[nodeID]
+		if !ok {
+			return nil, fmt.Errorf("stored node spec %q disappeared while listing", nodeID)
 		}
 		result = append(result, spec)
 	}
-	return result, rows.Err()
+	return result, nil
 }

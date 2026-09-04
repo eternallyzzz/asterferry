@@ -44,7 +44,14 @@ func (d *DataPlaneRuntime) buildAgent(state *dataGeneration, spec domain.AgentSp
 }
 
 func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment domain.Assignment) {
-	backoff := time.Second
+	reconnect := newAgentReconnectState()
+	transition := func(event agentReconnectEvent) bool {
+		if err := reconnect.transition(event); err != nil {
+			d.logger.Error("invalid Agent reconnect transition", "assignment_id", assignment.ID, "event", event.String(), "error", err)
+			return false
+		}
+		return true
+	}
 	// The QUIC TLS chain is shared by all Controller-issued nodes. Bind the
 	// session to the assigned Gateway identity as well, otherwise any
 	// CA-signed node could complete the transport handshake and receive this
@@ -54,19 +61,41 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 		if state.ctx.Err() != nil {
 			return
 		}
+		if !transition(agentReconnectStartDial) {
+			return
+		}
 		d.tlsMu.RLock()
 		clientTLS := d.clientTLS
 		d.tlsMu.RUnlock()
 		connection, packetConn, err := afdp.DialWithObfuscation(state.ctx, assignment.PublicEndpoint, clientTLS, d.quicOptions, afdpObfuscationOptions(assignment.Obfuscation))
-		if err == nil {
+		if err != nil {
+			if !transition(agentReconnectDialFailed) {
+				return
+			}
+		} else if !transition(agentReconnectConnected) {
+			return
+		} else {
 			session, sessionErr := afdp.ClientSession(state.ctx, connection, afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID, Capabilities: []string{"tcp", "udp", "http", "socks5"}}, options)
-			var admitErr error
-			if sessionErr == nil {
-				admitErr = d.engine.AuthorizeSession(afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID})
+			if sessionErr != nil {
+				if !transition(agentReconnectHandshakeFailed) {
+					return
+				}
+				d.logger.Warn("data-plane Agent session rejected", "assignment_id", assignment.ID, "gateway", assignment.GatewayID, "error", sessionErr)
+				_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP handshake rejected")
+			} else if !transition(agentReconnectStartAdmission) {
+				return
+			} else {
+				admitErr := d.engine.AuthorizeSession(afdp.SessionHello{AssignmentID: assignment.ID, Generation: assignment.Generation, AgentID: assignment.AgentID})
 				if admitErr != nil {
+					if !transition(agentReconnectAdmissionRejected) {
+						return
+					}
 					_ = session.Close()
 					_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP session limit reached")
 				} else {
+					if !transition(agentReconnectAdmitted) {
+						return
+					}
 					sourceIP, sourcePort := runtimeAddr(connection.RemoteAddr())
 					runtimeSession := state.openRuntime(domain.RuntimeConnection{
 						Type:         domain.RuntimeConnectionSession,
@@ -88,24 +117,18 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 					}
 					d.engine.ReleaseSession()
 					_ = session.Close()
+					if !transition(agentReconnectServingEnded) {
+						return
+					}
 				}
-				backoff = agentReconnectBackoffAfterAttempt(backoff, sessionErr, admitErr)
-			} else {
-				d.logger.Warn("data-plane Agent session rejected", "assignment_id", assignment.ID, "gateway", assignment.GatewayID, "error", sessionErr)
-				_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF01), "AFDP handshake rejected")
 			}
 			_ = connection.CloseWithError(quic.ApplicationErrorCode(0xAF00), "AFDP connection closed")
 			_ = packetConn.Close()
-		} else if state.ctx.Err() == nil {
+		}
+		if err != nil && state.ctx.Err() == nil {
 			d.logger.Warn("data-plane Agent connection failed", "assignment_id", assignment.ID, "endpoint", assignment.PublicEndpoint, "error", err)
 		}
-		wait := backoff
-		if backoff < 30*time.Second {
-			backoff *= 2
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-		}
+		wait := reconnect.nextWait()
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
@@ -116,16 +139,10 @@ func (d *DataPlaneRuntime) runAgentAssignment(state *dataGeneration, assignment 
 				default:
 				}
 			}
+			_ = reconnect.transition(agentReconnectCanceled)
 			return
 		}
 	}
-}
-
-func agentReconnectBackoffAfterAttempt(current time.Duration, sessionErr, admissionErr error) time.Duration {
-	if sessionErr == nil && admissionErr == nil {
-		return time.Second
-	}
-	return current
 }
 
 func (d *DataPlaneRuntime) serveAgentSession(state *dataGeneration, session *afdp.Session) {

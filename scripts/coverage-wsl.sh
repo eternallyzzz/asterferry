@@ -3,7 +3,22 @@ set -euo pipefail
 
 root="${ASTERFERRY_WSL_ROOT:-$(git rev-parse --show-toplevel)}"
 output_dir="${ASTERFERRY_COVERAGE_OUTPUT_DIR:-$root/tmp/coverage/wsl}"
-expected_go_version="${ASTERFERRY_EXPECTED_GO_VERSION:-go1.26.7}"
+toolchain_go_version=""
+if [[ -z "${ASTERFERRY_EXPECTED_GO_VERSION:-}" && -f "$root/.toolchain.json" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    toolchain_go_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["release"]["go"])' "$root/.toolchain.json")"
+  else
+    toolchain_go_version="$(sed -nE 's/^[[:space:]]*"go":[[:space:]]*"([^"]+)".*/\1/p' "$root/.toolchain.json" | head -n 1)"
+  fi
+fi
+if [[ -n "${ASTERFERRY_EXPECTED_GO_VERSION:-}" ]]; then
+  expected_go_version="$ASTERFERRY_EXPECTED_GO_VERSION"
+elif [[ -n "$toolchain_go_version" ]]; then
+  expected_go_version="go$toolchain_go_version"
+else
+  echo "coverage-wsl: unable to read release Go version from $root/.toolchain.json" >&2
+  exit 1
+fi
 mkdir -p "$output_dir"
 
 # The WSL runner invokes this script as a non-login shell. Keep the standard

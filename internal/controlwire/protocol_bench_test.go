@@ -10,7 +10,7 @@ import (
 
 func BenchmarkControlwireSnapshotEncodeDecode(b *testing.B) {
 	snapshot := domain.DesiredSnapshot{
-		SchemaVersion: domain.SchemaVersion,
+		SchemaVersion: domain.CurrentControlProtocolVersion,
 		NodeID:        "agent-1",
 		Generation:    7,
 		Agent:         &domain.AgentSpec{NodeID: "agent-1"},
