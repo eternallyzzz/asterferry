@@ -8,6 +8,7 @@ on:
       - ".goreleaser.yaml"
       - "CHANGELOG.md"
       - "Dockerfile"
+      - ".toolchain.json"
       - "README.md"
       - "api/**"
       - "deploy/**"
@@ -82,6 +83,10 @@ jobs:
           python3 scripts/sync-openapi.py --check
       - name: Scan tracked files for release secrets
         run: python3 scripts/secret-scan.py
+      - name: Check source layout and toolchain pins
+        run: |
+          python3 scripts/check-source-layout.py
+          python3 scripts/check-toolchain.py
       - name: Check patch whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD
@@ -145,6 +150,28 @@ jobs:
           mkdir -p tmp/ci-chart
           helm package deploy/helm/asterferry-controller --destination tmp/ci-chart
           helm package deploy/helm/asterferry-node --destination tmp/ci-chart
+
+  dashboard_compatibility:
+    name: Dashboard compatibility (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up compatibility Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+      - name: Pin compatibility npm
+        run: npm install --global npm@11.0.0
+      - name: Verify Dashboard compatibility lane
+        run: |
+          npm --prefix web/dashboard ci
+          npm --prefix web/dashboard run lint
+          npm --prefix web/dashboard test
+          npm --prefix web/dashboard run build
 
   windows:
     name: Go checks (Windows)
@@ -229,7 +256,7 @@ jobs:
   image:
     name: Build development image
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    needs: [test, e2e, protocol_fuzz]
+    needs: [test, dashboard_compatibility, e2e, protocol_fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -268,7 +295,7 @@ jobs:
   release_build:
     name: Build release artifacts
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, e2e, protocol_fuzz]
+    needs: [test, dashboard_compatibility, e2e, protocol_fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -352,10 +379,13 @@ jobs:
               raise SystemExit(f"release version {stable_version} is inconsistent: {details}")
           if len(set(versions.values())) != 1:
               raise SystemExit(f"release version sources disagree: {versions}")
-          if Path("api/openapi.yaml").read_bytes() != Path("internal/controller/openapi.yaml").read_bytes():
-              raise SystemExit("API OpenAPI documents are not identical")
           print(f"release tag {tag_version} is consistent with stable source version {stable_version}")
           PY
+      - name: Verify generated sources and layout
+        run: |
+          python3 scripts/sync-openapi.py --check
+          python3 scripts/check-source-layout.py
+          python3 scripts/check-toolchain.py
       - name: Verify dashboard assets
         run: |
           npm --prefix web/dashboard ci

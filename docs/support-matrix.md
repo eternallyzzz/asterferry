@@ -13,10 +13,12 @@ single-replica; PostgreSQL does not turn the Controller into an HA service.
 | Controller database | SQLite (default) and PostgreSQL (production-scale) | SQLite test suite and PostgreSQL 16 CI service |
 | GeoIP | Optional external MaxMind-compatible file | Read-only mount/path, freshness check and explicit fallback tests |
 
-Go `1.26.7`, Node.js `24.19.0` and npm `12.0.2` are the pinned release-build
-toolchains. Node.js is a build-only dependency; production Controller and Node
-processes do not need Node.js. Dependency upgrades are frozen during the RC
-soak and are evaluated in a separate change.
+The exact Go, Node.js and npm release-build pins live in `.toolchain.json` and
+are checked against CI, Docker and release scripts. Node.js is a build-only
+dependency; production Controller and Node processes do not need Node.js.
+The Dashboard is also tested in CI against the pinned Node.js 22 compatibility
+lane. Dependency upgrades are frozen during the RC soak and are evaluated in a
+separate change.
 
 All Controller and Node binaries in one deployment must use the same v1.x
 release line. Mixed releases are not a supported upgrade strategy when the

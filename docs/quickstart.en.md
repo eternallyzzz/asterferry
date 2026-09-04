@@ -45,7 +45,9 @@ Replace these example values with real addresses:
 
 ## 2. Prepare the binary and network
 
-Use a release package or build from source. Building from source requires Go `1.26.7`; building the Dashboard separately uses the release toolchain Node.js `24.19.0` and npm `12.0.2`.
+Use a release package or build from source. Source builds use the exact Go,
+Node.js and npm versions recorded in `.toolchain.json`; the repository checks
+the same pins in CI, Docker and release scripts.
 
 Build from the repository:
 

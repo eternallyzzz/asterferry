@@ -1,3 +1,4 @@
+# Code generated from internal/controller/openapi.yaml; DO NOT EDIT.
 openapi: 3.0.3
 info:
   title: AsterFerry Controller API

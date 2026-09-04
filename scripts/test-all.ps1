@@ -10,12 +10,14 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 
+$toolchain = Get-Content -Raw -LiteralPath (Join-Path $root ".toolchain.json") | ConvertFrom-Json
+
 if (-not $PSBoundParameters.ContainsKey("WslDistro") -and -not [string]::IsNullOrWhiteSpace($env:ASTERFERRY_WSL_DISTRO)) {
     $WslDistro = $env:ASTERFERRY_WSL_DISTRO
 }
 
 $expectedGoVersion = if ([string]::IsNullOrWhiteSpace($env:ASTERFERRY_EXPECTED_GO_VERSION)) {
-    "go1.26.7"
+    "go$($toolchain.release.go)"
 } else {
     $env:ASTERFERRY_EXPECTED_GO_VERSION
 }
@@ -146,6 +148,7 @@ try {
     Remove-FrontendScratch
     Require-Command "go"
     Require-Command "gofmt"
+    Require-Command "python"
     Require-Command "node"
     Require-Command "npm"
     Require-Command "wsl.exe"
@@ -159,12 +162,13 @@ try {
         throw "Expected Go $expectedGoVersion, got: $goVersion"
     }
     $nodeVersion = (& node --version).Trim()
-    if ($nodeVersion -ne "v24.19.0") {
-        throw "Expected Node v24.19.0, got: $nodeVersion"
+    $expectedNodeVersion = "v$($toolchain.release.node)"
+    if ($nodeVersion -ne $expectedNodeVersion) {
+        throw "Expected Node $expectedNodeVersion, got: $nodeVersion"
     }
     $npmVersion = (& npm --version).Trim()
-    if ($npmVersion -ne "12.0.2") {
-        throw "Expected npm 12.0.2, got: $npmVersion"
+    if ($npmVersion -ne [string]$toolchain.release.npm) {
+        throw "Expected npm $($toolchain.release.npm), got: $npmVersion"
     }
     $cgoEnabled = (& go env CGO_ENABLED).Trim()
     if (-not $SkipRace -and $cgoEnabled -ne "1") {
@@ -184,6 +188,10 @@ try {
     if ($unformatted.Count -gt 0) {
         throw "Unformatted Go files: $($unformatted -join ', ')"
     }
+
+    Invoke-Logged "Source layout check" "python" @((Join-Path $root "scripts/check-source-layout.py"))
+    Invoke-Logged "Toolchain pin check" "python" @((Join-Path $root "scripts/check-toolchain.py"))
+    Invoke-Logged "Tracked-file secret scan" "python" @((Join-Path $root "scripts/secret-scan.py"))
 
     $commit = (& git rev-parse HEAD).Trim()
     $metadata = [ordered]@{
@@ -225,7 +233,7 @@ try {
 
     Invoke-Logged "Go module verification" "go" @("mod", "verify")
     Invoke-Logged "Windows go vet" "go" @("vet", "./...")
-    Invoke-Logged "Windows staticcheck" "staticcheck" @("./...")
+    Invoke-Logged "Windows staticcheck" "staticcheck" @("-checks=all,-SA1019", "./...")
     Invoke-Logged "Windows vulnerability check" "govulncheck" @("./...")
     Invoke-Logged "Windows full tests" "go" @("test", "-count=1", "./...")
     Invoke-Logged "Windows Controller/Gateway/Agent smoke test" "go" @("test", "-tags=integration", "-count=1", "-timeout=5m", "./internal/integration")

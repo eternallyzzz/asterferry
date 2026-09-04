@@ -68,13 +68,17 @@ Require-Command "python"
 if (-not $SkipDocker) {
     Require-Command "docker"
 }
+Invoke-Checked "Toolchain pin check" "python" @((Join-Path $root "scripts/check-toolchain.py"))
+$toolchain = Get-Content -Raw -LiteralPath (Join-Path $root ".toolchain.json") | ConvertFrom-Json
+$expectedNodeVersion = "v$($toolchain.release.node)"
 $nodeVersion = (& node --version).Trim()
-if ($LASTEXITCODE -ne 0 -or $nodeVersion -ne "v24.19.0") {
-    throw "Expected Node v24.19.0, got: $nodeVersion"
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -ne $expectedNodeVersion) {
+    throw "Expected Node $expectedNodeVersion, got: $nodeVersion"
 }
+$expectedNpmVersion = [string]$toolchain.release.npm
 $npmVersion = (& npm --version).Trim()
-if ($LASTEXITCODE -ne 0 -or $npmVersion -ne "12.0.2") {
-    throw "Expected npm 12.0.2, got: $npmVersion"
+if ($LASTEXITCODE -ne 0 -or $npmVersion -ne $expectedNpmVersion) {
+    throw "Expected npm $expectedNpmVersion, got: $npmVersion"
 }
 
 $tmpRoot = [System.IO.Path]::GetFullPath((Join-Path $root "tmp"))
@@ -107,12 +111,6 @@ foreach ($openapi in @("api/openapi.yaml", "internal/controller/openapi.yaml")) 
     $versionSources[$openapi] = $openapiVersion.Groups[1].Value
 }
 
-$apiOpenAPI = Get-Content -Raw -LiteralPath (Join-Path $root "api/openapi.yaml")
-$controllerOpenAPI = Get-Content -Raw -LiteralPath (Join-Path $root "internal/controller/openapi.yaml")
-if (($apiOpenAPI -replace "\r\n", "\n") -ne ($controllerOpenAPI -replace "\r\n", "\n")) {
-    throw "API OpenAPI documents are not identical"
-}
-
 $chartPaths = @("deploy/helm/asterferry-controller", "deploy/helm/asterferry-node")
 foreach ($chart in $chartPaths) {
     $chartPath = Join-Path $root "$chart/Chart.yaml"
@@ -143,6 +141,7 @@ if ($distinctVersions.Count -ne 1) {
 }
 
 Invoke-Checked "OpenAPI generated copy" "python" @("scripts/sync-openapi.py", "--check")
+Invoke-Checked "Source layout check" "python" @((Join-Path $root "scripts/check-source-layout.py"))
 Invoke-Checked "Tracked-file secret scan" "python" @((Join-Path $root "scripts/secret-scan.py"))
 if (Test-Path -LiteralPath (Join-Path $root "internal/dataplane/cn.mmdb")) {
     throw "GeoIP database must be supplied as an external, versioned release resource; it must not be tracked in source"

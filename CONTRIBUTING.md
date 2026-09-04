@@ -14,10 +14,16 @@ staging.
 
 To move generated local state and any test credentials out of the workspace,
 run `pwsh -NoProfile -File scripts/clean-local-state.ps1`. The command moves
-`tmp/`, `dist/`, `controller/` and root test binaries into a recoverable
-quarantine directory outside the repository.
+`tmp/`, `dist/`, `controller/`, generated Dashboard assets and root test
+binaries into a recoverable quarantine directory outside the repository.
+
+Keep handwritten production Go files in `cmd/` and `internal/` below 600 lines;
+split by responsibility when a file approaches the limit. Generated protobuf
+and embedded-asset sources are excluded by the layout check, but new generated
+exceptions must be documented in `scripts/check-source-layout.py`.
 
 API, wire and database changes must update the canonical OpenAPI or protocol
 documentation and state whether the v1.x compatibility contract remains
-intact. Run `python scripts/sync-openapi.py` after editing the canonical
-OpenAPI document.
+intact. The canonical OpenAPI document is
+`internal/controller/openapi.yaml`; run `python scripts/sync-openapi.py` after
+editing it. `api/openapi.yaml` is generated and must not be edited directly.

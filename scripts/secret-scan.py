@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 from pathlib import Path
@@ -20,12 +21,21 @@ def tracked_files(root: Path) -> list[str]:
     result = subprocess.run(
         ["git", "ls-files"], cwd=root, check=True, capture_output=True, text=True
     )
+    return [line for line in result.stdout.splitlines() if line and (root / line).is_file()]
+
+
+def staged_files(root: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     return [line for line in result.stdout.splitlines() if line]
 
 
-def main() -> int:
-    root = Path(__file__).resolve().parents[1]
-    files = tracked_files(root)
+def scan(root: Path, files: list[str], label: str) -> int:
     forbidden = []
     matches = []
     for name in files:
@@ -42,7 +52,7 @@ def main() -> int:
         try:
             data = path.read_bytes()
         except OSError as exc:
-            raise SystemExit(f"cannot read tracked file {name}: {exc}") from exc
+            raise SystemExit(f"cannot read {label} file {name}: {exc}") from exc
         if b"\x00" in data:
             continue
         text = data.decode("utf-8", errors="replace")
@@ -51,11 +61,21 @@ def main() -> int:
                 matches.append(f"{name}:{line_number}:{line}")
 
     if forbidden:
-        raise SystemExit("tracked credential, database or GeoIP material is forbidden: " + ", ".join(forbidden))
+        raise SystemExit(f"{label} credential, database or GeoIP material is forbidden: " + ", ".join(forbidden))
     if matches:
-        raise SystemExit("high-signal credential material found in tracked files:\n" + "\n".join(matches))
-    print(f"Tracked-file secret scan passed ({len(files)} files checked).")
+        raise SystemExit(f"high-signal credential material found in {label} files:\n" + "\n".join(matches))
+    print(f"{label.capitalize()} secret scan passed ({len(files)} files checked).")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--staged", action="store_true", help="scan staged additions and modifications")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    if args.staged:
+        return scan(root, staged_files(root), "staged")
+    return scan(root, tracked_files(root), "tracked-file")
 
 
 if __name__ == "__main__":

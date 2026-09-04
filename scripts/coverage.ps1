@@ -7,13 +7,14 @@ $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
+$toolchain = Get-Content -Raw -LiteralPath (Join-Path $root ".toolchain.json") | ConvertFrom-Json
 
 if (-not $PSBoundParameters.ContainsKey("WslDistro") -and -not [string]::IsNullOrWhiteSpace($env:ASTERFERRY_WSL_DISTRO)) {
     $WslDistro = $env:ASTERFERRY_WSL_DISTRO
 }
 
 $expectedGoVersion = if ([string]::IsNullOrWhiteSpace($env:ASTERFERRY_EXPECTED_GO_VERSION)) {
-    "go1.26.7"
+    "go$($toolchain.release.go)"
 } else {
     $env:ASTERFERRY_EXPECTED_GO_VERSION
 }
