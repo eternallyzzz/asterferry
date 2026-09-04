@@ -94,7 +94,7 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 	}
 	request := pendingBootstrapRequestForHash(pending, spec)
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
@@ -108,7 +108,7 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 		if loadErr != nil {
 			return "", PendingNodeBootstrap{}, loadErr
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitWriteTx(ctx, tx); err != nil {
 			return "", PendingNodeBootstrap{}, err
 		}
 		return "", stored.PendingNodeBootstrap, ErrSecretAlreadyCreated
@@ -139,7 +139,7 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, pendingBootstrapIdempotencyResponse(pending)); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
 	return plain, pending, nil
@@ -238,7 +238,7 @@ func (s *ResourceRepository) ReissuePendingNodeBootstrap(ctx context.Context, no
 		NodeID string `json:"node_id"`
 		Action string `json:"action"`
 	}{NodeID: nodeID, Action: "reissue"}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
@@ -252,7 +252,7 @@ func (s *ResourceRepository) ReissuePendingNodeBootstrap(ctx context.Context, no
 		if loadErr != nil {
 			return "", PendingNodeBootstrap{}, loadErr
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitWriteTx(ctx, tx); err != nil {
 			return "", PendingNodeBootstrap{}, err
 		}
 		return "", pending.PendingNodeBootstrap, ErrSecretAlreadyCreated
@@ -277,14 +277,14 @@ func (s *ResourceRepository) ReissuePendingNodeBootstrap(ctx context.Context, no
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, pendingBootstrapIdempotencyResponse(pending.PendingNodeBootstrap)); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
 	return plain, pending.PendingNodeBootstrap, nil
 }
 
 func (s *ResourceRepository) DeletePendingNodeBootstrap(ctx context.Context, nodeID string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -298,7 +298,7 @@ func (s *ResourceRepository) DeletePendingNodeBootstrap(ctx context.Context, nod
 		return err
 	}
 	if hit {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM node_bootstraps WHERE node_id=?`, nodeID)
 	if err != nil {
@@ -317,7 +317,7 @@ func (s *ResourceRepository) DeletePendingNodeBootstrap(ctx context.Context, nod
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"node_id": nodeID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }
 
 const pendingBootstrapSelect = `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,spec_json FROM node_bootstraps`

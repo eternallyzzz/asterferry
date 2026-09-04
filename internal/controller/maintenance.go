@@ -12,7 +12,7 @@ func (s *ResourceRepository) PruneHistory(ctx context.Context, now time.Time, id
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,10 @@ func (s *ResourceRepository) PruneHistory(ctx context.Context, now time.Time, id
 	if _, err := tx.ExecContext(ctx, `DELETE FROM node_bootstraps WHERE expires_at <= ?`, now.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM web_sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL`, now.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return err
 	}
 	return nil

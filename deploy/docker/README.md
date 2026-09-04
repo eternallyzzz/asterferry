@@ -52,16 +52,17 @@ docker compose -f deploy/docker/compose.yaml up -d
 docker compose -f deploy/docker/compose.yaml ps
 ```
 
-The Controller health check is anonymous `/healthz`; readiness and the
-management HTTPS metrics endpoint are authenticated API endpoints. Native
+The Controller health check is anonymous `/healthz`; `/readyz` is a public
+boolean readiness probe, and the management HTTPS metrics endpoint is an
+authenticated API endpoint. Native
 configs additionally default to a loopback-only plain-HTTP metrics listener at
 `127.0.0.1:9090`; publish it to a trusted Prometheus network only after adding
 the corresponding compose/network rule and changing `metrics_listen` to the
 container bind address (for example `:9090`). `/openapi.yaml` and
 `/api/v1/openapi.yaml` are anonymous for client discovery; restrict them at the
-reverse proxy/network layer if required. Browser Cookie sessions are
-process-local, last 12 hours, and are lost on restart or when a request reaches
-another replica (the example is single-replica).
+reverse proxy/network layer if required. Browser Cookie sessions are durable
+hashed records with a 12-hour lifetime. PostgreSQL active/standby deployments
+share them; the example remains single-replica SQLite.
 
 Nodes reconnect to the Controller and continue their last encrypted snapshot
 while it is unavailable.

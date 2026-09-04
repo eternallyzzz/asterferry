@@ -44,7 +44,7 @@ func (s *ResourceRepository) CreateAPITokenWithOptions(ctx context.Context, user
 	if expiresAt != nil {
 		request["expires_at"] = expiresAt.Format(time.RFC3339Nano)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return "", APIToken{}, err
 	}
@@ -89,7 +89,7 @@ func (s *ResourceRepository) CreateAPITokenWithOptions(ctx context.Context, user
 		if parseErr != nil {
 			return "", APIToken{}, parseErr
 		}
-		if err := tx.Commit(); err != nil {
+		if err := s.commitWriteTx(ctx, tx); err != nil {
 			return "", APIToken{}, err
 		}
 		return "", token, ErrSecretAlreadyCreated
@@ -117,7 +117,7 @@ func (s *ResourceRepository) CreateAPITokenWithOptions(ctx context.Context, user
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
 		return "", APIToken{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return "", APIToken{}, err
 	}
 	return plain, APIToken{ID: id, UserID: userID, Name: name, ExpiresAt: expiresAt, CreatedAt: now}, nil
@@ -221,7 +221,7 @@ func (s *ResourceRepository) RevokeAPITokenForUser(ctx context.Context, userID, 
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(id) == "" {
 		return sql.ErrNoRows
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -232,7 +232,7 @@ func (s *ResourceRepository) RevokeAPITokenForUser(ctx context.Context, userID, 
 		return err
 	}
 	if hit {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at=? WHERE id=? AND user_id=? AND revoked_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), id, userID)
 	if err != nil {
@@ -251,11 +251,11 @@ func (s *ResourceRepository) RevokeAPITokenForUser(ctx context.Context, userID, 
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }
 
 func (s *ResourceRepository) RevokeAPITokenWithOptions(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -266,7 +266,7 @@ func (s *ResourceRepository) RevokeAPITokenWithOptions(ctx context.Context, id s
 		return err
 	}
 	if hit {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL`, now, id)
@@ -286,5 +286,5 @@ func (s *ResourceRepository) RevokeAPITokenWithOptions(ctx context.Context, id s
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]string{"id": id}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }

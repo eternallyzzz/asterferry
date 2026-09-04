@@ -24,7 +24,7 @@ func (s *ResourceRepository) UpdateAssignmentState(ctx context.Context, id, stat
 	if state == domain.AssignmentApplied {
 		return domain.Assignment{}, &domain.ApplyError{Code: "state_controller_owned", Path: "state", Message: "assignment state applied is controller-owned"}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return domain.Assignment{}, err
 	}
@@ -43,7 +43,7 @@ func (s *ResourceRepository) UpdateAssignmentState(ctx context.Context, id, stat
 		return domain.Assignment{}, err
 	}
 	if hit {
-		if err := tx.Commit(); err != nil {
+		if err := s.commitWriteTx(ctx, tx); err != nil {
 			return domain.Assignment{}, err
 		}
 		s.ChangeBus().notifyResourceChanges(assignment.GatewayID, assignment.AgentID)
@@ -79,7 +79,7 @@ func (s *ResourceRepository) UpdateAssignmentState(ctx context.Context, id, stat
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": assignment.Revision, "state": state}); err != nil {
 		return domain.Assignment{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return domain.Assignment{}, err
 	}
 	s.ChangeBus().notifySnapshotChanges(assignment.GatewayID, assignment.AgentID)
@@ -104,7 +104,7 @@ func (s *ResourceRepository) applyNodeResultWithError(ctx context.Context, nodeI
 	if applied {
 		targetState = domain.AssignmentApplied
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +204,7 @@ func (s *ResourceRepository) applyNodeResultWithError(ctx context.Context, nodeI
 	for _, assignment := range changed {
 		changedNodes = append(changedNodes, assignment.GatewayID, assignment.AgentID)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return nil, err
 	}
 	s.ChangeBus().notifySnapshotChanges(changedNodes...)

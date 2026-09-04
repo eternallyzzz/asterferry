@@ -7,9 +7,11 @@ current implementation map and deliberately volatile protocol details live in
 
 ## Scope and compatibility
 
-AsterFerry is a self-hosted private-network forwarding system with one
-authoritative Controller and multiple Nodes. A Node becomes a Gateway or Agent
-after enrollment when the Controller publishes a typed Node Spec.
+AsterFerry is a self-hosted private-network forwarding system with one logical
+authoritative Controller and multiple Nodes. The Controller runs either as one
+SQLite-backed process or as an active/standby pair backed by PostgreSQL. A Node
+becomes a Gateway or Agent after enrollment when the Controller publishes a
+typed Node Spec.
 
 The stable boundaries are:
 
@@ -20,9 +22,13 @@ The stable boundaries are:
 - The normalized Controller database is a fresh-generation boundary. Its
   database schema version is separate from wire and snapshot versions.
 
-Controller HA, shared VIP takeover, transparent connection migration, and a
-distributed session store are outside the current product boundary. Nodes
-retain their last valid local snapshot and reconnect after interruption.
+Controller HA is supported only as active/standby with PostgreSQL. An external
+load balancer or Kubernetes Service must route client traffic to the ready
+leader; the Controller does not provide a VIP or transparent connection
+migration. Browser sessions are durable and shared through the Controller
+database, while ChangeBus notifications and active gRPC streams remain
+process-local. Nodes retain their last valid local snapshot and reconnect after
+interruption or takeover.
 
 ## Component boundaries
 
@@ -36,8 +42,10 @@ flowchart LR
     Root --> Runtime[RuntimeRepository\nruntime telemetry]
     Root --> Scheduler[Scheduler\nplacement decisions]
     Root --> Bus[ChangeBus\nprocess-local notifications]
+    Root --> Lease[PostgreSQL lease\n+ fencing epoch]
     Resources --> DB[(SQLite or PostgreSQL)]
     Runtime --> DB
+    Lease --> DB
     Scheduler --> SchedulingPort[SchedulingRepository port]
     SchedulingPort -. implemented by .-> Resources
     Resources --> Node[Node control runtime]
@@ -105,6 +113,9 @@ reconciliation may retry transient placement conflicts.
    against the current desired generation before it influences reconciliation.
 6. Runtime telemetry is retained and pruned independently from low-frequency
    control resources.
+7. In HA mode, every mutating transaction checks the current PostgreSQL lease
+   and fencing epoch before commit. Losing leadership rejects the write and
+   drains active Node control streams.
 
 ## Storage and schema policy
 
@@ -166,16 +177,29 @@ The release runbook is [`release-runbook.md`](release-runbook.md).
 
 ## Availability and operations
 
-The Controller is currently a single replica. API sessions and active runtime
-registries are process-local: a Controller restart invalidates in-memory login
-sessions and requires Nodes to reconnect. Durable resources, snapshots, audit
-history, and each Node's last-known-good cache are the recovery anchors.
+SQLite deployments are single-replica. PostgreSQL deployments may run exactly
+two active/standby Controller replicas. A 15-second database lease, five-second
+renewal cadence and monotonic fencing epoch ensure that only the current leader
+serves business traffic, scheduling and Node gRPC. On lease loss, the old
+leader becomes standby, drains Node streams and rejects further writes; the
+standby becomes ready after acquiring a new epoch. Nodes reconnect rather than
+attempting transparent stream migration. The operational failover target is
+RTO <=30 seconds for committed control data and RPO 0 when PostgreSQL
+durability is intact.
 
-The management `/metrics` and `/readyz` routes use the normal authenticated
-HTTP surface. The optional dedicated metrics listener is a separate deployment
-surface and may be exposed only behind an explicitly trusted scrape boundary.
-OpenAPI documents are anonymous documentation endpoints. This difference is a
-deployment policy and must remain documented in operations guidance.
+Browser sessions are opaque records in `web_sessions` with a 12-hour
+lifetime, so they survive process restart and are visible to both replicas.
+Logout, password changes, expiry and backup restore revoke them. Active runtime
+registries and ChangeBus notifications remain process-local and are rebuilt by
+Node reconnect and leader reconciliation.
+
+`/healthz` and `/readyz` are public minimal probes; `/readyz` returns only
+`{"ready":true}` for a healthy leader and `{"ready":false}` with HTTP 503
+otherwise. Management `/metrics` remains authenticated, while the optional
+dedicated metrics listener is a separate deployment surface for an explicitly
+trusted scrape boundary. OpenAPI documents are anonymous documentation
+endpoints. This difference is a deployment policy and must remain documented
+in operations guidance.
 
 For compatibility promises and supported platforms, see
 [`compatibility.md`](compatibility.md) and [`support-matrix.md`](support-matrix.md).

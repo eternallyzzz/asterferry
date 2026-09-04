@@ -98,7 +98,40 @@ func Restore(config Config, source, destination string) error {
 			return fmt.Errorf("write restored controller config: %w", err)
 		}
 	}
+	restoredConfig := config
+	restoredConfig.DatabaseDriver = DatabaseDriverSQLite
+	restoredConfig.DatabaseURL = ""
+	restoredConfig.HighAvailability = false
+	restoredConfig.DatabasePath = filepath.Join(destination, filepath.Base(config.DatabasePath))
+	if err := resetRestoredControlState(context.Background(), restoredConfig); err != nil {
+		return fmt.Errorf("reset restored Controller sessions and lease: %w", err)
+	}
 	return nil
+}
+
+// resetRestoredControlState makes a restored database safe to start. A backup
+// can contain an active lease owned by a process that no longer exists and
+// browser sessions belonging to the pre-restore security boundary; neither is
+// valid after recovery. Incrementing the epoch also prevents a stale writer
+// from reusing an epoch captured before the restore.
+func resetRestoredControlState(ctx context.Context, config Config) error {
+	db, _, err := openConfiguredDatabase(ctx, config)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM web_sessions`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE controller_leases SET owner_id='', fencing_epoch=fencing_epoch+1, lease_until=?, updated_at=? WHERE singleton=1`, "1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func configPathFor(config Config) string {

@@ -73,7 +73,7 @@ func (s *RuntimeRepository) RecordRuntimeEvent(ctx context.Context, nodeID, even
 			return errors.New("runtime action result payload is invalid")
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (s *RuntimeRepository) RecordRuntimeEvent(ctx context.Context, nodeID, even
 		}
 	}
 	if inserted == 0 {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	if connection != nil {
 		if err := upsertRuntimeConnectionTx(ctx, tx, *connection, createdAt); err != nil {
@@ -145,7 +145,7 @@ func (s *RuntimeRepository) RecordRuntimeEvent(ctx context.Context, nodeID, even
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return err
 	}
 	s.ChangeBus().notifyRuntimeChanges(nodeID)

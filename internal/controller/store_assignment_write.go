@@ -31,7 +31,7 @@ func (s *ResourceRepository) PutAssignment(ctx context.Context, assignment domai
 	requestAssignment.Revision = 0
 	requestAssignment.UpdatedAt = time.Time{}
 	requestAssignment.Obfuscation = obfuscationRequestPolicy(requestAssignment.Obfuscation)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func (s *ResourceRepository) PutAssignment(ctx context.Context, assignment domai
 	for _, old := range superseded {
 		affectedNodes = append(affectedNodes, old.GatewayID, old.AgentID)
 	}
-	return s.commitAndNotifyResources(tx, affectedNodes...)
+	return s.commitAndNotifyResources(ctx, tx, affectedNodes...)
 }
 
 // deleteAssignmentBindingsTx releases a placement's public-port occupancy.
@@ -249,7 +249,7 @@ func supersededAssignments(ctx context.Context, tx *sql.Tx, serviceIDs []string,
 }
 
 func (s *ResourceRepository) DeleteAssignment(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -285,5 +285,5 @@ func (s *ResourceRepository) DeleteAssignment(ctx context.Context, id string, op
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": assignment.Revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResources(tx, assignment.GatewayID, assignment.AgentID)
+	return s.commitAndNotifyResources(ctx, tx, assignment.GatewayID, assignment.AgentID)
 }

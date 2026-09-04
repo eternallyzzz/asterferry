@@ -59,8 +59,9 @@ automatically.
 
 ## Controller HTTP endpoint policy
 
-The policy is intentional: `/healthz` is anonymous; `/readyz` and the
-management HTTPS `/metrics` require an authenticated Viewer, Operator or Admin;
+The policy is intentional: `/healthz` and `/readyz` are anonymous;
+`/readyz` returns only a boolean readiness result, while management HTTPS
+`/metrics` requires an authenticated Viewer, Operator or Admin;
 and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
 discovery. A native Controller also has a separate plain-HTTP `/metrics`
 listener, loopback-only by default at `127.0.0.1:9090`; bind or expose it only
@@ -69,10 +70,10 @@ possible, or a read-only Viewer API token for the management endpoint. If the
 OpenAPI document is deployment sensitive, restrict those paths at the HTTPS
 ingress or network layer.
 
-Browser Cookie sessions are process-local in-memory state with a 12-hour
-lifetime. A Controller restart or another replica invalidates them, so use API
-tokens for automated clients. Shared sessions and Controller HA are outside
-this release.
+Browser Cookie sessions are durable hashed records with a 12-hour lifetime.
+They survive restart and are shared by PostgreSQL active/standby replicas.
+Logout, password changes, expiry and backup restore invalidate them; use API
+tokens for automated clients. SQLite remains single-replica.
 
 ## REST API
 
@@ -130,7 +131,7 @@ runtime-event volume grows. Select it during `controller init` with
 The development schema is a clean-break contract. There is no `controller
 migrate` command and no in-place SQLite-to-PostgreSQL conversion. If the
 backend or schema must change, initialize a new Controller and recreate the
-resources in the Dashboard; pre-v11 databases and backup manifests are
+resources in the Dashboard; pre-v12 databases and backup manifests are
 rejected. PostgreSQL backup/restore requires the `pg_dump` and `pg_restore`
 client utilities on the machine running the CLI; the backup also contains the
 Controller config, master key, CA and TLS identity.

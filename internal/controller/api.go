@@ -8,38 +8,27 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"asterferry/internal/dashboard"
 )
 
 type Server struct {
-	resources     *ResourceRepository
-	runtime       *RuntimeRepository
-	changes       *ChangeBus
-	config        Config
-	http          *http.Server
-	metricsHTTP   *http.Server
-	sessions      sync.Map // process-local opaque session id -> session; not shared or persisted
-	sessionCtx    context.Context
-	sessionCancel context.CancelFunc
-	sessionDone   chan struct{}
-	loginLimiter  *loginLimiter
-	metrics       *ControllerMetrics
-	scheduler     *Scheduler
-}
-
-type session struct {
-	User      User
-	CSRF      string
-	ExpiresAt time.Time
+	resources    *ResourceRepository
+	runtime      *RuntimeRepository
+	changes      *ChangeBus
+	config       Config
+	http         *http.Server
+	metricsHTTP  *http.Server
+	loginLimiter *loginLimiter
+	metrics      *ControllerMetrics
+	scheduler    *Scheduler
+	leadership   *leadership
 }
 
 const (
 	sessionTTL              = 12 * time.Hour
 	sessionCookieMaxAge     = int(sessionTTL / time.Second)
-	sessionReapInterval     = time.Minute
 	controllerWriteDeadline = 30 * time.Second
 )
 
@@ -73,8 +62,7 @@ func newServer(config Config, repositories *ControllerRepositories, scheduler *S
 			return nil, err
 		}
 	}
-	sessionCtx, sessionCancel := context.WithCancel(context.Background())
-	server := &Server{resources: resources, runtime: runtime, changes: changes, config: config, sessionCtx: sessionCtx, sessionCancel: sessionCancel, sessionDone: make(chan struct{}), loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler}
+	server := &Server{resources: resources, runtime: runtime, changes: changes, config: config, loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler, leadership: resources.leadership}
 	// Runtime SSE is intentionally long-lived.  Per-request handlers retain
 	// their own bounded read/decode limits; the write deadline must not cut off
 	// a healthy event stream after an absolute 30-second wall clock interval.
@@ -82,7 +70,6 @@ func newServer(config Config, repositories *ControllerRepositories, scheduler *S
 	if strings.TrimSpace(config.MetricsListen) != "" {
 		server.metricsHTTP = &http.Server{Addr: config.MetricsListen, Handler: server.metricsOnlyHandler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second}
 	}
-	go server.runSessionReaper()
 	return server, nil
 }
 
@@ -92,7 +79,24 @@ func newServer(config Config, repositories *ControllerRepositories, scheduler *S
 func (s *Server) metricsOnlyHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", s.internalMetricsHandler)
-	return s.metrics.middleware(securityHeaders(httpWriteDeadlineMiddleware(mux)))
+	return s.metrics.middleware(securityHeaders(httpWriteDeadlineMiddleware(s.leadershipMiddleware(mux))))
+}
+
+func (s *Server) leadershipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz", "/readyz", "/openapi.yaml", "/api/v1/openapi.yaml":
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s != nil && s.leadership != nil {
+			if err := s.leadership.RequireLeader(); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "controller_standby", "controller is temporarily unavailable")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Handler() http.Handler {
@@ -131,7 +135,7 @@ func (s *Server) Handler() http.Handler {
 	if s.config.DashboardEnable {
 		mux.Handle("/dashboard/", http.StripPrefix("/dashboard/", dashboard.Handler()))
 	}
-	return s.metrics.middleware(securityHeaders(httpWriteDeadlineMiddleware(mux)))
+	return s.metrics.middleware(securityHeaders(httpWriteDeadlineMiddleware(s.leadershipMiddleware(mux))))
 }
 
 // httpWriteDeadlineMiddleware keeps ordinary responses from holding a
@@ -220,12 +224,6 @@ func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.sessionCancel != nil {
-		s.sessionCancel()
-		if s.sessionDone != nil {
-			<-s.sessionDone
-		}
-	}
 	if s.http == nil {
 		if s.metricsHTTP == nil {
 			return nil
@@ -239,46 +237,25 @@ func (s *Server) Close() error {
 	return mainErr
 }
 
-func (s *Server) runSessionReaper() {
-	if s == nil {
-		return
-	}
-	defer close(s.sessionDone)
-	ticker := time.NewTicker(sessionReapInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			s.pruneExpiredSessions(time.Now())
-		case <-s.sessionCtx.Done():
-			return
-		}
-	}
-}
-
-func (s *Server) pruneExpiredSessions(now time.Time) {
-	if s == nil {
-		return
-	}
-	s.sessions.Range(func(key, value any) bool {
-		sess, ok := value.(session)
-		if !ok || !now.Before(sess.ExpiresAt) {
-			s.sessions.Delete(key)
-		}
-		return true
-	})
-}
-
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "controller"})
 }
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorize(w, r, RoleViewer); !ok {
+	if s == nil || s.resources == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false})
 		return
 	}
-	if err := s.resources.Ping(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller database is unavailable")
+	if s != nil && s.leadership != nil {
+		if err := s.leadership.RequireLeader(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false})
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.resources.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ready": true})

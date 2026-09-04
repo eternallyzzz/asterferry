@@ -164,6 +164,9 @@ func restorePostgresBackup(config Config, source, destination string, manifest b
 	if err := runPostgresRestore(context.Background(), config.DatabaseURL, filepath.Join(source, "controller.postgres.dump")); err != nil {
 		return err
 	}
+	if err := resetRestoredControlState(context.Background(), restored); err != nil {
+		return fmt.Errorf("reset restored Controller sessions and lease: %w", err)
+	}
 	key, err := LoadOrCreateMasterKey(restored.MasterKeyPath)
 	if err != nil {
 		return err

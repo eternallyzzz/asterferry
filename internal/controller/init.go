@@ -33,6 +33,7 @@ type InitOptions struct {
 	DatabaseDriver       string
 	DatabaseURL          string
 	DatabaseMaxOpenConns int
+	HighAvailability     bool
 	Username             string
 	Password             string
 	Force                bool
@@ -96,6 +97,7 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	if options.DatabaseMaxOpenConns != 0 {
 		config.DatabaseMaxOpenConns = options.DatabaseMaxOpenConns
 	}
+	config.HighAvailability = options.HighAvailability
 	if err := config.Validate(); err != nil {
 		return InitResult{}, err
 	}
@@ -161,6 +163,7 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	stagedConfig.DatabaseDriver = config.DatabaseDriver
 	stagedConfig.DatabaseURL = config.DatabaseURL
 	stagedConfig.DatabaseMaxOpenConns = config.DatabaseMaxOpenConns
+	stagedConfig.HighAvailability = config.HighAvailability
 	stagedConfig.DashboardEnable = config.DashboardEnable
 	stagedConfig.LogLevel = config.LogLevel
 	for _, path := range []string{staging, filepath.Dir(stagedConfig.CAKeyPath), filepath.Dir(stagedConfig.CACertPath), filepath.Dir(stagedConfig.TLSKeyPath), filepath.Dir(stagedConfig.TLSCertPath)} {

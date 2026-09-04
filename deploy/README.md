@@ -1,7 +1,8 @@
 # AsterFerry deployment
 
-AsterFerry is deployed as one Controller and independently managed data-plane
-Nodes. The Controller owns SQLite (default) or PostgreSQL state, PKI, scheduling, RBAC and audit. A
+AsterFerry is deployed as one logical Controller (single process or an
+active/standby pair) and independently managed data-plane Nodes. The
+Controller owns SQLite (default) or PostgreSQL state, PKI, scheduling, RBAC and audit. A
 Node is a registered identity; its Gateway or Agent behavior is a separate
 specification selected in the Dashboard. Nodes receive typed snapshots and
 never expose a management HTTP API or read business YAML.
@@ -28,7 +29,8 @@ asterferry controller backup \
   --output /var/backups/asterferry
 ```
 
-SQLite database schema v11 remains the default. For a production-sized Controller, use
+SQLite database schema v12 remains the default. For a production-sized or
+active/standby Controller, use
 an external PostgreSQL database:
 
 ```sh
@@ -41,13 +43,15 @@ asterferry controller init --dir /var/lib/asterferry \
 The development schema is a clean break: there is no in-place migration and no
 `controller migrate` command. To change backend, initialize a new Controller
 and recreate resources in the Dashboard. Older or unknown database generations
-and pre-v11 backup manifests remain incompatible. PostgreSQL backup/restore
+and pre-v12 backup manifests remain incompatible. PostgreSQL backup/restore
 requires `pg_dump`/`pg_restore` installed on the machine running the CLI;
 SQLite backup remains local-file based.
 
-`deploy/asterferry-controller.service` is a single-replica systemd unit; the
-Controller is not advertised as highly available. Nodes retain their encrypted
-last-known-good snapshot while it is unavailable.
+`deploy/asterferry-controller.service` is a single-replica systemd unit.
+For HA, run two PostgreSQL-backed Controller processes under an external
+supervisor and load balancer; both must use the same config, CA, TLS identity
+and master key. Nodes retain their encrypted last-known-good snapshot while
+the Controller is unavailable and reconnect after takeover.
 
 ## Node enrollment
 
@@ -103,14 +107,19 @@ slots. Both slots use the same generic Node binary; Gateway or Agent behavior is
 selected later by the Controller Node Spec. The
 Controller directory is writable; node bootstrap/state mounts are isolated from
 it. Bootstrap mounts are writable because certificate rotation atomically
-replaces the file. `deploy/helm/asterferry-controller` creates a single-replica
-StatefulSet with a PVC. `deploy/helm/asterferry-node` copies the Secret-provided
+replaces the file. `deploy/helm/asterferry-controller` creates a single-replica SQLite
+StatefulSet by default, or a two-replica PostgreSQL active/standby StatefulSet
+when `controller.highAvailability.enabled=true`. HA mounts one existing Secret
+containing `controller.json`, `master.key`, `ca.key`, `ca.crt`,
+`controller.key` and `controller.crt`; it does not create a PVC.
+`deploy/helm/asterferry-node` copies the Secret-provided
 enrollment seed into its state PVC with an init container so rotation never
 mutates the Kubernetes Secret.
 
-Each Gateway must have its own reachable public endpoint. Shared VIP takeover,
-transparent connection migration and Controller HA are outside the first
-release.
+Each Gateway must have its own reachable public endpoint. Shared VIP takeover
+and transparent connection migration remain outside the first release. The
+Controller chart's normal Service selects only ready Pods, so an external
+load balancer or Kubernetes Service provides leader routing.
 
 AFDP/1 to AFDP/2 is a deliberate hard wire break: QUIC ALPN and the protocol
 version byte both changed, and there is no fallback. Roll out all Node binaries
@@ -119,14 +128,16 @@ in coordination with the Controller-side release.
 ## Operations and verification
 
 The REST API is rooted at `/api/v1`. The endpoint policy is deliberate:
-`/healthz` is anonymous; `/readyz` and `/metrics` require an authenticated
-Viewer, Operator or Admin (use a read-only Viewer API token for Prometheus);
+`/healthz` and `/readyz` are anonymous; `/readyz` returns only a boolean
+readiness result, while `/metrics` requires an authenticated Viewer,
+Operator or Admin (use a read-only Viewer API token for Prometheus);
 and `/openapi.yaml` plus `/api/v1/openapi.yaml` are anonymous for client
 discovery. If the OpenAPI document is considered deployment-sensitive, limit
 those paths with the HTTPS ingress or network policy. Browser Cookie sessions
-are process-local in-memory state with a 12-hour lifetime, so a restart or a
-different Controller replica invalidates them; use API tokens for automated
-clients. Controller HA/shared sessions are outside this release.
+are durable hashed records with a 12-hour lifetime and are shared by
+PostgreSQL active/standby replicas. Logout, password changes, expiry and backup
+restore invalidate them; use API tokens for automated clients. SQLite remains
+single-replica.
 Mutating requests use `If-Match` revisions and may include an `Idempotency-Key`.
 Use the Dashboard only as a Controller client.
 

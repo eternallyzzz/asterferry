@@ -28,6 +28,10 @@ type ControllerMetrics struct {
 	httpTime          *prometheus.HistogramVec
 	grpcReq           *prometheus.CounterVec
 	streams           prometheus.Gauge
+	leader            prometheus.Gauge
+	leadershipEpoch   prometheus.Gauge
+	leadershipChanges prometheus.Counter
+	leaseRenewErrors  prometheus.Counter
 	schedRun          *prometheus.CounterVec
 	schedTime         prometheus.Histogram
 	observedNodes     *prometheus.GaugeVec
@@ -73,6 +77,10 @@ func newControllerMetrics(databaseDrivers ...string) *ControllerMetrics {
 	m.httpTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "asterferry_controller_http_request_duration_seconds", Help: "Controller HTTP request duration."}, []string{"method", "route"})
 	m.grpcReq = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "asterferry_controller_grpc_requests_total", Help: "Controller gRPC messages and calls."}, []string{"method", "code"})
 	m.streams = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_control_streams", Help: "Connected node control streams."})
+	m.leader = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_leader", Help: "Whether this Controller process currently owns the active leadership lease."})
+	m.leadershipEpoch = prometheus.NewGauge(prometheus.GaugeOpts{Name: "asterferry_controller_leadership_epoch", Help: "Current Controller fencing epoch, or zero while standby."})
+	m.leadershipChanges = prometheus.NewCounter(prometheus.CounterOpts{Name: "asterferry_controller_leadership_changes_total", Help: "Controller leadership transitions."})
+	m.leaseRenewErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "asterferry_controller_lease_renew_failures_total", Help: "Failed Controller leadership lease renewals."})
 	m.schedRun = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "asterferry_controller_scheduler_runs_total", Help: "Controller scheduling and reconciliation runs."}, []string{"result"})
 	m.schedTime = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "asterferry_controller_scheduler_duration_seconds", Help: "Controller scheduling duration."})
 	m.observedNodes = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_observed_nodes", Help: "Observed node counts by behavior kind and health."}, []string{"kind", "health"})
@@ -86,7 +94,7 @@ func newControllerMetrics(databaseDrivers ...string) *ControllerMetrics {
 	m.bytesOut = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_bytes_out_total", Help: "Observed runtime bytes sent by node kind."}, []string{"kind"})
 	m.listeners = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_node_listeners", Help: "Observed listeners by protocol."}, []string{"protocol"})
 	m.geoipUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "asterferry_controller_geoip_up", Help: "Number of observed nodes with an available optional GeoIP database, by node kind."}, []string{"kind"})
-	collectors := []prometheus.Collector{m.up, m.databaseUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.activeConnections, m.activeFlows, m.bytesIn, m.bytesOut, m.listeners, m.geoipUp}
+	collectors := []prometheus.Collector{m.up, m.databaseUp, m.httpReq, m.httpTime, m.grpcReq, m.streams, m.leader, m.leadershipEpoch, m.leadershipChanges, m.leaseRenewErrors, m.schedRun, m.schedTime, m.observedNodes, m.snapshotGen, m.activeStreams, m.activeSessions, m.activeEgress, m.activeConnections, m.activeFlows, m.bytesIn, m.bytesOut, m.listeners, m.geoipUp}
 	if databaseDriver == DatabaseDriverSQLite {
 		collectors = append(collectors, m.sqliteUp)
 	}
@@ -102,6 +110,31 @@ func newControllerMetrics(databaseDrivers ...string) *ControllerMetrics {
 		m.geoipUp.WithLabelValues(kind).Set(0)
 	}
 	return m
+}
+
+func (m *ControllerMetrics) setLeadership(active bool, epoch uint64) {
+	if m == nil {
+		return
+	}
+	if active {
+		m.leader.Set(1)
+		m.leadershipEpoch.Set(float64(epoch))
+		return
+	}
+	m.leader.Set(0)
+	m.leadershipEpoch.Set(0)
+}
+
+func (m *ControllerMetrics) recordLeadershipChange() {
+	if m != nil {
+		m.leadershipChanges.Inc()
+	}
+}
+
+func (m *ControllerMetrics) recordLeaseRenewFailure() {
+	if m != nil {
+		m.leaseRenewErrors.Inc()
+	}
 }
 
 func (m *ControllerMetrics) Handler() http.Handler {

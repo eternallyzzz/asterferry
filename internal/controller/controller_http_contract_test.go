@@ -48,12 +48,20 @@ func TestControllerEndpointAuthenticationPolicyContract(t *testing.T) {
 	server := &Server{metrics: newControllerMetrics()}
 	handler := server.Handler()
 
-	for _, path := range []string{"/readyz", "/metrics"} {
+	for _, path := range []string{"/metrics"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 		if recorder.Code != http.StatusUnauthorized {
 			t.Fatalf("unauthenticated %s status = %d, want %d", path, recorder.Code, http.StatusUnauthorized)
 		}
+	}
+	ready := httptest.NewRecorder()
+	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("standalone /readyz status = %d, want %d", ready.Code, http.StatusServiceUnavailable)
+	}
+	if ready.Body.String() != `{"ready":false}`+"\n" {
+		t.Fatalf("standalone /readyz body = %q, want minimal not-ready response", ready.Body.String())
 	}
 
 	for _, path := range []string{"/openapi.yaml", "/api/v1/openapi.yaml"} {

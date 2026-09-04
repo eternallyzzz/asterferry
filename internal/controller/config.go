@@ -36,13 +36,16 @@ type Config struct {
 	DatabasePath         string `json:"database_path,omitempty"`
 	DatabaseURL          string `json:"database_url,omitempty"`
 	DatabaseMaxOpenConns int    `json:"database_max_open_conns,omitempty"`
-	CAKeyPath            string `json:"ca_key_path"`
-	CACertPath           string `json:"ca_cert_path"`
-	TLSCertPath          string `json:"tls_cert_path"`
-	TLSKeyPath           string `json:"tls_key_path"`
-	MasterKeyPath        string `json:"master_key_path"`
-	DashboardEnable      bool   `json:"dashboard_enable"`
-	LogLevel             string `json:"log_level"`
+	// HighAvailability enables PostgreSQL-backed active/standby leadership.
+	// SQLite remains intentionally limited to one Controller process.
+	HighAvailability bool   `json:"high_availability,omitempty"`
+	CAKeyPath        string `json:"ca_key_path"`
+	CACertPath       string `json:"ca_cert_path"`
+	TLSCertPath      string `json:"tls_cert_path"`
+	TLSKeyPath       string `json:"tls_key_path"`
+	MasterKeyPath    string `json:"master_key_path"`
+	DashboardEnable  bool   `json:"dashboard_enable"`
+	LogLevel         string `json:"log_level"`
 	// History retention is expressed in operator-friendly units rather than
 	// time.Duration's nanosecond JSON representation. Zero disables cleanup for
 	// the corresponding table.
@@ -122,6 +125,9 @@ func (c Config) Validate() error {
 		if strings.ContainsAny(c.DatabaseURL, "\x00\r\n") || len(c.DatabaseURL) > 4096 {
 			return errors.New("controller database_url is invalid")
 		}
+	}
+	if c.HighAvailability && databaseDriver != DatabaseDriverPostgres {
+		return errors.New("controller high_availability requires postgres")
 	}
 	for field, value := range map[string]string{"ca_key_path": c.CAKeyPath, "ca_cert_path": c.CACertPath, "tls_cert_path": c.TLSCertPath, "tls_key_path": c.TLSKeyPath, "master_key_path": c.MasterKeyPath} {
 		if strings.TrimSpace(value) == "" {

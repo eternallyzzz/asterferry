@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -326,7 +327,7 @@ func TestInitPostgresRejectsNonEmptyTarget(t *testing.T) {
 		DatabaseDriver: DatabaseDriverPostgres, DatabaseURL: targetURL,
 		Password: "a-very-long-admin-password",
 	})
-	if err == nil || !strings.Contains(err.Error(), "empty schema") {
+	if err == nil || !errors.Is(err, ErrIncompatibleDatabase) || !strings.Contains(err.Error(), "inspect schema_meta") {
 		t.Fatalf("non-empty PostgreSQL target error = %v", err)
 	}
 }

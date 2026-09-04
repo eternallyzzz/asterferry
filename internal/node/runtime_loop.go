@@ -9,9 +9,15 @@ import (
 	"fmt"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	controllerReconnectInitialBackoff = time.Second
+	controllerReconnectMaxBackoff     = 5 * time.Second
 )
 
 // Run maintains a controller stream with bounded reconnect backoff. A
@@ -33,7 +39,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	backoff := time.Second
+	backoff := controllerReconnectInitialBackoff
 	const offlineGrace = 30 * time.Second
 	var disconnectedSince time.Time
 	for {
@@ -62,7 +68,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 				disconnectedSince = now
 			}
 			r.reconciler.MarkDisconnected(now, offlineGrace)
-			wait := backoff
+			wait := jitteredControllerReconnectDelay(backoff)
 			if remaining := offlineGrace - now.Sub(disconnectedSince); remaining > 0 && remaining < wait {
 				wait = remaining
 			}
@@ -81,10 +87,10 @@ func (r *Runtime) Run(ctx context.Context) error {
 			if time.Since(disconnectedSince) >= offlineGrace {
 				r.reconciler.MarkDisconnected(time.Now().UTC(), offlineGrace)
 			}
-			if backoff < 30*time.Second {
+			if backoff < controllerReconnectMaxBackoff {
 				backoff *= 2
-				if backoff > 30*time.Second {
-					backoff = 30 * time.Second
+				if backoff > controllerReconnectMaxBackoff {
+					backoff = controllerReconnectMaxBackoff
 				}
 			}
 			continue
@@ -93,13 +99,28 @@ func (r *Runtime) Run(ctx context.Context) error {
 		// A connection normally ends only with an error. If an implementation
 		// returns nil, still apply a bounded delay so a graceful server close
 		// cannot turn into a hot reconnect loop.
-		if backoff > time.Second {
-			backoff = time.Second
+		if backoff > controllerReconnectInitialBackoff {
+			backoff = controllerReconnectInitialBackoff
 		}
 		if !waitWithContext(ctx, backoff) {
 			return nil
 		}
 	}
+}
+
+// jitteredControllerReconnectDelay keeps a fleet of Nodes from reconnecting
+// in one burst when the active Controller changes. The jitter is deliberately
+// bounded to +/-20% and is applied only to the control-plane retry loop.
+func jitteredControllerReconnectDelay(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	factor := 0.8 + 0.4*rand.Float64()
+	delay := time.Duration(float64(base) * factor)
+	if delay <= 0 {
+		return time.Nanosecond
+	}
+	return delay
 }
 
 func waitWithContext(ctx context.Context, delay time.Duration) bool {

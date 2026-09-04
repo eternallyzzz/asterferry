@@ -113,7 +113,7 @@ func (s *ResourceRepository) ListServices(ctx context.Context, agentID string) (
 }
 
 func (s *ResourceRepository) DeleteService(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -155,5 +155,5 @@ func (s *ResourceRepository) DeleteService(ctx context.Context, id string, optio
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResources(tx, agentID)
+	return s.commitAndNotifyResources(ctx, tx, agentID)
 }

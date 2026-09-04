@@ -121,6 +121,10 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "resource was not found")
 		return
 	}
+	if errors.Is(err, ErrControllerNotLeader) || errors.Is(err, ErrLeadershipLost) {
+		writeError(w, http.StatusServiceUnavailable, "controller_standby", "controller is temporarily unavailable")
+		return
+	}
 	if errors.Is(err, ErrStorageFailure) || isDatabaseError(err) || errors.Is(err, sql.ErrConnDone) {
 		slog.Default().Error("controller store operation failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "controller storage is temporarily unavailable")

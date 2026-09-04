@@ -19,7 +19,7 @@ func (s *ResourceRepository) putServiceDocument(ctx context.Context, service dom
 	}{Service: requestService, IfMatch: options.IfMatch}
 	nowTime := time.Now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -107,5 +107,5 @@ func (s *ResourceRepository) putServiceDocument(ctx context.Context, service dom
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, idempotentRequest, map[string]any{"id": service.ID, "revision": revision}); err != nil {
 		return err
 	}
-	return s.commitAndNotifyResources(tx, affectedNodes...)
+	return s.commitAndNotifyResources(ctx, tx, affectedNodes...)
 }

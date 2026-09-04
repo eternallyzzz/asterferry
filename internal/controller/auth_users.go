@@ -30,7 +30,7 @@ func (s *ResourceRepository) CreateUserWithOptions(ctx context.Context, username
 		return User{}, err
 	}
 	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return User{}, err
 	}
@@ -57,7 +57,7 @@ func (s *ResourceRepository) CreateUserWithOptions(ctx context.Context, username
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": 1}); err != nil {
 		return User{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return User{}, err
 	}
 	return User{ID: id, Username: username, Role: role, Enabled: true, Revision: 1, CreatedAt: now, UpdatedAt: now, PasswordChangedAt: now}, nil
@@ -107,7 +107,7 @@ func (s *ResourceRepository) UpdateUser(ctx context.Context, id string, update U
 	if strings.TrimSpace(id) == "" {
 		return User{}, sql.ErrNoRows
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return User{}, err
 	}
@@ -202,6 +202,9 @@ func (s *ResourceRepository) UpdateUser(ctx context.Context, id string, update U
 		if _, err := tx.ExecContext(ctx, `UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, now.Format(time.RFC3339Nano), id); err != nil {
 			return User{}, err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE web_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL`, now.Format(time.RFC3339Nano), id); err != nil {
+			return User{}, err
+		}
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "update", "user", id, newRevision, map[string]string{"username": user.Username, "role": user.Role}); err != nil {
 		return User{}, err
@@ -209,7 +212,7 @@ func (s *ResourceRepository) UpdateUser(ctx context.Context, id string, update U
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": newRevision}); err != nil {
 		return User{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitWriteTx(ctx, tx); err != nil {
 		return User{}, err
 	}
 	user.Revision = newRevision
@@ -218,7 +221,7 @@ func (s *ResourceRepository) UpdateUser(ctx context.Context, id string, update U
 }
 
 func (s *ResourceRepository) DeleteUser(ctx context.Context, id string, options WriteOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -229,7 +232,7 @@ func (s *ResourceRepository) DeleteUser(ctx context.Context, id string, options 
 		return err
 	}
 	if hit {
-		return tx.Commit()
+		return s.commitWriteTx(ctx, tx)
 	}
 	var role string
 	var enabled int
@@ -262,5 +265,5 @@ func (s *ResourceRepository) DeleteUser(ctx context.Context, id string, options 
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"id": id, "revision": revision}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitWriteTx(ctx, tx)
 }

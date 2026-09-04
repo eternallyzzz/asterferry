@@ -393,7 +393,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-SQLite database schema v11 仍是零依赖安装的默认选项。节点规模较大时，可以在初始化
+SQLite database schema v12 仍是零依赖安装的默认选项。节点规模较大时，可以在初始化
 Controller 时直接使用 PostgreSQL：
 
 ```sh
@@ -405,13 +405,13 @@ asterferry controller init --dir /var/lib/asterferry \
 
 当前开发代际中，SQLite 和 PostgreSQL 都只能作为全新安装选择，不提供
 原地 schema 迁移或 SQLite→PostgreSQL 转换命令。切换后端时请重新初始化
-Controller 并在 Dashboard 重建资源；v11 之前的数据库和备份 manifest
+Controller 并在 Dashboard 重建资源；v12 之前的数据库和备份 manifest
 都会被拒绝。PostgreSQL 备份/恢复使用外部 `pg_dump` 和 `pg_restore` 工具，
 因此执行命令的机器必须安装 PostgreSQL 客户端；SQLite 备份仍直接复制本地
 数据库文件。两种后端的备份都包含配置、master key、CA 和 Controller TLS
 身份。运行时观测和高级操作开关见[运维指南](operations.zh-CN.md)。
 
-Controller 暂时不可用时，节点会继续使用加密的 last-known-good 快照；但新的配置、调度和证书操作需要 Controller 恢复后才能完成。不要删除 `controller/`，其中包含数据库、CA、TLS 身份和 master key。
+Controller 暂时不可用时，节点会继续使用加密的 last-known-good 快照；但新的配置、调度和证书操作需要 Controller 恢复后才能完成。PostgreSQL active/standby 部署应将两个 Controller 放在外部负载均衡器或 Kubernetes Service 后；`/readyz` 只暴露布尔的 Leader/数据库就绪结果，已有控制流会断开，节点随后自动重连。不要删除 `controller/`，其中包含数据库、CA、TLS 身份和 master key。
 
 更多 systemd、Docker Compose 和 Kubernetes 部署细节见 [`deploy/README.md`](../deploy/README.md)。
 

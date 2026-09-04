@@ -425,7 +425,7 @@ asterferry controller backup \
   --output ./backups
 ```
 
-SQLite database schema v11 remains the default for a zero-dependency installation. For a
+SQLite database schema v12 remains the default for a zero-dependency installation. For a
 larger Controller, initialize with PostgreSQL instead:
 
 ```sh
@@ -438,7 +438,7 @@ asterferry controller init --dir /var/lib/asterferry \
 SQLite and PostgreSQL are fresh-install choices in this development generation.
 There is no in-place schema migration or SQLite-to-PostgreSQL conversion
 command. To change backend, initialize a new Controller and recreate the
-Dashboard resources; pre-v11 databases and backup manifests are rejected.
+Dashboard resources; pre-v12 databases and backup manifests are rejected.
 The PostgreSQL backup format uses the external `pg_dump` and `pg_restore`
 utilities, so install the PostgreSQL client tools wherever the backup/restore
 CLI is run. SQLite backups continue to use the local database file. In both
@@ -446,7 +446,7 @@ cases the backup contains the config, master key, CA and Controller TLS
 identity. See [the operations guide](operations.en.md) for runtime visibility
 and the advanced-operation switch.
 
-When the Controller is temporarily unavailable, nodes continue using their encrypted last-known-good snapshot. New configuration, scheduling and certificate operations require the Controller to recover. Do not delete `controller/`; it contains the database, CA, TLS identity and master key.
+When the Controller is temporarily unavailable, nodes continue using their encrypted last-known-good snapshot. New configuration, scheduling and certificate operations require the Controller to recover. For PostgreSQL active/standby deployments, put both Controllers behind an external load balancer or Kubernetes Service; `/readyz` exposes only the boolean leader/DB readiness result, existing streams break, and Nodes reconnect. Do not delete `controller/`; it contains the database, CA, TLS identity and master key.
 
 See [`deploy/README.md`](../deploy/README.md) for systemd, Docker Compose and Kubernetes deployment details.
 
