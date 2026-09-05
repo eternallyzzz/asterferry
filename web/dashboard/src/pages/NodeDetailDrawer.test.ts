@@ -1,16 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import type { ComponentPublicInstance } from "vue";
-import type { ControllerNode } from "../controller-api";
+import { ControllerAPIError, type ControllerNode } from "../controller-api";
 import NodeDetailDrawer from "./NodeDetailDrawer.vue";
+import { useSession } from "../session";
 
 const apiMocks = vi.hoisted(() => ({
   getNodeSpec: vi.fn(),
+  listNodes: vi.fn(),
+  putNodeSpec: vi.fn(),
 }));
 
 vi.mock("../controller-api", async () => ({
   ...(await vi.importActual<typeof import("../controller-api")>("../controller-api")),
   getNodeSpec: apiMocks.getNodeSpec,
+  listNodes: apiMocks.listNodes,
+  putNodeSpec: apiMocks.putNodeSpec,
 }));
 
 const stubs = {
@@ -73,6 +78,9 @@ function mountDrawer(node: ControllerNode, open = true) {
 describe("NodeDetailDrawer", () => {
   afterEach(() => {
     apiMocks.getNodeSpec.mockReset();
+    apiMocks.listNodes.mockReset();
+    apiMocks.putNodeSpec.mockReset();
+    useSession().lock();
   });
 
   it("keeps the selected section when the same node object is refreshed", async () => {
@@ -141,6 +149,36 @@ describe("NodeDetailDrawer", () => {
     pending.get(second.id)?.({ node_id: second.id, kind: "gateway", gateway: makeSpec(second.id), revision: 1 });
     await flushPromises();
     expect((wrapper.get(".json-editor-stub").element as HTMLTextAreaElement).value).toContain(second.id);
+    wrapper.unmount();
+  });
+
+  it("loads registered Gateways and sends the selected fixed binding for a generic Node", async () => {
+    const node: ControllerNode = { ...makeNode("agent-unconfigured"), spec_kind: undefined };
+    const gateway = makeNode("gateway-registered");
+    apiMocks.getNodeSpec.mockRejectedValue(new ControllerAPIError(404, "missing"));
+    apiMocks.listNodes.mockResolvedValue({ items: [gateway] });
+    apiMocks.putNodeSpec.mockResolvedValue({
+      node_id: node.id,
+      kind: "agent",
+      agent: { node_id: node.id, gateway_id: gateway.id, gateway_selector: { match_labels: {} } },
+      revision: 1,
+    });
+    useSession().controllerUser.value = { id: "u1", username: "admin", role: "admin", enabled: true, revision: 1 };
+
+    const wrapper = mountDrawer(node);
+    await flushPromises();
+
+    expect(apiMocks.listNodes).toHaveBeenCalledWith("gateway");
+    const selects = wrapper.findAll("select");
+    expect(selects).toHaveLength(2);
+    expect(wrapper.text()).toContain("gateway-registered · gateway-registered");
+
+    await selects[1].setValue(gateway.id);
+    await buttonFor(wrapper, "保存规格").trigger("click");
+    await flushPromises();
+
+    expect(apiMocks.putNodeSpec).toHaveBeenCalledTimes(1);
+    expect(apiMocks.putNodeSpec.mock.calls[0][1].agent.gateway_id).toBe(gateway.id);
     wrapper.unmount();
   });
 });

@@ -37,8 +37,12 @@ automated and every exception is recorded in the release issue.
 
 Create the release candidate tag `v1.0.0-rc.1`. The tag workflow marks
 it prerelease and publishes immutable artifacts without changing the stable
-source version. For RC installation commands, set `--release-version
-1.0.0-rc.1`; do not point an RC Controller at the future `/v1.0.0/` assets.
+source version. The standalone one-line installers resolve the newest published
+tag, including RC releases; pass `--version 1.0.0-rc.1` when an RC installation
+must be pinned. Dashboard-generated commands use the Controller binary's
+configured release source and version; set Controller's `--release-version
+1.0.0-rc.1` when the generated command must target the RC assets. Do not point
+an RC Controller at the future `/v1.0.0/` assets.
 Operate the candidate for at least seven calendar days with:
 
 - Controller restart, leader loss and graceful shutdown checks;

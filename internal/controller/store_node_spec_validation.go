@@ -138,6 +138,18 @@ func validateGatewaySpecTx(ctx context.Context, tx *sql.Tx, spec domain.GatewayS
 }
 
 func validateAgentSpecTx(ctx context.Context, tx *sql.Tx, spec domain.AgentSpec) error {
+	if spec.GatewayID != "" {
+		var kind sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT ns.kind FROM nodes n LEFT JOIN node_specs ns ON ns.node_id=n.id WHERE n.id=?`, spec.GatewayID).Scan(&kind); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return &domain.ApplyError{Code: "gateway_not_found", Path: "agent.gateway_id", Message: fmt.Sprintf("gateway %q is not a registered Gateway node", spec.GatewayID)}
+			}
+			return err
+		}
+		if !kind.Valid || domain.NodeSpecKind(kind.String) != domain.NodeSpecGateway {
+			return &domain.ApplyError{Code: "gateway_kind_required", Path: "agent.gateway_id", Message: fmt.Sprintf("node %q is not configured as a Gateway", spec.GatewayID)}
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id,gateway_id FROM assignments WHERE agent_id=?`, spec.NodeID)
 	if err != nil {
 		return err
@@ -163,6 +175,12 @@ func validateAgentSpecTx(ctx context.Context, tx *sql.Tx, spec domain.AgentSpec)
 		return err
 	}
 	for _, reference := range assignments {
+		if spec.GatewayID != "" {
+			if reference.gatewayID != spec.GatewayID {
+				return &domain.ApplyError{Code: "gateway_binding_conflict", Path: "agent.gateway_id", Message: fmt.Sprintf("agent has assignment %q on gateway %q; drain or remove it before changing the fixed Gateway", reference.assignmentID, reference.gatewayID)}
+			}
+			continue
+		}
 		labels, err := loadNodeLabels(ctx, tx, reference.gatewayID)
 		if err != nil {
 			return err

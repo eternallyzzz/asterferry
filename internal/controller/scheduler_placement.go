@@ -200,7 +200,15 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 	var explicitConflict error
 	var placementErr error
 	for _, candidate := range ordered {
-		if !candidate.Node.Enabled || candidate.Node.CertificateState == domain.CertificateRevoked || candidate.Node.CertificateState == domain.CertificateExpired || candidate.Node.SpecKind != domain.NodeSpecGateway || !candidate.Healthy || !request.AgentSpec.GatewaySelector.Matches(candidate.Node.Labels) {
+		if !candidate.Node.Enabled || candidate.Node.CertificateState == domain.CertificateRevoked || candidate.Node.CertificateState == domain.CertificateExpired || candidate.Node.SpecKind != domain.NodeSpecGateway || !candidate.Healthy {
+			continue
+		}
+		// A fixed Agent binding is authoritative. It deliberately disables
+		// selector-based placement and automatic Gateway failover.
+		if request.AgentSpec.GatewayID != "" && candidate.Node.ID != request.AgentSpec.GatewayID {
+			continue
+		}
+		if request.AgentSpec.GatewayID == "" && !request.AgentSpec.GatewaySelector.Matches(candidate.Node.Labels) {
 			continue
 		}
 		usedAgents := len(activeAssignmentAgents(candidate.Assignments))

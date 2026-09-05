@@ -126,7 +126,7 @@ paths:
     post:
       tags: [operations]
       operationId: bootstrapNode
-      description: Create a node-bound enrollment token and return a platform-specific one-line installer command. Existing node specs are not replaced.
+      description: Create a node-bound enrollment token and return a platform-specific one-line installer command. The command registers a generic Node; it does not configure behavior, and existing node specs are not replaced.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
@@ -150,7 +150,7 @@ paths:
     post:
       tags: [operations]
       operationId: createNodeInstallation
-      description: Create an installation intent and return a one-time platform installer command. The enrolled node and its initial spec are created atomically only when the installer completes Enroll.
+      description: Create a generic Node installation intent and return a one-time platform installer command. The enrolled identity is created when the installer completes Enroll; Gateway or Agent behavior is configured later through the node spec endpoint.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
@@ -546,7 +546,6 @@ components:
       properties:
         platform: { type: string, enum: [linux, windows] }
         arch: { type: string, enum: [amd64, arm64] }
-        spec: { $ref: '#/components/schemas/NodeSpec' }
     NodeBootstrapResponse:
       type: object
       required: [node_id, platform, arch, version, expires_at, command]
@@ -570,13 +569,11 @@ components:
         enabled: { type: boolean, default: true }
         platform: { type: string, enum: [linux, windows] }
         arch: { type: string, enum: [amd64, arm64] }
-        spec: { $ref: '#/components/schemas/NodeSpec' }
     PendingNodeInstallation:
       type: object
       required: [node_id, name, enabled, platform, arch, expires_at, created_at]
       properties:
         node_id: { type: string }
-        spec_kind: { type: string, enum: [gateway, agent], description: Initial behavior, omitted for a generic pending installation. }
         name: { type: string }
         labels: { type: object, additionalProperties: { type: string } }
         enabled: { type: boolean }
@@ -594,7 +591,7 @@ components:
           properties: { spec_kind: { type: string, enum: [gateway, agent], description: Configured behavior projection; omitted until a spec is saved. }, certificate_state: { type: string }, certificate_serial: { type: string }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
     NodeList: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Node' } } } }
     GatewaySpec: { type: object, required: [node_id, public_endpoints], properties: { node_id: { type: string }, public_endpoints: { type: array, items: { type: string } }, listeners: { type: array, items: { type: object } }, capacity: { type: object }, port_pool: { type: object }, transport: { type: object }, obfuscation: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, revision: { type: integer, format: int64 } } }
-    AgentSpec: { type: object, required: [node_id], properties: { node_id: { type: string }, gateway_selector: { type: object }, proxies: { type: array, items: { type: object } }, routes: { type: array, items: { type: object } }, limits: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, logging: { type: object }, revision: { type: integer, format: int64 } } }
+    AgentSpec: { type: object, required: [node_id], description: New Agent writes must include gateway_id; gateway_selector-only documents are retained for legacy compatibility, properties: { node_id: { type: string }, gateway_id: { type: string, description: Exact enrolled Gateway node selected for this Agent }, gateway_selector: { type: object, description: Legacy label selector used only when gateway_id is omitted }, proxies: { type: array, items: { type: object } }, routes: { type: array, items: { type: object } }, limits: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, logging: { type: object }, revision: { type: integer, format: int64 } } }
     RuntimeMetrics:
       type: object
       description: Explicit controller-visible runtime metrics. New fields are protocol/API contract changes.
@@ -619,7 +616,7 @@ components:
       type: object
       required: [schema_version, node_id, applied_generation, healthy, degraded, metrics, observed_at]
       properties:
-        schema_version: { type: integer, format: int32, enum: [1] }
+        schema_version: { type: integer, format: int32, enum: [2] }
         node_id: { type: string }
         applied_generation: { type: integer, format: int64, minimum: 0 }
         healthy: { type: boolean }

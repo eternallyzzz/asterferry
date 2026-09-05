@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,5 +81,56 @@ func TestAgentCodecRejectsUnknownRouteValueKind(t *testing.T) {
 	}
 	if _, err := store.GetAgentSpec(ctx, "agent"); err == nil || !strings.Contains(err.Error(), "route value kind") {
 		t.Fatalf("corrupt agent route kind error = %v", err)
+	}
+}
+
+func TestAgentCodecPreservesFixedGatewayBinding(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "agent-gateway-binding.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, node := range []domain.Node{
+		{ID: "gateway", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
+	} {
+		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gateway", PublicEndpoints: []string{"gateway.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	want := domain.AgentSpec{
+		NodeID:    "agent",
+		GatewayID: "gateway",
+		GatewaySelector: domain.Selector{MatchLabels: map[string]string{
+			"region": "east",
+		}},
+	}
+	if err := store.PutAgentSpec(ctx, want, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetAgentSpec(ctx, "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GatewayID != want.GatewayID || got.GatewaySelector.MatchLabels["region"] != "east" {
+		t.Fatalf("fixed Gateway binding was not round-tripped: got=%#v want=%#v", got, want)
+	}
+	var storedBinding string
+	if err := store.db.QueryRowContext(ctx, `SELECT value FROM agent_selector_labels WHERE node_id=? AND key=?`, "agent", agentGatewayBindingStorageKey).Scan(&storedBinding); err != nil {
+		t.Fatal(err)
+	}
+	if storedBinding != "gateway" {
+		t.Fatalf("stored Gateway binding = %q, want gateway", storedBinding)
+	}
+	reserved := want
+	reserved.GatewayID = ""
+	reserved.GatewaySelector.MatchLabels = map[string]string{agentGatewayBindingStorageKey: "gateway"}
+	var applyErr *domain.ApplyError
+	if err := store.PutAgentSpec(ctx, reserved, WriteOptions{IfMatch: got.Revision}); !errors.As(err, &applyErr) || applyErr.Code != "reserved_selector_label" {
+		t.Fatalf("reserved selector label error = %v, want reserved_selector_label", err)
 	}
 }

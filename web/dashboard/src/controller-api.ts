@@ -137,6 +137,7 @@ export type ControllerGatewaySpecInput = Omit<ControllerGatewaySpec, "obfuscatio
 
 export interface ControllerAgentSpec {
   node_id: string;
+  gateway_id?: string;
   gateway_selector: ControllerSelector;
   proxies?: ControllerProxySpec[];
   routes?: ControllerRouteRule[];
@@ -145,6 +146,10 @@ export interface ControllerAgentSpec {
   logging: ControllerLoggingPolicy;
   revision?: number;
 }
+
+export type ControllerAgentSpecInput = Omit<ControllerAgentSpec, "gateway_id"> & {
+  gateway_id: string;
+};
 
 export type ControllerGatewayNodeSpec = {
   node_id: string;
@@ -173,7 +178,7 @@ export type ControllerGatewayNodeSpecInput = {
 export type ControllerAgentNodeSpecInput = {
   node_id: string;
   kind: "agent";
-  agent: ControllerAgentSpec;
+  agent: ControllerAgentSpecInput;
 };
 
 export type ControllerNodeSpecInput = ControllerGatewayNodeSpecInput | ControllerAgentNodeSpecInput;
@@ -226,7 +231,6 @@ export interface RouteRule extends ControllerRouteRule {}
 export interface NodeBootstrapRequest {
   platform: "linux" | "windows";
   arch: "amd64" | "arm64";
-  spec?: ControllerNodeSpecInput;
 }
 
 export interface NodeInstallationRequest extends NodeBootstrapRequest {
@@ -249,7 +253,6 @@ export interface NodeBootstrapResponse {
 
 export interface PendingNodeInstallation {
   node_id: string;
-  spec_kind?: NodeSpecKind;
   name: string;
   labels?: Record<string, string>;
   enabled: boolean;

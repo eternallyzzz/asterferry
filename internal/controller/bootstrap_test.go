@@ -144,7 +144,7 @@ func TestNodeEnrollmentTokenIsBoundToNode(t *testing.T) {
 	}
 }
 
-func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
+func TestNodeBootstrapEndpointKeepsRoleUnconfigured(t *testing.T) {
 	dir := t.TempDir()
 	config := DefaultConfig(dir)
 	config.GRPCAdvertise = "controller.example.com:9443"
@@ -182,14 +182,6 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	body, err := json.Marshal(NodeBootstrapRequest{
 		Platform: "linux",
 		Arch:     "amd64",
-		Spec: &domain.NodeSpec{
-			NodeID: "gw", Kind: domain.NodeSpecGateway,
-			Gateway: &domain.GatewaySpec{
-				NodeID:          "gw",
-				PublicEndpoints: []string{"gateway.example.com:4433"},
-				PortPool:        domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}},
-			},
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -210,18 +202,82 @@ func TestNodeBootstrapEndpointCreatesSpecAndOneTimeCommand(t *testing.T) {
 	if result.NodeID != "gw" || result.Command == "" || result.ExpiresAt == "" {
 		t.Fatalf("bootstrap response = %#v", result)
 	}
-	if _, err := store.GetGatewaySpec(ctx, "gw"); err != nil {
-		t.Fatalf("bootstrap did not persist gateway spec: %v", err)
+	if _, err := store.GetNodeSpec(ctx, "gw"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("bootstrap configured a role before enrollment: %v", err)
 	}
+}
 
-	retry := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/gw/bootstrap", bytes.NewReader(body))
-	retry.Header.Set("Authorization", "Bearer "+authToken)
-	retry.Header.Set("Content-Type", "application/json")
-	retry.Header.Set("Idempotency-Key", "bootstrap-command-once")
-	retryResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(retryResponse, retry)
-	if retryResponse.Code != http.StatusConflict || strings.Contains(retryResponse.Body.String(), `"command"`) {
-		t.Fatalf("bootstrap retry = %d, body=%s", retryResponse.Code, retryResponse.Body.String())
+func TestNodeSpecAPIConfiguresRoleOnlyAfterEnrollment(t *testing.T) {
+	root := t.TempDir()
+	initResult, err := Init(context.Background(), InitOptions{
+		Dir: root, Password: "a-very-long-admin-password",
+		GRPCAdvertise: "controller.example.com:9443", ReleaseVersion: "1.2.3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterKey, err := LoadOrCreateMasterKey(initResult.Config.MasterKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositories, err := OpenControllerRepositoriesWithConfig(initResult.Config, masterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repositories.Close()
+	store := repositories.Resources
+	ctx := context.Background()
+	if err := store.CreateNode(ctx, domain.Node{ID: "gateway", Name: "Gateway", Enabled: true, CertificateState: domain.CertificateActive, CertificateSerial: "gateway-serial"}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gateway", PublicEndpoints: []string{"gateway.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateNode(ctx, domain.Node{ID: "agent", Name: "Agent", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	adminToken, _, err := store.CreateAPIToken(ctx, initResult.Admin.ID, "node-spec-api-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(initResult.Config, repositories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	body, err := json.Marshal(domain.NewAgentNodeSpec(domain.AgentSpec{NodeID: "agent", GatewayID: "gateway"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPut, "/api/v1/nodes/agent/spec", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+adminToken)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	response := put()
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"node_not_enrolled"`) {
+		t.Fatalf("un-enrolled node spec response = %d, body=%s", response.Code, response.Body.String())
+	}
+	agent, err := store.GetNode(ctx, "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.CertificateState = domain.CertificateActive
+	agent.CertificateSerial = "agent-serial"
+	if err := store.UpdateNode(ctx, agent, WriteOptions{IfMatch: agent.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	response = put()
+	if response.Code != http.StatusCreated {
+		t.Fatalf("enrolled node spec response = %d, body=%s", response.Code, response.Body.String())
+	}
+	loaded, err := store.GetAgentSpec(ctx, "agent")
+	if err != nil || loaded.GatewayID != "gateway" {
+		t.Fatalf("API-created Agent spec = %#v, err=%v", loaded, err)
 	}
 }
 
@@ -257,7 +313,6 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	body, err := json.Marshal(NodeInstallationRequest{
 		NodeID: "gw-install", Name: "Gateway install", Labels: map[string]string{"site": "east"},
 		Platform: "linux", Arch: "amd64",
-		Spec: &domain.NodeSpec{NodeID: "gw-install", Kind: domain.NodeSpecGateway, Gateway: &domain.GatewaySpec{NodeID: "gw-install", PublicEndpoints: []string{"gateway.example.com:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 28080, Max: 28999}}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -360,8 +415,8 @@ func TestNodeInstallationCreatesIdentityOnlyAfterEnrollment(t *testing.T) {
 	if _, err := store.GetPendingNodeBootstrap(context.Background(), "gw-install"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("pending bootstrap remained after enrollment: %v", err)
 	}
-	if spec, err := store.GetGatewaySpec(context.Background(), "gw-install"); err != nil || len(spec.PublicEndpoints) != 1 {
-		t.Fatalf("enrolled gateway spec = %#v, err=%v", spec, err)
+	if _, err := store.GetNodeSpec(context.Background(), "gw-install"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("enrolled generic node has a role spec: %v", err)
 	}
 
 	// The supported install-first path is behavior-neutral. A Node identity is

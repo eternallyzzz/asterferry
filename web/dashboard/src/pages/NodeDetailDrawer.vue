@@ -14,10 +14,12 @@ import {
 	bootstrapNode,
 	ControllerAPIError,
   deleteNodeSpec,
-  getNodeSpec,
-  nodeAction,
+	getNodeSpec,
+	listNodes,
+	nodeAction,
 	putNodeSpec,
 	type ControllerAgentSpec,
+	type ControllerAgentSpecInput,
 	type ControllerGatewaySpecInput,
 	type ControllerNode,
 	type ControllerNodeSpecInput,
@@ -51,6 +53,10 @@ const specText = ref("");
 const specRevision = ref<number | undefined>();
 const specKind = ref<NodeSpecKind | undefined>();
 const selectedKind = ref<NodeSpecKind>("agent");
+const selectedGatewayID = ref("");
+const gatewayNodes = ref<ControllerNode[]>([]);
+const gatewayLoading = ref(false);
+const gatewayError = ref("");
 const specValid = ref(true);
 const specLoading = ref(false);
 const specSaving = ref(false);
@@ -64,8 +70,17 @@ const installResult = ref<NodeBootstrapResponse | null>(null);
 const installError = ref("");
 const installing = ref(false);
 const copiedInstallCommand = ref(false);
+let gatewayRequestVersion = 0;
 
 const activeKind = computed(() => specKind.value ?? selectedKind.value);
+const nodeEnrolled = computed(() => props.node?.certificate_state === "active" && Boolean(props.node.certificate_serial));
+const specSaveDisabled = computed(() => (
+  !session.canOperate.value ||
+  !nodeEnrolled.value ||
+  !specValid.value ||
+  specSaving.value ||
+  (selectedKind.value === "agent" && !selectedGatewayID.value)
+));
 
 function specKindLabel(kind?: NodeSpecKind): string {
   return kind === "gateway" ? "Gateway" : kind === "agent" ? "Agent" : "未配置";
@@ -132,8 +147,30 @@ function resetDetailState() {
   specRevision.value = undefined;
   specKind.value = undefined;
   selectedKind.value = "agent";
+  selectedGatewayID.value = "";
+  gatewayNodes.value = [];
+  gatewayLoading.value = false;
+  gatewayError.value = "";
+  gatewayRequestVersion++;
   specValid.value = true;
   specError.value = "";
+}
+
+async function loadGatewayNodes(nodeID: string) {
+  const requestVersion = ++gatewayRequestVersion;
+  gatewayLoading.value = true;
+  gatewayError.value = "";
+  try {
+    const result = await listNodes("gateway");
+    if (requestVersion !== gatewayRequestVersion || props.node?.id !== nodeID) return;
+    gatewayNodes.value = result.items.filter((item) => item.id !== nodeID);
+  } catch (caught) {
+    if (requestVersion !== gatewayRequestVersion || props.node?.id !== nodeID) return;
+    gatewayError.value = describeError(caught);
+    gatewayNodes.value = [];
+  } finally {
+    if (requestVersion === gatewayRequestVersion) gatewayLoading.value = false;
+  }
 }
 
 async function loadSpec(node: ControllerNode) {
@@ -148,8 +185,10 @@ async function loadSpec(node: ControllerNode) {
     selectedKind.value = result.kind;
     const doc = result.kind === "gateway" ? result.gateway : result.agent;
     specDoc.value = doc;
+    selectedGatewayID.value = result.kind === "agent" ? result.agent?.gateway_id ?? "" : "";
     specRevision.value = result.revision;
     specText.value = prettyJson(doc ?? defaultSpec(node, result.kind));
+    if (result.kind === "agent") void loadGatewayNodes(node.id);
   } catch (caught) {
     if (requestVersion !== specRequestVersion || props.node?.id !== node.id) return;
     if (caught instanceof ControllerAPIError && caught.status === 404) {
@@ -157,6 +196,8 @@ async function loadSpec(node: ControllerNode) {
       specRevision.value = undefined;
       specKind.value = undefined;
       specText.value = prettyJson(defaultSpec(node, selectedKind.value));
+      selectedGatewayID.value = "";
+      if (selectedKind.value === "agent") void loadGatewayNodes(node.id);
     } else {
       specError.value = describeError(caught);
     }
@@ -240,6 +281,15 @@ function changeSpecKind() {
   if (!props.node || specRevision.value !== undefined) return;
   specDoc.value = undefined;
   specText.value = prettyJson(defaultSpec(props.node, selectedKind.value));
+  selectedGatewayID.value = "";
+  if (selectedKind.value === "agent") {
+    void loadGatewayNodes(props.node.id);
+  } else {
+    gatewayRequestVersion++;
+    gatewayNodes.value = [];
+    gatewayLoading.value = false;
+    gatewayError.value = "";
+  }
 }
 
 async function saveSpec() {
@@ -249,9 +299,17 @@ async function saveSpec() {
   try {
     const document = parseObject(specText.value, "规格") as SpecDocument;
     document.node_id = props.node.id;
-    const envelope: ControllerNodeSpecInput = selectedKind.value === "gateway"
-      ? { node_id: props.node.id, kind: "gateway", gateway: document as ControllerGatewaySpecInput }
-      : { node_id: props.node.id, kind: "agent", agent: document as ControllerAgentSpec };
+    let envelope: ControllerNodeSpecInput;
+    if (selectedKind.value === "gateway") {
+      envelope = { node_id: props.node.id, kind: "gateway", gateway: document as ControllerGatewaySpecInput };
+    } else {
+      if (!selectedGatewayID.value) {
+        throw new Error("请先选择要绑定的 Gateway 节点。");
+      }
+      const agent = document as ControllerAgentSpecInput;
+      agent.gateway_id = selectedGatewayID.value;
+      envelope = { node_id: props.node.id, kind: "agent", agent };
+    }
     const result = await putNodeSpec(props.node.id, envelope, specRevision.value, undefined, newIdempotencyKey());
     const doc = result.kind === "gateway" ? result.gateway : result.agent;
     specKind.value = result.kind;
@@ -349,11 +407,23 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
           <div v-if="specLoading" class="loading-row"><Spinner :size="18" /></div>
           <template v-else>
             <label class="spec-kind-field">行为类型
-              <select v-model="selectedKind" :disabled="specRevision !== undefined" @change="changeSpecKind">
+              <select v-model="selectedKind" :disabled="specRevision !== undefined || !nodeEnrolled" @change="changeSpecKind">
                 <option value="gateway">Gateway</option>
                 <option value="agent">Agent</option>
               </select>
             </label>
+            <label v-if="selectedKind === 'agent'" class="spec-kind-field">绑定 Gateway
+              <select v-model="selectedGatewayID" :disabled="gatewayLoading || !nodeEnrolled">
+                <option value="">请选择已注册的 Gateway</option>
+                <option v-for="gateway in gatewayNodes" :key="gateway.id" :value="gateway.id">
+                  {{ gateway.name }} · {{ gateway.id }}
+                </option>
+              </select>
+            </label>
+            <p v-if="selectedKind === 'agent' && gatewayLoading" class="form-note">正在加载已注册的 Gateway…</p>
+            <p v-else-if="selectedKind === 'agent' && gatewayError" class="section-error">Gateway 列表加载失败：{{ gatewayError }}</p>
+            <p v-else-if="selectedKind === 'agent' && !gatewayNodes.length" class="form-note">暂无可绑定的 Gateway。请先注册另一个 Node，并在其详情中保存 Gateway 规格。</p>
+            <p v-if="!nodeEnrolled" class="form-note">节点尚未完成注册。请先在目标机器执行安装注册命令，注册成功后再配置角色。</p>
             <p v-if="specRevision !== undefined" class="form-note">已有规格如需切换行为，请先删除当前规格，再选择新的行为类型保存。</p>
             <JsonEditor
               v-model="specText"
@@ -366,7 +436,7 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
               <button
                 type="button"
                 class="af-button primary"
-                :disabled="!session.canOperate.value || !specValid || specSaving"
+                :disabled="specSaveDisabled"
                 @click="saveSpec"
               >{{ specSaving ? "保存中…" : "保存规格" }}</button>
             </div>

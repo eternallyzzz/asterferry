@@ -248,11 +248,11 @@ async function confirmDelete() {
 
     <PanelCard v-if="pendingInstallations.length" :title="`待安装任务 · ${pendingInstallations.length}`">
       <DataTable>
-        <thead><tr><th>节点</th><th>行为规格</th><th>平台</th><th>有效期</th><th>操作</th></tr></thead>
+        <thead><tr><th>节点</th><th>行为</th><th>平台</th><th>有效期</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="item in pendingInstallations" :key="item.node_id">
             <td><strong>{{ item.name }}</strong><small><code>{{ item.node_id }}</code></small></td>
-            <td>{{ specKindLabel(item.spec_kind) }}</td>
+            <td>注册后配置</td>
             <td>{{ item.platform }}/{{ item.arch }}</td>
             <td>{{ formatTime(item.expires_at) }}</td>
             <td>

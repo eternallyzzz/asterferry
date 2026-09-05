@@ -51,7 +51,12 @@ func loadAgentSpecsBatchNormalized(ctx context.Context, q sqlQueryer, agents []d
 		}
 		for nodeID, labels := range labelsByNode {
 			if spec, ok := result[nodeID]; ok && spec.Agent != nil {
-				spec.Agent.GatewaySelector.MatchLabels = labels
+				gatewayID, selectorLabels, bindingErr := loadAgentGatewayBinding(labels)
+				if bindingErr != nil {
+					return nil, bindingErr
+				}
+				spec.Agent.GatewayID = gatewayID
+				spec.Agent.GatewaySelector.MatchLabels = selectorLabels
 				result[nodeID] = spec
 			}
 		}

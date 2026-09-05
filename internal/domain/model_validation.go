@@ -319,6 +319,14 @@ func (a AgentSpec) Validate() error {
 	if err := ValidateID(a.NodeID, "agent.node_id"); err != nil {
 		return err
 	}
+	if a.GatewayID != "" {
+		if err := ValidateID(a.GatewayID, "agent.gateway_id"); err != nil {
+			return err
+		}
+		if a.GatewayID == a.NodeID {
+			return &ApplyError{Code: "invalid_gateway_binding", Path: "agent.gateway_id", Message: "agent cannot bind to itself"}
+		}
+	}
 	if a.Limits.MaxConnections < 0 || a.Limits.MaxStreams < 0 || a.Limits.MaxBufferBytes < 0 {
 		return &ApplyError{Code: "invalid_limits", Path: "agent.limits", Message: "limit values cannot be negative"}
 	}

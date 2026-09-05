@@ -52,6 +52,7 @@ type ChecksumGateway struct {
 
 type ChecksumAgent struct {
 	NodeID          string        `json:"node_id"`
+	GatewayID       string        `json:"gateway_id,omitempty"`
 	GatewaySelector Selector      `json:"gateway_selector"`
 	Proxies         []ProxySpec   `json:"proxies,omitempty"`
 	Routes          []RouteRule   `json:"routes,omitempty"`
@@ -132,6 +133,7 @@ func (s DesiredSnapshot) ChecksumDocument() (ChecksumDocument, error) {
 		}
 		document.Agent = &ChecksumAgent{
 			NodeID:          agent.NodeID,
+			GatewayID:       agent.GatewayID,
 			GatewaySelector: Selector{MatchLabels: cloneLabels(agent.GatewaySelector.MatchLabels)},
 			Proxies:         append([]ProxySpec(nil), agent.Proxies...),
 			Routes:          routes,

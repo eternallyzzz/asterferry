@@ -12,7 +12,7 @@ import (
 
 const DefaultGatewayOfflineAfter = 30 * time.Second
 
-var ErrNoHealthyGateway = errors.New("no healthy gateway satisfies the selector and capacity constraints")
+var ErrNoHealthyGateway = errors.New("no healthy gateway satisfies the fixed binding, selector, and capacity constraints")
 
 type GatewayCandidate struct {
 	Node         domain.Node

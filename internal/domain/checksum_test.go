@@ -119,3 +119,25 @@ func TestChecksumDocumentDoesNotContainObfuscationMaterial(t *testing.T) {
 		}
 	}
 }
+
+func TestChecksumIncludesFixedGatewayBinding(t *testing.T) {
+	base := DesiredSnapshot{
+		SchemaVersion: CurrentControlProtocolVersion,
+		NodeID:        "agent-1",
+		Generation:    1,
+		Agent:         &AgentSpec{NodeID: "agent-1", GatewayID: "gateway-a"},
+	}
+	other := base.Clone()
+	other.Agent.GatewayID = "gateway-b"
+	left, err := base.ComputeChecksum()
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := other.ComputeChecksum()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left == right {
+		t.Fatalf("fixed Gateway binding did not change checksum: %s", left)
+	}
+}

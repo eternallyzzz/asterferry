@@ -18,7 +18,6 @@ import (
 // not an enrolled identity and must not be schedulable.
 type PendingNodeBootstrap struct {
 	NodeID    string            `json:"node_id"`
-	SpecKind  string            `json:"spec_kind,omitempty"`
 	Name      string            `json:"name"`
 	Labels    map[string]string `json:"labels,omitempty"`
 	Enabled   bool              `json:"enabled"`
@@ -31,14 +30,13 @@ type PendingNodeBootstrap struct {
 type pendingNodeBootstrap struct {
 	PendingNodeBootstrap
 	TokenHash string
-	SpecJSON  []byte
 }
 
 // CreatePendingNodeBootstrap stores only the installation intent and a hash
-// of the one-time enrollment token. The node identity and its business spec
-// are created later by IssueNodeCertificate, after the installer reaches the
-// Controller with the token.
-func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, spec *domain.NodeSpec, options WriteOptions) (string, PendingNodeBootstrap, error) {
+// of the one-time enrollment token. The node identity is created later by
+// IssueNodeCertificate, after the installer reaches the Controller with the
+// token; the behavior spec is intentionally configured as a separate action.
+func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, options WriteOptions) (string, PendingNodeBootstrap, error) {
 	if err := node.Validate(); err != nil {
 		return "", PendingNodeBootstrap{}, err
 	}
@@ -48,33 +46,6 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 	platform, arch, err := normalizeBootstrapPlatform(platform, arch)
 	if err != nil {
 		return "", PendingNodeBootstrap{}, err
-	}
-
-	var specJSON []byte
-	if spec != nil {
-		value := *spec
-		value.NodeID = node.ID
-		value.Revision = 0
-		value.UpdatedAt = time.Time{}
-		if value.Gateway != nil {
-			value.Gateway.NodeID = node.ID
-			if value.Gateway.Labels == nil {
-				value.Gateway.Labels = cloneStringMap(node.Labels)
-			}
-			if err := s.protectObfuscationPolicy(&value.Gateway.Obfuscation); err != nil {
-				return "", PendingNodeBootstrap{}, err
-			}
-		}
-		if value.Agent != nil {
-			value.Agent.NodeID = node.ID
-		}
-		if err := value.Validate(); err != nil {
-			return "", PendingNodeBootstrap{}, err
-		}
-		specJSON, err = json.Marshal(value)
-		if err != nil {
-			return "", PendingNodeBootstrap{}, err
-		}
 	}
 
 	plain, _, err := NewAPIToken()
@@ -89,10 +60,7 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 		Enabled: node.Enabled, Platform: platform, Arch: arch,
 		ExpiresAt: now.Add(EnrollmentTTL), CreatedAt: now,
 	}
-	if spec != nil {
-		pending.SpecKind = string(spec.Kind)
-	}
-	request := pendingBootstrapRequestForHash(pending, spec)
+	request := pendingBootstrapRequestForHash(pending)
 
 	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
@@ -129,7 +97,7 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 		return "", PendingNodeBootstrap{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO node_bootstraps(node_id,name,labels_json,enabled,platform,arch,spec_json,token_hash,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		node.ID, node.Name, labels, boolInt(node.Enabled), platform, arch, nullableJSON(specJSON), tokenHash, pending.ExpiresAt.Format(time.RFC3339Nano), pending.CreatedAt.Format(time.RFC3339Nano))
+		node.ID, node.Name, labels, boolInt(node.Enabled), platform, arch, nil, tokenHash, pending.ExpiresAt.Format(time.RFC3339Nano), pending.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return "", PendingNodeBootstrap{}, fmt.Errorf("create pending node bootstrap: %w", err)
 	}
@@ -145,7 +113,7 @@ func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, nod
 	return plain, pending, nil
 }
 
-func pendingBootstrapRequestForHash(pending PendingNodeBootstrap, spec *domain.NodeSpec) any {
+func pendingBootstrapRequestForHash(pending PendingNodeBootstrap) any {
 	request := struct {
 		NodeID   string            `json:"node_id"`
 		Name     string            `json:"name"`
@@ -153,36 +121,8 @@ func pendingBootstrapRequestForHash(pending PendingNodeBootstrap, spec *domain.N
 		Enabled  bool              `json:"enabled"`
 		Platform string            `json:"platform"`
 		Arch     string            `json:"arch"`
-		Spec     any               `json:"spec,omitempty"`
 	}{NodeID: pending.NodeID, Name: pending.Name, Labels: pending.Labels, Enabled: pending.Enabled, Platform: pending.Platform, Arch: pending.Arch}
-	if spec != nil {
-		value := *spec
-		value.NodeID = pending.NodeID
-		value.Revision = 0
-		if value.Gateway != nil {
-			value.Gateway.Obfuscation = obfuscationRequestPolicyWithKeyIDs(value.Gateway.Obfuscation)
-		}
-		request.Spec = value
-	}
 	return request
-}
-
-func obfuscationRequestPolicyWithKeyIDs(policy domain.ObfuscationPolicy) domain.ObfuscationPolicy {
-	result := obfuscationRequestPolicy(policy)
-	if result.KeyID == "" && len(policy.Key) > 0 {
-		result.KeyID = obfuscationKeyID(policy.Key)
-	}
-	if result.PreviousKeyID == "" && len(policy.PreviousKey) > 0 {
-		result.PreviousKeyID = obfuscationKeyID(policy.PreviousKey)
-	}
-	return result
-}
-
-func nullableJSON(value []byte) any {
-	if len(value) == 0 {
-		return nil
-	}
-	return value
 }
 
 func loadPendingBootstrapFromIdempotency(ctx context.Context, tx *sql.Tx, key string) (pendingNodeBootstrap, error) {
@@ -320,22 +260,22 @@ func (s *ResourceRepository) DeletePendingNodeBootstrap(ctx context.Context, nod
 	return s.commitWriteTx(ctx, tx)
 }
 
-const pendingBootstrapSelect = `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,spec_json FROM node_bootstraps`
+const pendingBootstrapSelect = `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at FROM node_bootstraps`
 
 func loadPendingBootstrapTx(ctx context.Context, tx *sql.Tx, nodeID string) (pendingNodeBootstrap, error) {
-	return scanPendingBootstrapWithSpec(tx.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE node_id=?`, nodeID))
+	return scanPendingBootstrapWithToken(tx.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash FROM node_bootstraps WHERE node_id=?`, nodeID))
 }
 
 func (s *ResourceRepository) pendingBootstrapForToken(ctx context.Context, tokenHash string) (pendingNodeBootstrap, error) {
-	return scanPendingBootstrapWithSpec(s.db.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash,spec_json FROM node_bootstraps WHERE token_hash=?`, tokenHash))
+	return scanPendingBootstrapWithToken(s.db.QueryRowContext(ctx, `SELECT node_id,name,labels_json,enabled,platform,arch,expires_at,created_at,token_hash FROM node_bootstraps WHERE token_hash=?`, tokenHash))
 }
 
 func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 	var pending PendingNodeBootstrap
-	var labels, specJSON []byte
+	var labels []byte
 	var enabled int
 	var expires, created string
-	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &specJSON); err != nil {
+	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created); err != nil {
 		return PendingNodeBootstrap{}, err
 	}
 	if len(labels) > 0 {
@@ -344,12 +284,6 @@ func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 		}
 	}
 	pending.Enabled = enabled != 0
-	if len(specJSON) > 0 {
-		var spec domain.NodeSpec
-		if err := json.Unmarshal(specJSON, &spec); err == nil {
-			pending.SpecKind = string(spec.Kind)
-		}
-	}
 	var err error
 	pending.ExpiresAt, err = parseStoredTime("node_bootstrap.expires_at", expires)
 	if err != nil {
@@ -362,12 +296,12 @@ func scanPendingBootstrap(row scanner) (PendingNodeBootstrap, error) {
 	return pending, nil
 }
 
-func scanPendingBootstrapWithSpec(row scanner) (pendingNodeBootstrap, error) {
+func scanPendingBootstrapWithToken(row scanner) (pendingNodeBootstrap, error) {
 	var pending pendingNodeBootstrap
-	var labels, specJSON []byte
+	var labels []byte
 	var enabled int
 	var expires, created string
-	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.TokenHash, &specJSON); err != nil {
+	if err := row.Scan(&pending.NodeID, &pending.Name, &labels, &enabled, &pending.Platform, &pending.Arch, &expires, &created, &pending.TokenHash); err != nil {
 		return pendingNodeBootstrap{}, err
 	}
 	if len(labels) > 0 {
@@ -376,13 +310,6 @@ func scanPendingBootstrapWithSpec(row scanner) (pendingNodeBootstrap, error) {
 		}
 	}
 	pending.Enabled = enabled != 0
-	pending.SpecJSON = append([]byte(nil), specJSON...)
-	if len(specJSON) > 0 {
-		var spec domain.NodeSpec
-		if err := json.Unmarshal(specJSON, &spec); err == nil {
-			pending.SpecKind = string(spec.Kind)
-		}
-	}
 	var err error
 	pending.ExpiresAt, err = parseStoredTime("node_bootstrap.expires_at", expires)
 	if err != nil {

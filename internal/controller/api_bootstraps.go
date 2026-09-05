@@ -57,43 +57,7 @@ func (s *Server) nodeInstallations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var spec *domain.NodeSpec
-	if input.Spec != nil {
-		value := *input.Spec
-		value.NodeID = node.ID
-		if value.Gateway != nil {
-			value.Gateway.NodeID = node.ID
-		}
-		if value.Agent != nil {
-			value.Agent.NodeID = node.ID
-		}
-		if value.Kind == "" {
-			if value.Gateway != nil {
-				value.Kind = domain.NodeSpecGateway
-			} else if value.Agent != nil {
-				value.Kind = domain.NodeSpecAgent
-			}
-		}
-		switch value.Kind {
-		case domain.NodeSpecGateway:
-			if value.Gateway == nil {
-				writeError(w, http.StatusBadRequest, "gateway_spec_required", "gateway spec is required for a gateway node spec")
-				return
-			}
-			spec = &value
-		case domain.NodeSpecAgent:
-			if value.Agent == nil {
-				writeError(w, http.StatusBadRequest, "agent_spec_required", "agent spec is required for an agent node spec")
-				return
-			}
-			spec = &value
-		default:
-			writeError(w, http.StatusBadRequest, "invalid_spec_kind", "spec kind must be gateway or agent")
-			return
-		}
-	}
-
-	plain, pending, err := s.resources.CreatePendingNodeBootstrap(r.Context(), node, platform, arch, spec, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	plain, pending, err := s.resources.CreatePendingNodeBootstrap(r.Context(), node, platform, arch, WriteOptions{Actor: user.Username, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 	if err != nil {
 		if errors.Is(err, ErrSecretAlreadyCreated) {
 			writeAlreadyCreatedSecret(w, "installation", pending)

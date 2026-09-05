@@ -9,6 +9,43 @@ import (
 	"asterferry/internal/domain"
 )
 
+// agentGatewayBindingStorageKey is kept in the existing selector key/value
+// table so the exact Gateway binding can be added without changing the v12
+// database layout. It is never exposed as a user selector label.
+const agentGatewayBindingStorageKey = "__asterferry_gateway_id"
+
+func loadAgentGatewayBinding(values map[string]string) (string, map[string]string, error) {
+	if values == nil {
+		return "", nil, nil
+	}
+	result := cloneStringMap(values)
+	gatewayID := result[agentGatewayBindingStorageKey]
+	delete(result, agentGatewayBindingStorageKey)
+	if gatewayID != "" {
+		if err := domain.ValidateID(gatewayID, "agent.gateway_id"); err != nil {
+			return "", nil, fmt.Errorf("stored agent gateway binding is invalid: %w", err)
+		}
+	}
+	if len(result) == 0 {
+		result = nil
+	}
+	return gatewayID, result, nil
+}
+
+func agentSelectorStorageValues(spec domain.AgentSpec) (map[string]string, error) {
+	if _, exists := spec.GatewaySelector.MatchLabels[agentGatewayBindingStorageKey]; exists {
+		return nil, &domain.ApplyError{Code: "reserved_selector_label", Path: "agent.gateway_selector.match_labels", Message: "selector label key is reserved for the exact Gateway binding"}
+	}
+	values := cloneStringMap(spec.GatewaySelector.MatchLabels)
+	if spec.GatewayID != "" {
+		if values == nil {
+			values = make(map[string]string)
+		}
+		values[agentGatewayBindingStorageKey] = spec.GatewayID
+	}
+	return values, nil
+}
+
 // AgentSpec owns the proxy, route, route-value, selector, and egress child
 // tables for an agent aggregate. The loader validates every position because
 // positions are the durable representation of user-visible list order.
@@ -27,7 +64,11 @@ func loadAgentSpecNormalized(ctx context.Context, q sqlQueryer, nodeID string, r
 	spec.Egress.Enabled = egressEnabled != 0
 	spec.Egress.MaxConnections = int(egressMax)
 	var err error
-	spec.GatewaySelector.MatchLabels, err = loadStringMap(ctx, q, "agent_selector_labels", "node_id", nodeID)
+	selectorLabels, err := loadStringMap(ctx, q, "agent_selector_labels", "node_id", nodeID)
+	if err != nil {
+		return domain.AgentSpec{}, err
+	}
+	spec.GatewayID, spec.GatewaySelector.MatchLabels, err = loadAgentGatewayBinding(selectorLabels)
 	if err != nil {
 		return domain.AgentSpec{}, err
 	}
@@ -182,7 +223,11 @@ func replaceAgentSpecTx(ctx context.Context, tx *sql.Tx, spec domain.AgentSpec) 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_specs(node_id,limits_max_connections,limits_max_streams,limits_max_buffer_bytes,logging_level,logging_format,egress_enabled,egress_max_connections) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET limits_max_connections=excluded.limits_max_connections,limits_max_streams=excluded.limits_max_streams,limits_max_buffer_bytes=excluded.limits_max_buffer_bytes,logging_level=excluded.logging_level,logging_format=excluded.logging_format,egress_enabled=excluded.egress_enabled,egress_max_connections=excluded.egress_max_connections`, spec.NodeID, spec.Limits.MaxConnections, spec.Limits.MaxStreams, spec.Limits.MaxBufferBytes, spec.Logging.Level, spec.Logging.Format, boolInt(spec.Egress.Enabled), spec.Egress.MaxConnections); err != nil {
 		return err
 	}
-	if err := replaceStringMapTx(ctx, tx, "agent_selector_labels", "node_id", spec.NodeID, spec.GatewaySelector.MatchLabels); err != nil {
+	selectorLabels, err := agentSelectorStorageValues(spec)
+	if err != nil {
+		return err
+	}
+	if err := replaceStringMapTx(ctx, tx, "agent_selector_labels", "node_id", spec.NodeID, selectorLabels); err != nil {
 		return err
 	}
 	for position, proxy := range spec.Proxies {

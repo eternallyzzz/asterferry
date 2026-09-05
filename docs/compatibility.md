@@ -41,7 +41,7 @@ and TLS identity together with the database.
 ## Independent version identifiers
 
 `/api/v1` is the REST route contract. The control-wire and snapshot payloads
-use protocol version `1`, while the physical Controller database uses schema
-version `12` with the `relational` layout marker. These identifiers are
-independent: a database layout change does not silently change the REST route
-or payload protocol.
+use protocol version `2`, while the physical Controller database uses schema
+version `12` with the `relational` layout marker. Protocol v2 carries the exact
+Agent-to-Gateway binding. These identifiers are independent: a database layout
+change does not silently change the REST route or payload protocol.

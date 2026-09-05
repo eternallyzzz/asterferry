@@ -185,7 +185,7 @@ func (s *ResourceRepository) DeleteNodeSpec(ctx context.Context, nodeID string, 
 		return err
 	}
 	if dependents > 0 {
-		return &domain.ApplyError{Code: "resource_conflict", Path: "node_spec", Message: "node behavior has dependent services or assignments"}
+		return &domain.ApplyError{Code: "resource_conflict", Path: "node_spec", Message: "node behavior has dependent services, assignments or Agent bindings"}
 	}
 	participants, err := assignmentParticipantIDsTx(ctx, tx, nodeID)
 	if err != nil {
@@ -214,7 +214,9 @@ func nodeSpecDependentsTx(ctx context.Context, tx *sql.Tx, nodeID, kind string) 
 	var dependents int
 	switch domain.NodeSpecKind(kind) {
 	case domain.NodeSpecGateway:
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assignments WHERE gateway_id=?`, nodeID).Scan(&dependents); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM assignments WHERE gateway_id=?) +
+			(SELECT COUNT(*) FROM agent_selector_labels WHERE key=? AND value=?)`, nodeID, agentGatewayBindingStorageKey, nodeID).Scan(&dependents); err != nil {
 			return 0, err
 		}
 	case domain.NodeSpecAgent:

@@ -112,3 +112,56 @@ func containsJSONField(document []byte, field string) bool {
 	_, exists := value[field]
 	return exists
 }
+
+func TestAgentSpecRequiresGatewayBehaviorAndProtectsBinding(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "agent-gateway-validation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, node := range []domain.Node{
+		{ID: "gateway", Name: "gateway", Enabled: true},
+		{ID: "agent", Name: "agent", Enabled: true},
+		{ID: "missing-target-agent", Name: "missing target", Enabled: true},
+		{ID: "wrong-target-agent", Name: "wrong target", Enabled: true},
+	} {
+		if err := store.CreateNode(ctx, node, WriteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.PutGatewaySpec(ctx, domain.GatewaySpec{NodeID: "gateway", PublicEndpoints: []string{"gateway.example:4433"}}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent", GatewayID: "gateway"}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.GetAgentSpec(ctx, "agent")
+	if err != nil || loaded.GatewayID != "gateway" {
+		t.Fatalf("agent Gateway binding = %#v, err=%v", loaded, err)
+	}
+
+	assertApplyError := func(name string, err error, code string) {
+		t.Helper()
+		var applyErr *domain.ApplyError
+		if !errors.As(err, &applyErr) || applyErr.Code != code {
+			t.Fatalf("%s error = %v, want %s", name, err, code)
+		}
+	}
+	assertApplyError("missing Gateway", store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "missing-target-agent", GatewayID: "does-not-exist"}, WriteOptions{}), "gateway_not_found")
+	if err := store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "wrong-target-agent"}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	assertApplyError("non-Gateway target", store.PutAgentSpec(ctx, domain.AgentSpec{NodeID: "agent", GatewayID: "wrong-target-agent"}, WriteOptions{IfMatch: loaded.Revision}), "gateway_kind_required")
+
+	gatewaySpec, err := store.GetGatewaySpec(ctx, "gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertApplyError("Gateway spec deletion", store.DeleteGatewaySpec(ctx, "gateway", WriteOptions{IfMatch: gatewaySpec.Revision}), "resource_conflict")
+	gatewayNode, err := store.GetNode(ctx, "gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertApplyError("Gateway node deletion", store.DeleteNode(ctx, "gateway", WriteOptions{IfMatch: gatewayNode.Revision}), "resource_conflict")
+}

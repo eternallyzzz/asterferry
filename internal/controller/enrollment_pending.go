@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,9 +14,8 @@ import (
 )
 
 // issuePendingNodeCertificate completes the install-first lifecycle. The
-// pending intent, enrollment token, node identity and initial spec are all
-// committed together, so a failed or racing enrollment cannot leave a node
-// that has no certificate, or a certificate for a node that has no spec.
+// pending intent, enrollment token and node identity are committed together;
+// role configuration remains a separate post-enrollment operation.
 func (s *ResourceRepository) issuePendingNodeCertificate(ctx context.Context, config Config, token, nodeID string, csrDER []byte, pending pendingNodeBootstrap) (Certificate, error) {
 	if pending.NodeID != nodeID {
 		return Certificate{}, ErrEnrollmentNodeMismatch
@@ -83,24 +81,8 @@ func (s *ResourceRepository) issuePendingNodeCertificate(ctx context.Context, co
 	if err := insertNodeLabelsTx(ctx, tx, nodeID, current.Labels); err != nil {
 		return Certificate{}, storageFailure("create enrolled node labels", err)
 	}
-	if len(current.SpecJSON) > 0 {
-		var spec domain.NodeSpec
-		if err := json.Unmarshal(current.SpecJSON, &spec); err != nil {
-			return Certificate{}, storageFailure("decode pending node spec", err)
-		}
-		spec.NodeID = nodeID
-		spec.Revision = 1
-		spec.UpdatedAt = now
-		if err := spec.Validate(); err != nil {
-			return Certificate{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO node_specs(node_id,kind,revision,updated_at) VALUES(?,?,?,?)`, nodeID, string(spec.Kind), 1, now.Format(time.RFC3339Nano)); err != nil {
-			return Certificate{}, storageFailure("create enrolled node spec", err)
-		}
-		if err := writeNodeSpecNormalizedTx(ctx, tx, spec); err != nil {
-			return Certificate{}, storageFailure("create enrolled node spec fields", err)
-		}
-	}
+	// Enrollment creates only the Node identity. Role and business behavior
+	// are deliberately configured later through the node spec API.
 	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial}); err != nil {
 		return Certificate{}, storageFailure("record pending node enrollment", err)
 	}

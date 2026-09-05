@@ -20,13 +20,12 @@ const (
 	bootstrapInstallerWindows = "install-node.ps1"
 )
 
-// NodeBootstrapRequest contains the platform and optional initial spec used to
-// provision an already-enrolled node. Existing specs are never replaced by a
-// bootstrap request.
+// NodeBootstrapRequest contains only the platform information needed to
+// register a generic Node. Behavior is configured later through /spec after
+// enrollment.
 type NodeBootstrapRequest struct {
-	Platform string           `json:"platform"`
-	Arch     string           `json:"arch"`
-	Spec     *domain.NodeSpec `json:"spec,omitempty"`
+	Platform string `json:"platform"`
+	Arch     string `json:"arch"`
 }
 
 // NodeInstallationRequest creates a pending installation intent. It is kept
@@ -34,7 +33,6 @@ type NodeBootstrapRequest struct {
 // command for an existing identity with the install-first lifecycle.
 type NodeInstallationRequest struct {
 	NodeID   string            `json:"node_id"`
-	Spec     *domain.NodeSpec  `json:"spec,omitempty"`
 	Name     string            `json:"name"`
 	Labels   map[string]string `json:"labels,omitempty"`
 	Enabled  *bool             `json:"enabled,omitempty"`

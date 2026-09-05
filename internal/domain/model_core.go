@@ -388,7 +388,11 @@ type LoggingPolicy struct {
 }
 
 type AgentSpec struct {
-	NodeID          string        `json:"node_id"`
+	NodeID string `json:"node_id"`
+	// GatewayID is an optional exact placement constraint. Empty keeps legacy
+	// selector-based Agent specifications working; new Controller API writes
+	// require an enrolled Gateway to be selected explicitly.
+	GatewayID       string        `json:"gateway_id,omitempty"`
 	GatewaySelector Selector      `json:"gateway_selector"`
 	Proxies         []ProxySpec   `json:"proxies,omitempty"`
 	Routes          []RouteRule   `json:"routes,omitempty"`

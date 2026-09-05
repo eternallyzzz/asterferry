@@ -66,6 +66,19 @@ func (s *Server) nodeSpecAction(w http.ResponseWriter, r *http.Request, nodeID s
 	if spec.Agent != nil {
 		spec.Agent.NodeID = nodeID
 	}
+	owner, err := s.resources.GetNode(r.Context(), nodeID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if owner.CertificateState != domain.CertificateActive || strings.TrimSpace(owner.CertificateSerial) == "" {
+		writeError(w, http.StatusConflict, "node_not_enrolled", "node behavior can be configured only after enrollment completes")
+		return
+	}
+	if spec.Kind == domain.NodeSpecAgent && (spec.Agent == nil || strings.TrimSpace(spec.Agent.GatewayID) == "") {
+		writeError(w, http.StatusBadRequest, "gateway_binding_required", "an Agent must select a registered Gateway node")
+		return
+	}
 	expected, err := parseOptionalIfMatch(r.Header.Get("If-Match"))
 	if err != nil {
 		writeError(w, http.StatusPreconditionRequired, "if_match_required", err.Error())

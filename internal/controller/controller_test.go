@@ -404,6 +404,30 @@ func TestSchedulePreservesHealthyAssignmentAndPort(t *testing.T) {
 	}
 }
 
+func TestScheduleUsesFixedGatewayWithoutFailover(t *testing.T) {
+	request := ScheduleRequest{
+		Agent:      domain.Node{ID: "agent", Name: "agent", Enabled: true},
+		AgentSpec:  domain.AgentSpec{NodeID: "agent", GatewayID: "gw-b"},
+		Services:   []domain.Service{{ID: "svc", AgentID: "agent", Protocol: domain.ProtocolTCP, LocalTarget: "127.0.0.1:8080", PublicBind: "0.0.0.0", Enabled: true}},
+		Generation: 1,
+	}
+	candidates := []GatewayCandidate{
+		{Node: domain.Node{ID: "gw-a", Name: "gateway-a", Enabled: true, SpecKind: domain.NodeSpecGateway}, Spec: domain.GatewaySpec{NodeID: "gw-a", PublicEndpoints: []string{"gw-a.example:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18080, Max: 18080}}}}, Healthy: true},
+		{Node: domain.Node{ID: "gw-b", Name: "gateway-b", Enabled: true, SpecKind: domain.NodeSpecGateway}, Spec: domain.GatewaySpec{NodeID: "gw-b", PublicEndpoints: []string{"gw-b.example:4433"}, PortPool: domain.PortPool{TCP: []domain.PortRange{{Min: 18081, Max: 18081}}}}, Healthy: true},
+	}
+	assignment, err := Schedule(request, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.GatewayID != "gw-b" {
+		t.Fatalf("fixed Gateway was not selected: %#v", assignment)
+	}
+	candidates[1].Healthy = false
+	if _, err := Schedule(request, candidates); !errors.Is(err, ErrNoHealthyGateway) {
+		t.Fatalf("unavailable fixed Gateway error = %v, want ErrNoHealthyGateway", err)
+	}
+}
+
 func TestReconcileAssignmentsFailsOverStaleGateway(t *testing.T) {
 	store, err := openTestStore(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -19,6 +20,7 @@ func TestSnapshotCloneDoesNotShareMutableState(t *testing.T) {
 		},
 		Agent: &AgentSpec{
 			NodeID:          "agent-1",
+			GatewayID:       "gateway-1",
 			GatewaySelector: Selector{MatchLabels: map[string]string{"region": "east"}},
 			Proxies:         []ProxySpec{{ID: "proxy", Protocol: "http", Bind: "127.0.0.1:8080"}},
 			Routes:          []RouteRule{{Name: "route", Destination: "direct", CIDRs: []string{"10.0.0.0/8"}}},
@@ -42,11 +44,19 @@ func TestSnapshotCloneDoesNotShareMutableState(t *testing.T) {
 	if snapshot.Gateway.Labels["region"] != "east" || snapshot.Gateway.PublicEndpoints[0] != "gw.example:4433" || snapshot.Gateway.Listeners[0].Port != 18080 || snapshot.Gateway.Obfuscation.Key[0] != '0' {
 		t.Fatal("gateway clone shares mutable state with the original")
 	}
-	if snapshot.Agent.GatewaySelector.MatchLabels["region"] != "east" || snapshot.Agent.Proxies[0].Bind != "127.0.0.1:8080" || snapshot.Agent.Routes[0].CIDRs[0] != "10.0.0.0/8" {
+	if snapshot.Agent.GatewayID != "gateway-1" || snapshot.Agent.GatewaySelector.MatchLabels["region"] != "east" || snapshot.Agent.Proxies[0].Bind != "127.0.0.1:8080" || snapshot.Agent.Routes[0].CIDRs[0] != "10.0.0.0/8" {
 		t.Fatal("agent clone shares mutable state with the original")
 	}
 	if snapshot.Services[0].GatewaySelector.MatchLabels["region"] != "east" || snapshot.Assignments[0].ServiceIDs[0] != "svc" || snapshot.Assignments[0].Bindings[0].Port != 18080 || snapshot.Assignments[0].Obfuscation.Key[0] != '0' {
 		t.Fatal("resource clone shares mutable state with the original")
+	}
+}
+
+func TestAgentValidationRejectsSelfGatewayBinding(t *testing.T) {
+	err := (AgentSpec{NodeID: "agent-1", GatewayID: "agent-1"}).Validate()
+	var applyErr *ApplyError
+	if !errors.As(err, &applyErr) || applyErr.Code != "invalid_gateway_binding" {
+		t.Fatalf("self Gateway binding error = %v, want invalid_gateway_binding", err)
 	}
 }
 

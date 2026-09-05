@@ -453,11 +453,12 @@ func (s *ResourceRepository) DeleteNode(ctx context.Context, id string, options 
 	var dependents int
 	if err := tx.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM assignments WHERE gateway_id=? OR agent_id=?) +
-		(SELECT COUNT(*) FROM services WHERE agent_id=?)`, id, id, id).Scan(&dependents); err != nil {
+		(SELECT COUNT(*) FROM services WHERE agent_id=?) +
+		(SELECT COUNT(*) FROM agent_selector_labels WHERE key=? AND value=?)`, id, id, id, agentGatewayBindingStorageKey, id).Scan(&dependents); err != nil {
 		return err
 	}
 	if dependents > 0 {
-		return &domain.ApplyError{Code: "resource_conflict", Path: "node", Message: "node has dependent services or assignments"}
+		return &domain.ApplyError{Code: "resource_conflict", Path: "node", Message: "node has dependent services, assignments or Agent bindings"}
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id=? AND revision=?`, id, revision)
 	if err != nil {

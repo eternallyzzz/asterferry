@@ -10,8 +10,9 @@ current implementation map and deliberately volatile protocol details live in
 AsterFerry is a self-hosted private-network forwarding system with one logical
 authoritative Controller and multiple Nodes. The Controller runs either as one
 SQLite-backed process or as an active/standby pair backed by PostgreSQL. A Node
-becomes a Gateway or Agent after enrollment when the Controller publishes a
-typed Node Spec.
+first enrolls as a generic identity; it becomes a Gateway or Agent only after
+the Controller publishes a typed Node Spec. An Agent may be pinned to one
+registered Gateway through its exact Gateway binding.
 
 The stable boundaries are:
 
