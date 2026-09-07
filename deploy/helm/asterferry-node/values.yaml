@@ -1,5 +1,7 @@
 image:
-  repository: ghcr.io/eternallyzzz/asterferry
+  # The project does not publish a container image. Set this to the image
+  # built and approved by the operator before installing the Chart.
+  repository: ""
   tag: ""
   digest: ""
   pullPolicy: IfNotPresent

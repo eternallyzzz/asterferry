@@ -23,8 +23,10 @@ automated and every exception is recorded in the release issue.
    persisted-session and two-replica failover tests.
 5. Run AFDP/control-wire fuzz smoke and the protocol benchmark suite. On a PR,
    the same-runner base/head comparison blocks a default regression above 10%.
-6. Build and smoke-test Linux amd64/arm64, Windows amd64, Docker amd64 and
-   both Helm charts. WSL is compatibility-tested separately; it is not an
+6. Build and smoke-test Linux amd64/arm64 and Windows amd64, and lint/render
+   both source Helm charts with an explicitly supplied operator image. Dockerfile
+   validation is an optional local or manually dispatched check and never
+   publishes an image. WSL is compatibility-tested separately; it is not an
    official support promise.
 7. Test both SQLite and PostgreSQL from fresh initialization, backup, restore,
    restart and Node reconnect. For HA, run exactly two PostgreSQL-backed
@@ -35,7 +37,7 @@ automated and every exception is recorded in the release issue.
 
 ## RC and soak
 
-Create the release candidate tag `v1.0.0-rc.1`. The tag workflow marks
+Create the release candidate tag `v1.0.0-rc.2`. The tag workflow marks
 it prerelease and publishes immutable artifacts without changing the stable
 source version. Each release must publish `install-controller.sh`,
 `install-controller.ps1`, `install-node.sh`, `install-node.ps1` and
@@ -48,6 +50,10 @@ default, or the matching GitHub Release script when the operator selects that
 source. Both paths use the Controller-provided metadata to select and verify
 the Node archive. Controller and Node are published and upgraded as one
 release unit; do not mix release assets.
+
+The release is native-only: the project does not publish a GHCR container image
+or OCI Helm chart. Operators build, scan and approve the image they configure
+through Helm's required `image.repository` value.
 Operate the candidate for at least seven calendar days with:
 
 - Controller restart, leader loss and graceful shutdown checks;
@@ -60,17 +66,19 @@ Operate the candidate for at least seven calendar days with:
 - no unresolved P0/P1 security, data-loss, protocol, or release-integrity
   issue.
 
-Record benchmark output, supported-platform results, image/chart digests,
-SBOM/attestation links, backup evidence and known limitations in the release
-issue. If the candidate changes, restart the seven-day soak.
+Record benchmark output, supported-platform results, native asset checksums,
+SBOM/attestation links, operator image provenance, backup evidence and known
+limitations in the release issue. If the candidate changes, restart the
+seven-day soak.
 
 ## Final publication
 
 After the soak, update `CHANGELOG.md` with the release date, run
-`scripts/release-check.ps1 -Version 1.0.0` (and the Docker-enabled variant),
-merge the final commit to `main`, and create `v1.0.0` from that commit. Verify
-the GitHub release manifest, SHA-256 checksums, signed image/chart digests and
-the Linux/Windows install paths before announcing it.
+`scripts/release-check.ps1 -Version 1.0.0 -SkipDocker`, optionally repeat it
+without `-SkipDocker` for local Dockerfile validation, merge the final commit
+to `main`, and create `v1.0.0` from that commit. Verify the GitHub release
+manifest, SHA-256 checksums, SBOM/attestation and the Linux/Windows install
+paths before announcing it.
 
 Do not delete the previous backup or RC artifacts. For a failed release,
 withdraw the announcement, keep the immutable artifacts for forensics, restore

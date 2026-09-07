@@ -320,10 +320,11 @@ try {
         }
     }
 
-    Invoke-Logged "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
-    Invoke-Logged "Helm lint generic Node" "helm" @("lint", "deploy/helm/asterferry-node")
-    Invoke-LoggedToFile "Helm template Controller" "helm" @("template", "asterferry-controller", "deploy/helm/asterferry-controller") (Join-Path $outputDir "controller.yaml")
-    Invoke-LoggedToFile "Helm template generic Node" "helm" @("template", "asterferry-node", "deploy/helm/asterferry-node") (Join-Path $outputDir "node.yaml")
+    $helmImageArgs = @("--set", "image.repository=asterferry", "--set", "image.tag=ci")
+    Invoke-Logged "Helm lint Controller" "helm" (@("lint", "deploy/helm/asterferry-controller") + $helmImageArgs)
+    Invoke-Logged "Helm lint generic Node" "helm" (@("lint", "deploy/helm/asterferry-node") + $helmImageArgs)
+    Invoke-LoggedToFile "Helm template Controller" "helm" (@("template", "asterferry-controller", "deploy/helm/asterferry-controller") + $helmImageArgs) (Join-Path $outputDir "controller.yaml")
+    Invoke-LoggedToFile "Helm template generic Node" "helm" (@("template", "asterferry-node", "deploy/helm/asterferry-node") + $helmImageArgs) (Join-Path $outputDir "node.yaml")
 
     if ($FullBench) {
         $oldDistro = $env:ASTERFERRY_WSL_DISTRO

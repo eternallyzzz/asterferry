@@ -182,53 +182,49 @@ if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $
 	throw "Release binary did not report version $Version and AFDP/2: $versionOutput"
 }
 
-Invoke-Checked "Helm lint Controller" "helm" @("lint", "deploy/helm/asterferry-controller")
-Invoke-Checked "Helm lint Node" "helm" @("lint", "deploy/helm/asterferry-node")
-$nodeTemplate = (& helm template release-check deploy/helm/asterferry-node --set image.tag=$Version | Out-String)
-$expectedImage = "ghcr.io/eternallyzzz/asterferry:$Version"
+$helmImageArgs = @("--set", "image.repository=asterferry", "--set", "image.tag=$Version")
+Invoke-Checked "Helm lint Controller" "helm" (@("lint", "deploy/helm/asterferry-controller") + $helmImageArgs)
+Invoke-Checked "Helm lint Node" "helm" (@("lint", "deploy/helm/asterferry-node") + $helmImageArgs)
+$nodeTemplate = (& helm template release-check deploy/helm/asterferry-node @helmImageArgs | Out-String)
+$expectedImage = "asterferry:$Version"
 if ($LASTEXITCODE -ne 0 -or $nodeTemplate -notmatch [regex]::Escape($expectedImage)) {
-    throw "Default Helm image reference did not resolve to the release version"
+    throw "Operator-provided Helm image reference did not resolve to the release version"
 }
-$controllerMetricsDisabledTemplate = (& helm template release-check deploy/helm/asterferry-controller | Out-String)
+$missingImageTemplate = (& helm template release-check deploy/helm/asterferry-node 2>$null | Out-String)
+if ($LASTEXITCODE -eq 0) {
+    throw "Helm templates must reject an unset image.repository"
+}
+$controllerMetricsDisabledTemplate = (& helm template release-check deploy/helm/asterferry-controller @helmImageArgs | Out-String)
 if ($LASTEXITCODE -ne 0 -or $controllerMetricsDisabledTemplate -notmatch "--metrics-listen" -or $controllerMetricsDisabledTemplate -notmatch 'metrics-listen\r?\n\s+- ""') {
     throw "Helm default metrics policy must explicitly disable the internal listener"
 }
-$controllerHATemplate = (& helm template release-check deploy/helm/asterferry-controller --set controller.highAvailability.enabled=true --set controller.replicas=2 --set controller.highAvailability.existingSecret=asterferry-controller-identity | Out-String)
+$controllerHAArgs = @("template", "release-check", "deploy/helm/asterferry-controller") + $helmImageArgs + @("--set", "controller.highAvailability.enabled=true", "--set", "controller.replicas=2", "--set", "controller.highAvailability.existingSecret=asterferry-controller-identity")
+$controllerHATemplate = (& helm @controllerHAArgs | Out-String)
 if ($LASTEXITCODE -ne 0 -or $controllerHATemplate -notmatch "replicas: 2" -or $controllerHATemplate -notmatch "clusterIP: None" -or $controllerHATemplate -notmatch "path: /readyz" -or $controllerHATemplate -notmatch "secretName: asterferry-controller-identity" -or $controllerHATemplate -notmatch "fsGroup: 10001" -or $controllerHATemplate -notmatch "defaultMode: 0440" -or $controllerHATemplate -match "volumeClaimTemplates:") {
     throw "Helm Controller HA template did not render the two-replica, readiness-gated, Secret-backed deployment"
 }
-$controllerHAInvalidTemplate = (& helm template release-check deploy/helm/asterferry-controller --set controller.highAvailability.enabled=true --set controller.highAvailability.existingSecret=asterferry-controller-identity 2>$null | Out-String)
+$controllerHAInvalidArgs = @("template", "release-check", "deploy/helm/asterferry-controller") + $helmImageArgs + @("--set", "controller.highAvailability.enabled=true", "--set", "controller.highAvailability.existingSecret=asterferry-controller-identity")
+$controllerHAInvalidTemplate = (& helm @controllerHAInvalidArgs 2>$null | Out-String)
 if ($LASTEXITCODE -eq 0) {
     throw "Helm Controller HA template must reject replicas other than two"
 }
 $digest = "sha256:" + ("a" * 64)
 foreach ($chart in $chartPaths) {
-    $digestTemplate = (& helm template release-check $chart --set image.digest=$digest | Out-String)
-    if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch [regex]::Escape("ghcr.io/eternallyzzz/asterferry@$digest")) {
+    $digestArgs = @("template", "release-check", $chart) + $helmImageArgs + @("--set", "image.digest=$digest")
+    $digestTemplate = (& helm @digestArgs | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $digestTemplate -notmatch [regex]::Escape("asterferry@$digest")) {
         throw "Helm digest image override did not render correctly for $chart"
     }
 }
-$controllerMetricsTemplate = (& helm template release-check deploy/helm/asterferry-controller --set metrics.enabled=true --set metrics.listen=:9090 | Out-String)
+$controllerMetricsArgs = @("template", "release-check", "deploy/helm/asterferry-controller") + $helmImageArgs + @("--set", "metrics.enabled=true", "--set", "metrics.listen=:9090")
+$controllerMetricsTemplate = (& helm @controllerMetricsArgs | Out-String)
 if ($LASTEXITCODE -ne 0 -or $controllerMetricsTemplate -notmatch "--metrics-listen" -or $controllerMetricsTemplate -notmatch "name: metrics") {
     throw "Helm metrics opt-in did not render the dedicated metrics listener and Service port"
 }
-$nodeGeoIPTemplate = (& helm template release-check deploy/helm/asterferry-node --set geoip.enabled=true --set geoip.existingConfigMap=geoip-data | Out-String)
+$nodeGeoIPArgs = @("template", "release-check", "deploy/helm/asterferry-node") + $helmImageArgs + @("--set", "geoip.enabled=true", "--set", "geoip.existingConfigMap=geoip-data")
+$nodeGeoIPTemplate = (& helm @nodeGeoIPArgs | Out-String)
 if ($LASTEXITCODE -ne 0 -or $nodeGeoIPTemplate -notmatch "--geoip-db" -or $nodeGeoIPTemplate -notmatch "name: geoip") {
     throw "Helm GeoIP opt-in did not render the external database mount"
-}
-foreach ($chart in $chartPaths) {
-    Invoke-Checked "Helm package $chart" "helm" @("package", $chart, "--destination", $output, "--version", $Version, "--app-version", $Version)
-}
-$expectedCharts = @("asterferry-controller-$Version.tgz", "asterferry-node-$Version.tgz")
-foreach ($chartFile in $expectedCharts) {
-    $chartArtifact = Join-Path $output $chartFile
-    if (-not (Test-Path -LiteralPath $chartArtifact) -or (Get-Item -LiteralPath $chartArtifact).Length -eq 0) {
-        throw "release chart artifact is missing or empty: $chartFile"
-    }
-}
-$actualCharts = @(Get-ChildItem -LiteralPath $output -Filter "*.tgz" -File | Select-Object -ExpandProperty Name | Sort-Object)
-if (($actualCharts -join ";") -ne (($expectedCharts | Sort-Object) -join ";")) {
-    throw "unexpected release chart artifacts: $($actualCharts -join ', ')"
 }
 
 if (-not $SkipDocker) {
@@ -248,7 +244,8 @@ $report = [ordered]@{
     version = $Version
     protocol = "AFDP/2 + control/3"
     windows_binary = $binaryPath
-    charts = $expectedCharts
+    native_only = $true
+    helm_validated = $true
     docker_checked = (-not $SkipDocker)
 }
 $report | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $output "report.json")
