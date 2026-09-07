@@ -59,7 +59,7 @@ func TestRunReplacementHelperSelfManagedSuccess(t *testing.T) {
 		RestartArgs: []string{"-test.run=^$"},
 		StatusPath:  statusPath,
 		PIDFile:     pidPath,
-		Timeout:     5 * time.Second,
+		Timeout:     10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +70,9 @@ func TestRunReplacementHelperSelfManagedSuccess(t *testing.T) {
 	}
 	if result.Version != target || result.State != "healthy" {
 		t.Fatalf("successful replacement result = %#v", result)
+	}
+	if result.SchemaVersion != ReplacementResultSchemaVersion || result.BinaryPath == "" || result.BackupPath == "" {
+		t.Fatalf("replacement journal fields = %#v", result)
 	}
 	if _, err := os.Stat(pidPath); err != nil {
 		t.Fatalf("replacement PID file is missing: %v", err)
@@ -133,7 +136,7 @@ func TestWaitForHTTPSHealthRetriesUntilReady(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := WaitForHTTPSHealth(context.Background(), server.URL); err != nil {
+	if err := WaitForHTTPSHealth(context.Background(), server.URL+"/readyz"); err != nil {
 		t.Fatal(err)
 	}
 	if requests.Load() < 2 {
@@ -141,6 +144,22 @@ func TestWaitForHTTPSHealthRetriesUntilReady(t *testing.T) {
 	}
 	if err := WaitForHTTPSHealth(context.Background(), "://invalid"); err == nil {
 		t.Fatal("invalid health endpoint was accepted")
+	}
+	if err := WaitForHTTPSHealth(context.Background(), "https://example.com/readyz"); err == nil {
+		t.Fatal("remote health endpoint was accepted")
+	}
+}
+
+func TestReplacementRecoveryStatesAreJournaled(t *testing.T) {
+	for _, state := range []string{ReplacementStatePrepared, ReplacementStateReplacing, ReplacementStateWaiting, ReplacementStateRecovering} {
+		if !ReplacementNeedsRecovery(state) {
+			t.Fatalf("journal state %q was not marked recoverable", state)
+		}
+	}
+	for _, state := range []string{"healthy", "rolled_back", "failed", "manual_required"} {
+		if ReplacementNeedsRecovery(state) {
+			t.Fatalf("terminal journal state %q was marked recoverable", state)
+		}
 	}
 }
 

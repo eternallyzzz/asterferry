@@ -302,6 +302,22 @@ func TestCurrentSchemaStoresBusinessAggregatesRelationally(t *testing.T) {
 			t.Fatalf("normalized relation table %s is missing", table)
 		}
 	}
+	for _, table := range []string{"controller_update_state", "node_update_states"} {
+		var present int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&present); err != nil {
+			t.Fatalf("inspect update table %s: %v", table, err)
+		}
+		if present != 1 {
+			t.Fatalf("typed update table %s is missing", table)
+		}
+	}
+	var updateIndex int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_node_update_states_state'`).Scan(&updateIndex); err != nil {
+		t.Fatal(err)
+	}
+	if updateIndex != 1 {
+		t.Fatal("typed Node update state index is missing")
+	}
 }
 
 func TestSQLiteConnectionPragmasSurvivePoolConnections(t *testing.T) {

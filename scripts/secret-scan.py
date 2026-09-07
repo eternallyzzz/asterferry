@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 FORBIDDEN_EXTENSIONS = {".key", ".crt", ".pem", ".token", ".db", ".sqlite", ".sqlite3", ".mmdb"}
+ALLOWED_PUBLIC_FILES = {"internal/update/release-public-key.pem"}
 PRIVATE_KEY = re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY")
 LONG_TOKEN = re.compile(
     r"(?:api[_-]?token|master[_-]?key|client[_-]?secret)\s*[:=]\s*[\"']?[A-Za-z0-9+/_=-]{32,}[\"']?",
@@ -42,7 +43,7 @@ def scan(root: Path, files: list[str], label: str) -> int:
         normalized = name.replace("\\", "/")
         suffix = Path(name).suffix.lower()
         if (
-            suffix in FORBIDDEN_EXTENSIONS
+            (suffix in FORBIDDEN_EXTENSIONS and normalized not in ALLOWED_PUBLIC_FILES)
             or re.search(r"(?i)(\.db|\.sqlite3?)(-|$)", normalized)
             or re.search(r"(^|/)(secrets?|credentials?)(/|$)", normalized, re.IGNORECASE)
         ):

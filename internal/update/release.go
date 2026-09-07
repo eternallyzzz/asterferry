@@ -112,12 +112,16 @@ type Asset struct {
 }
 
 type Release struct {
-	Version     string
-	Tag         string
-	PublishedAt time.Time
-	URL         string
-	Assets      map[string]Asset
-	Checksums   map[string]string
+	Version              string
+	Tag                  string
+	PublishedAt          time.Time
+	URL                  string
+	ManifestURL          string
+	ManifestSignatureURL string
+	Manifest             ReleaseManifest
+	ManifestVerified     bool
+	Assets               map[string]Asset
+	Checksums            map[string]string
 }
 
 func (r Release) Asset(name string) (Asset, error) {
@@ -148,6 +152,10 @@ type Client struct {
 	APIBaseURL string
 	HTTPClient *http.Client
 	UserAgent  string
+	// ManifestVerifier is injectable for tests and for operators that keep the
+	// trust root in a separately managed build. Production callers should use
+	// the embedded release key by leaving it nil.
+	ManifestVerifier ManifestVerifier
 }
 
 func NewGitHubClient(repository string) Client {
@@ -245,12 +253,121 @@ func (c Client) LatestStable(ctx context.Context) (Release, error) {
 	if checksumErr != nil {
 		return Release{}, checksumErr
 	}
+	manifestAsset, manifestErr := latest.Asset("release-manifest.json")
+	if manifestErr != nil {
+		return Release{}, manifestErr
+	}
+	signatureAsset, signatureErr := latest.Asset("release-manifest.json.sig")
+	if signatureErr != nil {
+		return Release{}, signatureErr
+	}
 	checksums, err := c.fetchChecksums(ctx, checksumsAsset.URL)
 	if err != nil {
 		return Release{}, err
 	}
-	latest.Checksums = checksums
+	manifest, err := c.VerifyReleaseManifest(ctx, manifestAsset.URL, signatureAsset.URL, latest.Version, "", "")
+	if err != nil {
+		return Release{}, err
+	}
+	manifestChecksums := make(map[string]string, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		digest, digestErr := manifest.Checksum(artifact.Name)
+		if digestErr != nil {
+			return Release{}, digestErr
+		}
+		checksum, ok := checksums[artifact.Name]
+		if !ok || !strings.EqualFold(strings.TrimSpace(checksum), digest) {
+			return Release{}, fmt.Errorf("SHA256SUMS does not match signed release manifest for %q", artifact.Name)
+		}
+		manifestChecksums[artifact.Name] = digest
+	}
+	latest.ManifestURL = manifestAsset.URL
+	latest.ManifestSignatureURL = signatureAsset.URL
+	latest.Manifest = manifest
+	latest.ManifestVerified = true
+	latest.Checksums = manifestChecksums
 	return latest, nil
+}
+
+// VerifyReleaseManifest downloads and verifies the signed release manifest.
+// expectedAssetName and expectedChecksum are optional; Node uses them to bind
+// the controller's action payload to the signed digest before downloading an
+// archive.
+func (c Client) VerifyReleaseManifest(ctx context.Context, manifestURL, signatureURL, expectedVersion, expectedAssetName, expectedChecksum string) (ReleaseManifest, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !safeHTTPSURL(manifestURL) || !safeHTTPSURL(signatureURL) {
+		return ReleaseManifest{}, errors.New("signed release manifest URLs must use HTTPS")
+	}
+	manifestBytes, err := c.fetchReleaseBytes(ctx, manifestURL, 1<<20)
+	if err != nil {
+		return ReleaseManifest{}, fmt.Errorf("download signed release manifest: %w", err)
+	}
+	signatureBytes, err := c.fetchReleaseBytes(ctx, signatureURL, 64<<10)
+	if err != nil {
+		return ReleaseManifest{}, fmt.Errorf("download release manifest signature: %w", err)
+	}
+	verifier := c.ManifestVerifier
+	if verifier == nil {
+		verifier, err = defaultManifestVerifier()
+		if err != nil {
+			return ReleaseManifest{}, err
+		}
+	}
+	if err := verifier.Verify(manifestBytes, signatureBytes); err != nil {
+		return ReleaseManifest{}, fmt.Errorf("verify release manifest signature: %w", err)
+	}
+	var manifest ReleaseManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return ReleaseManifest{}, fmt.Errorf("decode release manifest: %w", err)
+	}
+	if err := manifest.Validate(); err != nil {
+		return ReleaseManifest{}, err
+	}
+	if expectedVersion != "" && strings.TrimPrefix(strings.TrimSpace(expectedVersion), "v") != strings.TrimPrefix(manifest.Version, "v") {
+		return ReleaseManifest{}, fmt.Errorf("signed release manifest version %q does not match expected version %q", manifest.Version, expectedVersion)
+	}
+	if expectedAssetName != "" {
+		digest, err := manifest.Checksum(expectedAssetName)
+		if err != nil {
+			return ReleaseManifest{}, err
+		}
+		if expectedChecksum != "" && !strings.EqualFold(strings.TrimSpace(expectedChecksum), digest) {
+			return ReleaseManifest{}, fmt.Errorf("signed release manifest checksum does not match %q", expectedAssetName)
+		}
+	}
+	return manifest, nil
+}
+
+func (c Client) fetchReleaseBytes(ctx context.Context, assetURL string, limit int64) ([]byte, error) {
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: DownloadTimeout}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/octet-stream")
+	request.Header.Set("User-Agent", c.UserAgent)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %s", response.Status)
+	}
+	limited := io.LimitReader(response.Body, limit+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("release metadata exceeds size limit")
+	}
+	return data, nil
 }
 
 func (c Client) fetchChecksums(ctx context.Context, assetURL string) (map[string]string, error) {

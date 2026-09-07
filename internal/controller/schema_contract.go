@@ -5,7 +5,7 @@ import "fmt"
 // CurrentDatabaseSchemaVersion identifies the physical Controller database
 // contract. It is intentionally independent from the control-wire protocol
 // version and from snapshot payload versions.
-const CurrentDatabaseSchemaVersion uint32 = 13
+const CurrentDatabaseSchemaVersion uint32 = 14
 
 const databaseSchemaLayout = "relational"
 

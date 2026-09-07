@@ -6,8 +6,8 @@ The current release establishes the public compatibility line:
 
 - AFDP/2 and control/3 are the supported wire protocols.
 - The REST/OpenAPI contract, snapshot schema and backup format are stable
-  inputs for v1.x.
-- A v1.x release may add optional fields and endpoints, but must not silently
+  inputs for the current release line.
+- A release on the current major line may add optional fields and endpoints, but must not silently
   change the meaning of existing fields, authentication requirements, wire
   framing, or persisted data.
 - A breaking wire, API, or database change belongs in v2. It requires a
@@ -17,7 +17,7 @@ The current release establishes the public compatibility line:
 
 Pre-current-generation binaries, configurations, databases and backup
 manifests are rejected; there is no in-place schema migration or
-SQLite-to-PostgreSQL conversion. Database schema v13 is the current normalized
+SQLite-to-PostgreSQL conversion. Database schema v14 is the current normalized
 generation. This is a deliberate boundary, not an upgrade mechanism to repeat
 for every patch release.
 
@@ -26,9 +26,10 @@ listed/restored into a disposable directory using the same release line. Keep
 the previous installation intact until the new process passes readiness and a
 Node data-plane smoke test.
 
-Patch and minor self-upgrades use only published stable GitHub Releases and
-the repository's `SHA256SUMS` file. Release candidates are not selected by the
-automatic checker. Native Windows services, Linux systemd services and WSL
+Patch and minor self-upgrades use only published stable GitHub Releases with a
+Cosign-signed `release-manifest.json`; the selected asset must match both that
+manifest and the repository's `SHA256SUMS` file. Release candidates are not
+selected by the automatic checker. Native Windows services, Linux systemd services and WSL
 managed processes can be upgraded in place with automatic readiness rollback;
 container and Helm deployments must roll out a new image. A Node from before
 the self-upgrade capability requires one manual run of the current installer
@@ -52,7 +53,7 @@ and TLS identity together with the database.
 
 `/api/v1` is the REST route contract. The control-wire and snapshot payloads
 use protocol version `3`, while the physical Controller database uses schema
-version `13` with the `relational` layout marker. Protocol v3 carries the exact
+version `14` with the `relational` layout marker. Protocol v3 carries the exact
 Agent-to-Gateway binding and the optional Node system-information snapshot.
 These identifiers are independent: a database layout change does not silently
 change the REST route or payload protocol.

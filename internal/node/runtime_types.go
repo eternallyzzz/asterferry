@@ -4,6 +4,7 @@ import (
 	"asterferry/internal/dataplane"
 	"asterferry/internal/domain"
 	"asterferry/internal/systeminfo"
+	"asterferry/internal/update"
 	"context"
 	"errors"
 	"fmt"
@@ -33,25 +34,26 @@ type RuntimeOptions struct {
 }
 
 type Runtime struct {
-	bootstrap           Bootstrap
-	bootstrapMu         sync.RWMutex
-	runtimeMu           sync.RWMutex
-	engine              *dataplane.Engine
-	dataPlane           *DataPlaneRuntime
-	runtimeKind         domain.NodeSpecKind
-	runtimeOpts         RuntimeOptions
-	runCtx              context.Context
-	reconciler          *Reconciler
-	logger              *slog.Logger
-	bootstrapPath       string
-	systemInfoMu        sync.RWMutex
-	systemInfo          *domain.SystemInfo
-	systemInfoAt        time.Time
-	systemInfoCollector *systeminfo.Collector
-	updateReportMu      sync.Mutex
-	updateReportSent    bool
-	updateHTTPClient    *http.Client
-	startUpdateHelper   func(string, []string) (int, error)
+	bootstrap              Bootstrap
+	bootstrapMu            sync.RWMutex
+	runtimeMu              sync.RWMutex
+	engine                 *dataplane.Engine
+	dataPlane              *DataPlaneRuntime
+	runtimeKind            domain.NodeSpecKind
+	runtimeOpts            RuntimeOptions
+	runCtx                 context.Context
+	reconciler             *Reconciler
+	logger                 *slog.Logger
+	bootstrapPath          string
+	systemInfoMu           sync.RWMutex
+	systemInfo             *domain.SystemInfo
+	systemInfoAt           time.Time
+	systemInfoCollector    *systeminfo.Collector
+	updateReportMu         sync.Mutex
+	updateReportSent       bool
+	updateHTTPClient       *http.Client
+	updateManifestVerifier update.ManifestVerifier
+	startUpdateHelper      func(string, []string) (int, error)
 }
 
 func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {

@@ -53,7 +53,11 @@ func (m *UpdateManager) SetRestartCallback(callback func(error)) {
 }
 
 func (m *UpdateManager) Start(ctx context.Context) {
-	if m == nil || ctx == nil || !m.config.UpdateCheckEnabled {
+	if m == nil || ctx == nil {
+		return
+	}
+	go m.recoverPendingReplacement(ctx)
+	if !m.config.UpdateCheckEnabled {
 		return
 	}
 	go func() {
@@ -98,13 +102,113 @@ func (m *UpdateManager) Status(ctx context.Context) (ControllerUpdateState, erro
 			state.State = result.State
 			state.TargetVersion = result.Version
 			state.LastError = result.Error
+		case UpdateStateManualRequired:
+			state.State = UpdateStateManualRequired
+			state.TargetVersion = result.Version
+			state.LastError = result.Error
+		case update.ReplacementStatePrepared, update.ReplacementStateReplacing, update.ReplacementStateWaiting, update.ReplacementStateRecovering:
+			state.State = UpdateStateApplying
+			state.TargetVersion = result.Version
+			if state.LastError == "" {
+				state.LastError = "Controller replacement journal is pending recovery"
+			}
 		case UpdateStateUpToDate:
-			if state.CurrentVersion == result.Version {
+			if buildinfo.Current().Version == result.Version {
+				state.CurrentVersion = result.Version
 				state.State = UpdateStateUpToDate
+				state.TargetVersion = result.Version
+				state.LastError = ""
+				update.CleanupReplacementArtifacts(result)
 			}
 		}
 	}
 	return state, nil
+}
+
+// recoverPendingReplacement closes the helper-killed-after-rename window. A
+// newly started target process proves that the rename completed; it then
+// confirms the local readiness endpoint before marking the journal terminal.
+// If readiness never returns, the live target is left untouched and the
+// operator receives a manual-required state with the previous binary path
+// retained for forensic/manual rollback.
+func (m *UpdateManager) recoverPendingReplacement(parent context.Context) {
+	result, err := update.ReadReplacementResult(m.controllerUpdateStatusPath())
+	if err != nil {
+		return
+	}
+	if result.State == UpdateStateUpToDate && buildinfo.Current().Version != result.Version {
+		return
+	}
+	if result.State == UpdateStateUpToDate || result.State == UpdateStateRolledBack || result.State == UpdateStateFailed || result.State == UpdateStateManualRequired {
+		if result.State == UpdateStateUpToDate && buildinfo.Current().Version == result.Version {
+			update.CleanupReplacementArtifacts(result)
+		}
+		state, stateErr := m.resources.GetControllerUpdateState(context.Background(), m.config)
+		if stateErr == nil {
+			state.State = result.State
+			state.TargetVersion = result.Version
+			state.LastError = result.Error
+			if result.State == UpdateStateUpToDate {
+				state.CurrentVersion = buildinfo.Current().Version
+			}
+			_ = m.resources.SaveControllerUpdateState(context.Background(), state)
+		}
+		return
+	}
+	if !update.ReplacementNeedsRecovery(result.State) {
+		return
+	}
+	if strings.TrimSpace(result.Version) == "" || buildinfo.Current().Version != result.Version {
+		message := "replacement journal target does not match the running Controller version"
+		if strings.TrimSpace(result.Version) == "" {
+			message = "replacement journal has no target Controller version"
+		}
+		result.State = UpdateStateManualRequired
+		result.Error = message
+		update.WriteReplacementResult(m.controllerUpdateStatusPath(), result)
+		state, stateErr := m.resources.GetControllerUpdateState(context.Background(), m.config)
+		if stateErr == nil {
+			state.State = UpdateStateManualRequired
+			state.TargetVersion = result.Version
+			state.LastError = message
+			_ = m.resources.SaveControllerUpdateState(context.Background(), state)
+		}
+		return
+	}
+	result.State = update.ReplacementStateRecovering
+	result.Error = ""
+	update.WriteReplacementResult(m.controllerUpdateStatusPath(), result)
+	healthURL, err := controllerHealthURL(m.config.HTTPListen)
+	if err == nil {
+		healthCtx, cancel := context.WithTimeout(parent, update.HealthTimeout)
+		err = update.WaitForHTTPSHealth(healthCtx, healthURL)
+		cancel()
+	}
+	state, stateErr := m.resources.GetControllerUpdateState(context.Background(), m.config)
+	if err != nil {
+		message := fmt.Sprintf("replacement recovery could not prove Controller readiness: %v", err)
+		result.State = UpdateStateManualRequired
+		result.Error = message
+		update.WriteReplacementResult(m.controllerUpdateStatusPath(), result)
+		if stateErr == nil {
+			state.State = UpdateStateManualRequired
+			state.TargetVersion = result.Version
+			state.LastError = message
+			_ = m.resources.SaveControllerUpdateState(context.Background(), state)
+		}
+		return
+	}
+	result.State = UpdateStateUpToDate
+	result.Error = ""
+	update.WriteReplacementResult(m.controllerUpdateStatusPath(), result)
+	update.CleanupReplacementArtifacts(result)
+	if stateErr == nil {
+		state.State = UpdateStateUpToDate
+		state.CurrentVersion = buildinfo.Current().Version
+		state.TargetVersion = result.Version
+		state.LastError = ""
+		_ = m.resources.SaveControllerUpdateState(context.Background(), state)
+	}
 }
 
 func (m *UpdateManager) controllerUpdateStatusPath() string {
@@ -241,6 +345,9 @@ func (m *UpdateManager) ApplyController(ctx context.Context, targetVersion strin
 		_ = m.resources.SaveControllerUpdateState(context.Background(), state)
 		return state, err
 	}
+	if !release.ManifestVerified || strings.TrimSpace(release.ManifestURL) == "" || strings.TrimSpace(release.ManifestSignatureURL) == "" {
+		return m.controllerUpdateFailure(state, errors.New("stable release metadata is missing a verified signed manifest"))
+	}
 	if requested := strings.TrimPrefix(strings.TrimSpace(targetVersion), "v"); requested != "" && requested != release.Version {
 		return state, fmt.Errorf("requested Controller version %s is not the latest stable release %s", requested, release.Version)
 	}
@@ -374,6 +481,9 @@ func controllerHealthURL(listen string) (string, error) {
 	host = strings.Trim(host, "[]")
 	if host == "" || host == "0.0.0.0" || host == "::" || host == "::0" {
 		host = "127.0.0.1"
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", errors.New("Controller HTTPS health probe requires a loopback listen address")
 	}
 	return (&url.URL{Scheme: "https", Host: net.JoinHostPort(host, port), Path: "/readyz"}).String(), nil
 }

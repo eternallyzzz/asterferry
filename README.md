@@ -10,7 +10,7 @@ Dashboard / CLI -- HTTPS --> Controller -- mTLS gRPC --> Node
 Gateway <========== AFDP/2 over QUIC ==========> Agent
 ```
 
-本文介绍 Linux/Windows Controller 和 Linux/Windows Node 部署。Controller 的 HTTPS 和 gRPC 都可以绑定 `0.0.0.0`，但 `--grpc-advertise` 必须填写 Node 实际可访问的公网 IP、内网 IP 或域名，不能填写 `0.0.0.0`。
+本文介绍 Linux/Windows Controller 和 Linux/Windows Node 部署。Controller 的 HTTPS 和 gRPC 都可以绑定 `0.0.0.0`，但 `--grpc-advertise` 必须指向 Node 实际可访问的公网 IP、内网 IP 或域名，不能填写 `0.0.0.0`；安装脚本会自动探测一个默认值，多机部署时请用参数覆盖为实际可达地址。
 
 ## 端口和前置条件
 
@@ -144,15 +144,17 @@ try {
 }
 ```
 
-脚本只会询问 Node 可访问的 Controller gRPC 广播地址；HTTPS 和 gRPC 默认分别监听 `0.0.0.0:8443`、`0.0.0.0:9443`，其他安装目录、服务名和用户名直接使用默认值。它会下载 Windows Controller、Node 安装脚本和发布元数据，创建并启动 `AsterFerry-Controller` 服务。首次生成的 Admin 密码会在输出中显示一次。
+脚本会逐项提示输入 Controller 配置：必填项会标注 `(required)`，可选项会把默认值显示在括号里，直接回车即可使用默认值；也可以用 `-GrpcAdvertise`/`--grpc-advertise` 等参数跳过提示。HTTPS 和 gRPC 默认分别监听 `0.0.0.0:8443`、`0.0.0.0:9443`，其他安装目录、服务名、用户名和发布源都有默认值；自动探测的本机 IP 会作为 gRPC 广播地址的默认建议，无法探测时回退到 `127.0.0.1`。它会下载 Windows Controller、Node 安装脚本和发布元数据，创建并启动 `AsterFerry-Controller` 服务。首次生成的 Admin 密码会在输出中显示一次。自动化场景可用 `-NonInteractive`（Windows）或 `--non-interactive`/`-n`（Linux）跳过交互提示，直接使用默认值和自动探测值。
 
-需要固定到某个已发布版本时，直接下载该版本的发布资产即可；下面的脚本已经内置 `v1.0.0-rc.2` 的下载地址和版本，不需要填写 `-ReleaseBaseUrl` 或 `-Version`：
+需要使用已发布版本时，直接下载该版本的发布资产即可；下面的脚本从
+GitHub 的最新稳定发布资产安装，不需要填写 `-ReleaseBaseUrl` 或
+`-Version`。如需固定版本，请将 URL 中的 `<VERSION>` 替换为对应标签：
 
 ```powershell
 $installer = Join-Path ([IO.Path]::GetTempPath()) "asterferry-install-controller.ps1"
 try {
   curl.exe --fail --silent --show-error --location --proto '=https' --tlsv1.3 `
-    "https://github.com/eternallyzzz/asterferry/releases/download/v1.0.0-rc.2/install-controller.ps1" `
+    "https://github.com/eternallyzzz/asterferry/releases/latest/download/install-controller.ps1" `
     --output $installer
   if ($LASTEXITCODE -ne 0) { throw "failed to download the Controller installer" }
   sudo pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
@@ -171,7 +173,7 @@ try {
 - `Controller`（推荐）：安装命令从当前 Controller 下载 Node 安装脚本；
 - `GitHub Release`：安装命令从对应 GitHub Release 下载 Node 安装脚本。
 
-两种来源随后都会使用 Controller 返回的版本元数据，从 GitHub Release 下载匹配架构的 Node 二进制并校验 `SHA256SUMS`。B、C 都执行各自生成的一行命令，安装时不选择角色。Windows 命令在管理员 PowerShell 中直接粘贴执行，Linux 命令在 root shell 中直接粘贴执行；不需要手动下载 CA、二进制或服务文件。
+两种来源随后都会使用 Controller 返回的版本元数据，从 GitHub Release 下载匹配架构的 Node 二进制，并在运行时校验 Cosign 签名的 `release-manifest.json` 与 `SHA256SUMS`。B、C 都执行各自生成的一行命令，安装时不选择角色。Windows 命令在管理员 PowerShell 中直接粘贴执行，Linux 命令在 root shell 中直接粘贴执行；不需要手动下载 CA、二进制或服务文件。
 
 Linux 安装器在原生 Linux 或启用了 systemd 的 WSL2 中创建并启动 systemd 服务。未启用 systemd 的 WSL2 也可以直接安装：安装器会改用受 `asterferry` 用户管理的后台进程，记录 PID 和日志，并在 `/etc/wsl.conf` 写入 WSL 启动钩子；不需要先打开 systemd。配置会保留原有的 `[network]` 等段落，并在数据目录的 `recovery/` 下备份被替换的 `wsl.conf`。首次安装后从 Windows 执行一次 `wsl --shutdown`，以后重新启动该发行版时节点会自动拉起。
 
@@ -202,7 +204,7 @@ WSL 未启用 systemd 时，使用安装器输出的 WSL 管理命令和 `contro
 
 ## 自动检测和升级
 
-Controller 默认每 6 小时从 GitHub 查询最新的正式版 Release；`-rc`、草稿和其他预发布版本不会触发自动升级。Controller 会先在 Dashboard 的管理页面显示可用版本，只有管理员明确确认后才会下载带 `SHA256SUMS` 校验的归档，并在 `/readyz` 恢复失败时自动回滚。
+Controller 默认每 6 小时从 GitHub 查询最新的正式版 Release；`-rc`、草稿和其他预发布版本不会触发自动升级。Controller 会先在 Dashboard 的管理页面显示可用版本，只有管理员明确确认后才会下载同时通过 `release-manifest.json` Cosign 签名和 `SHA256SUMS` 校验的归档，并在 `/readyz` 恢复失败时自动回滚或进入可恢复状态。
 
 原生 Windows 服务、Linux systemd 和无 systemd 的 WSL Node 支持由 Controller 逐台下发 Node 自升级。旧安装如果没有 `node-upgrade-v1` 能力，必须先用一次新的安装脚本升级；容器和 Helm 部署只报告需要滚动更新镜像，不会替换容器内的二进制。升级会保留数据库、CA、TLS 身份、master key、bootstrap、缓存和配置。
 

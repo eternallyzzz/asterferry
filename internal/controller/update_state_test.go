@@ -4,6 +4,8 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"asterferry/internal/domain"
 )
 
 func TestApplyNodeUpgradeEventPersistsTerminalState(t *testing.T) {
@@ -13,6 +15,9 @@ func TestApplyNodeUpgradeEventPersistsTerminalState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer repositories.Close()
+	if err := repositories.Resources.CreateNode(context.Background(), domain.Node{ID: "event-node", Name: "event node", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	server, err := NewControlServer(DefaultConfig(dir), repositories)
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +65,9 @@ func TestSaveNodeUpdateStateIfActivePreservesTerminalResult(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
+	if err := store.CreateNode(ctx, domain.Node{ID: "upgrade-state-node", Name: "upgrade state node", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
 
 	pending := NodeUpdateState{NodeID: "upgrade-state-node", ActionID: "upgrade-action", CurrentVersion: "1.0.0", TargetVersion: "1.1.0", State: UpdateStateApplying, Supported: true, Deployment: "systemd"}
 	if saved, wrote, err := store.SaveNodeUpdateStateIfActive(ctx, pending); err != nil || !wrote || saved.State != UpdateStateApplying {
@@ -81,6 +89,42 @@ func TestSaveNodeUpdateStateIfActivePreservesTerminalResult(t *testing.T) {
 	}
 	if saved.State != UpdateStateUpToDate || saved.CurrentVersion != "1.1.0" {
 		t.Fatalf("preserved terminal state = %#v", saved)
+	}
+}
+
+func TestUpdateStateUsesTypedTablesAndIndexedApplyingLookup(t *testing.T) {
+	store, err := openTestStore(filepath.Join(t.TempDir(), "typed-update-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	config := DefaultConfig(t.TempDir())
+	if err := store.CreateNode(ctx, domain.Node{ID: "typed-state-node", Name: "typed state node", Enabled: true}, WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	controllerState := defaultControllerUpdateState(config)
+	controllerState.State = UpdateStateAvailable
+	controllerState.LatestVersion = "1.1.0"
+	if err := store.SaveControllerUpdateState(ctx, controllerState); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetControllerUpdateState(ctx, config); err != nil || got.State != UpdateStateAvailable || got.LatestVersion != "1.1.0" {
+		t.Fatalf("typed Controller update state = %#v, err=%v", got, err)
+	}
+	if err := store.SaveNodeUpdateState(ctx, NodeUpdateState{NodeID: "typed-state-node", ActionID: "typed-state-action", State: UpdateStateApplying, Supported: true, TargetVersion: "1.1.0"}); err != nil {
+		t.Fatal(err)
+	}
+	applying, ok, err := store.GetApplyingNodeUpdate(ctx)
+	if err != nil || !ok || applying.NodeID != "typed-state-node" {
+		t.Fatalf("indexed applying lookup = %#v, ok=%v, err=%v", applying, ok, err)
+	}
+	var legacyRows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM runtime_settings WHERE key LIKE 'node_update:%' OR key='controller_update_state'`).Scan(&legacyRows); err != nil {
+		t.Fatal(err)
+	}
+	if legacyRows != 0 {
+		t.Fatalf("update state still uses runtime_settings: %d rows", legacyRows)
 	}
 }
 

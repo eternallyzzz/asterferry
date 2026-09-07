@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,12 +82,18 @@ func TestStartNodeUpgradeDownloadsVerifiesAndStagesRelease(t *testing.T) {
 	binaryName := filepath.Base(mustExecutable(t))
 	archive, archiveName := makeNodeUpgradeArchive(t, binaryName)
 	digest := sha256.Sum256(archive)
+	manifest := fmt.Sprintf(`{"schema_version":1,"version":"1.1.0","tag":"v1.1.0","commit":"abc123","protocol":"v3","artifacts":[{"name":"%s","sha256":"%s"}]}`, archiveName, hex.EncodeToString(digest[:]))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/release" {
+		switch r.URL.Path {
+		case "/release":
+			_, _ = w.Write(archive)
+		case "/manifest":
+			_, _ = w.Write([]byte(manifest))
+		case "/signature":
+			_, _ = w.Write([]byte("test-signature"))
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_, _ = w.Write(archive)
 	}))
 	defer server.Close()
 
@@ -100,7 +107,8 @@ func TestStartNodeUpgradeDownloadsVerifiesAndStagesRelease(t *testing.T) {
 			ServiceName:      "AsterFerry-Node",
 			ProcessArgs:      []string{"node", "run", "--service-mode", "wsl"},
 		},
-		updateHTTPClient: server.Client(),
+		updateHTTPClient:       server.Client(),
+		updateManifestVerifier: acceptingNodeManifestVerifier{},
 		startUpdateHelper: func(binary string, args []string) (int, error) {
 			helperBinary = binary
 			helperArgs = append([]string(nil), args...)
@@ -108,11 +116,13 @@ func TestStartNodeUpgradeDownloadsVerifiesAndStagesRelease(t *testing.T) {
 		},
 	}
 	actionPayload, err := json.Marshal(nodeUpgradeRequest{
-		Version:              "1.1.0",
-		AssetName:            archiveName,
-		AssetURL:             server.URL + "/release",
-		SHA256:               hex.EncodeToString(digest[:]),
-		HealthTimeoutSeconds: 30,
+		Version:                     "1.1.0",
+		AssetName:                   archiveName,
+		AssetURL:                    server.URL + "/release",
+		SHA256:                      hex.EncodeToString(digest[:]),
+		ReleaseManifestURL:          server.URL + "/manifest",
+		ReleaseManifestSignatureURL: server.URL + "/signature",
+		HealthTimeoutSeconds:        30,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -149,26 +159,35 @@ func TestSendPendingNodeUpdateReportsHealthyOnce(t *testing.T) {
 	oldVersion := buildinfo.Version
 	buildinfo.Version = "1.2.3"
 	t.Cleanup(func() { buildinfo.Version = oldVersion })
-	path := filepath.Join(t.TempDir(), "node-update.json")
-	update.WriteReplacementResult(path, update.ReplacementResult{ActionID: "pending-action", Version: "1.2.3", State: nodeUpdateStateWaiting})
-	runtime := &Runtime{runtimeOpts: RuntimeOptions{UpdateStatusPath: path, ServiceMode: "wsl"}}
-	capture, send := captureNodeUpdateMessage()
-	if err := runtime.sendPendingNodeUpdate(send); err != nil {
-		t.Fatal(err)
-	}
-	if capture.message == nil {
-		t.Fatal("pending Node update was not reported")
-	}
-	attributes := decodeNodeUpdateAttributes(t, capture.message)
-	if attributes["state"] != nodeUpdateStateUpToDate || attributes["action_id"] != "pending-action" {
-		t.Fatalf("pending update attributes = %#v", attributes)
-	}
-	if err := runtime.sendPendingNodeUpdate(func(*v1.NodeMessage) error { t.Fatal("pending update was reported twice"); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	result, err := update.ReadReplacementResult(path)
-	if err != nil || result.State != "healthy" {
-		t.Fatalf("pending status file = %#v, err=%v", result, err)
+	for _, initialState := range []string{
+		update.ReplacementStatePrepared,
+		nodeUpdateStateWaiting,
+		nodeUpdateStateReplacing,
+		nodeUpdateStateRecovering,
+	} {
+		t.Run(initialState, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "node-update.json")
+			update.WriteReplacementResult(path, update.ReplacementResult{ActionID: "pending-action", Version: "1.2.3", State: initialState})
+			runtime := &Runtime{runtimeOpts: RuntimeOptions{UpdateStatusPath: path, ServiceMode: "wsl"}}
+			capture, send := captureNodeUpdateMessage()
+			if err := runtime.sendPendingNodeUpdate(send); err != nil {
+				t.Fatal(err)
+			}
+			if capture.message == nil {
+				t.Fatal("pending Node update was not reported")
+			}
+			attributes := decodeNodeUpdateAttributes(t, capture.message)
+			if attributes["state"] != nodeUpdateStateUpToDate || attributes["action_id"] != "pending-action" {
+				t.Fatalf("pending update attributes = %#v", attributes)
+			}
+			if err := runtime.sendPendingNodeUpdate(func(*v1.NodeMessage) error { t.Fatal("pending update was reported twice"); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			result, err := update.ReadReplacementResult(path)
+			if err != nil || result.State != "healthy" {
+				t.Fatalf("pending status file = %#v, err=%v", result, err)
+			}
+		})
 	}
 }
 
@@ -252,4 +271,13 @@ func containsArgs(args []string, name, value string) bool {
 		}
 	}
 	return false
+}
+
+type acceptingNodeManifestVerifier struct{}
+
+func (acceptingNodeManifestVerifier) Verify(payload, signature []byte) error {
+	if len(payload) == 0 || string(signature) != "test-signature" {
+		return errors.New("unexpected test manifest signature")
+	}
+	return nil
 }

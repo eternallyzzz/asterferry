@@ -3,7 +3,7 @@ openapi: 3.0.3
 info:
   title: AsterFerry Controller API
   version: 1.0.0
-  description: Authoritative control-plane API for the AsterFerry v1.0.0 normalized architecture. Gateway and Agent business traffic never traverses this API.
+  description: Authoritative control-plane API for the AsterFerry normalized architecture. Gateway and Agent business traffic never traverses this API.
 servers:
   - url: /api/v1
 tags:
@@ -32,7 +32,7 @@ paths:
     post:
       tags: [operations]
       operationId: applyControllerUpdate
-      description: Download and verify the latest stable Controller archive over HTTPS using SHA256SUMS, restart the native service and roll back automatically if /readyz does not recover.
+      description: Download and verify the latest stable Controller archive over HTTPS using the Cosign-signed release-manifest.json bound to SHA256SUMS, restart the native service and recover or roll back if /readyz does not recover.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateRequest' } } } }

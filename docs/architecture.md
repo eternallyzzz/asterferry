@@ -31,6 +31,17 @@ database, while ChangeBus notifications and active gRPC streams remain
 process-local. Nodes retain their last valid local snapshot and reconnect after
 interruption or takeover.
 
+## Version facts
+
+The product release version is the single stable value in the root `VERSION`
+file. Release candidates add only the `-rc.N` suffix to their tag; generated
+OpenAPI, Dashboard and Helm metadata, the current changelog entry, and release
+workflow inputs must agree with that value. The physical database schema is a
+separate fact: the current database schema v14 is defined by
+`CurrentDatabaseSchemaVersion` in `internal/controller/schema_contract.go`.
+The release metadata check validates both version spaces and does not treat a
+database schema change as a product release-version change.
+
 ## Component boundaries
 
 ```mermaid
@@ -126,6 +137,16 @@ itself is the unit of storage, such as complete snapshots and opaque audit or
 bootstrap payloads. Normalized aggregate child tables preserve ordered lists
 with dense zero-based positions; loaders reject gaps, unknown kinds, and
 cross-owner metadata mismatches.
+
+Controller update state follows the relational rule: the singleton
+`controller_update_state` table owns Controller status, and
+`node_update_states` owns one typed row per Node with an indexed state query.
+They carry their own state schema version and are written through the same
+transaction/CAS boundary as other coordination data. `runtime_settings` is
+reserved for low-frequency document-shaped operator settings, not fixed
+coordination records. The only intentionally file-backed update state is the
+local replacement journal, which must survive a helper crash between rename
+and readiness.
 
 SQLite and PostgreSQL share the logical schema. Dialect-specific SQL and
 placeholder behavior stay behind database helpers. The database schema,

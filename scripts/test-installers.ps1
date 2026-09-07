@@ -52,18 +52,23 @@ Assert-Contains $controllerInstaller '$script:embeddedReleaseBaseUrl = ""'
 Assert-Contains $controllerInstaller '$script:embeddedReleaseVersion = ""'
 Assert-Contains $controllerInstaller '0.0.0.0:8443'
 Assert-Contains $controllerInstaller '0.0.0.0:9443'
-foreach ($obsoletePrompt in @(
+foreach ($expectedPrompt in @(
     'Read-InstallerValue -Prompt "Release base URL',
     'Read-InstallerValue -Prompt "HTTPS listen address',
     'Read-InstallerValue -Prompt "gRPC listen address',
     'Read-InstallerValue -Prompt "Metrics listen address',
     'Read-InstallerValue -Prompt "Windows service name',
-    'Read-InstallerValue -Prompt "Initial Admin username'
+    'Read-InstallerValue -Prompt "Initial Admin username',
+    'Read-InstallerValue -Prompt "Controller gRPC advertise address (required)'
 )) {
-    if ($controllerText.Contains($obsoletePrompt)) {
-        throw "$controllerInstaller still prompts for an optional default: $obsoletePrompt"
+    if (-not $controllerText.Contains($expectedPrompt)) {
+        throw "$controllerInstaller is missing an interactive prompt: $expectedPrompt"
     }
 }
+Assert-Contains $controllerInstaller 'DefaultLabel "empty for latest stable"'
+Assert-Contains $controllerInstaller 'DefaultLabel "empty to generate random password"'
+Assert-Contains $controllerInstaller 'Get-DefaultAdvertiseAddress'
+Assert-Contains $controllerInstaller '169.254'
 
 foreach ($script in $shellInstallers) {
     Assert-Contains $script "--disable"
@@ -72,9 +77,12 @@ Assert-Contains (Join-Path $root "scripts/install-node.sh") "--service-mode"
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "node-release.json"
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "takeownArguments"
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") '"/R", "/D", "Y"'
+Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "Assert-HostPort"
+Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "Get-DefaultAdvertiseAddress"
 Assert-Contains (Join-Path $root "scripts/install-node.ps1") "DataRoot"
 Assert-Contains (Join-Path $root "scripts/install-node.ps1") "InstallRoot"
 Assert-Contains (Join-Path $root "scripts/install-node.ps1") "--disable"
+Assert-Contains (Join-Path $root "scripts/install-node.ps1") "Assert-HostPort"
 
 $nodeHelp = (& $gitBash (Join-Path $root "scripts/install-node.sh") --help 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0 -or $nodeHelp -notmatch "Usage: install-node\.sh") {

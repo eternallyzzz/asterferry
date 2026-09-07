@@ -38,13 +38,18 @@ func TestControllerUpdateCheckAndNodeUpgradeAPIFlow(t *testing.T) {
 	version := "1.1.0"
 	assetName := update.ArchiveName(version, "linux", "amd64")
 	checksum := hex.EncodeToString(make([]byte, sha256.Size))
+	manifest := fmt.Sprintf(`{"schema_version":1,"version":"%s","tag":"v%s","commit":"abc123","protocol":"v3","artifacts":[{"name":"%s","sha256":"%s"}]}`, version, version, assetName, checksum)
 	var releaseServer *httptest.Server
 	releaseServer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/eternallyzzz/asterferry/releases":
-			_, _ = fmt.Fprintf(w, `[{"tag_name":"v%s","draft":false,"prerelease":false,"published_at":"2026-09-01T00:00:00Z","html_url":"https://github.com/eternallyzzz/asterferry/releases/tag/v%s","assets":[{"name":"SHA256SUMS","browser_download_url":"%s/checksums"},{"name":"%s","browser_download_url":"%s/node"}]}]`, version, version, releaseServer.URL, assetName, releaseServer.URL)
+			_, _ = fmt.Fprintf(w, `[{"tag_name":"v%s","draft":false,"prerelease":false,"published_at":"2026-09-01T00:00:00Z","html_url":"https://github.com/eternallyzzz/asterferry/releases/tag/v%s","assets":[{"name":"SHA256SUMS","browser_download_url":"%s/checksums"},{"name":"release-manifest.json","browser_download_url":"%s/manifest"},{"name":"release-manifest.json.sig","browser_download_url":"%s/signature"},{"name":"%s","browser_download_url":"%s/node"}]}]`, version, version, releaseServer.URL, releaseServer.URL, releaseServer.URL, assetName, releaseServer.URL)
 		case "/checksums":
 			_, _ = fmt.Fprintf(w, "%s  %s\n", checksum, assetName)
+		case "/manifest":
+			_, _ = w.Write([]byte(manifest))
+		case "/signature":
+			_, _ = w.Write([]byte("test-signature"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -53,6 +58,7 @@ func TestControllerUpdateCheckAndNodeUpgradeAPIFlow(t *testing.T) {
 	client := update.NewGitHubClient(update.DefaultRepository)
 	client.APIBaseURL = releaseServer.URL
 	client.HTTPClient = releaseServer.Client()
+	client.ManifestVerifier = acceptingControllerManifestVerifier{}
 	server.update.client = client
 
 	ctx := context.Background()
@@ -139,7 +145,7 @@ func TestControllerUpdateCheckAndNodeUpgradeAPIFlow(t *testing.T) {
 	if err := json.Unmarshal(action.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["version"] != version || payload["asset_name"] != assetName || payload["sha256"] != checksum {
+	if payload["version"] != version || payload["asset_name"] != assetName || payload["sha256"] != checksum || payload["release_manifest_url"] != releaseServer.URL+"/manifest" || payload["release_manifest_signature_url"] != releaseServer.URL+"/signature" {
 		t.Fatalf("Node upgrade payload = %#v", payload)
 	}
 	state, err := repositories.Resources.GetNodeUpdateState(ctx, observed.NodeID)
@@ -157,4 +163,13 @@ func TestControllerUpdateCheckAndNodeUpgradeAPIFlow(t *testing.T) {
 	if nodeStatusResponse.Code != http.StatusOK || !strings.Contains(nodeStatusResponse.Body.String(), `"state":"applying"`) {
 		t.Fatalf("Node update status = %d, body=%s", nodeStatusResponse.Code, nodeStatusResponse.Body.String())
 	}
+}
+
+type acceptingControllerManifestVerifier struct{}
+
+func (acceptingControllerManifestVerifier) Verify(payload, signature []byte) error {
+	if len(payload) == 0 || string(signature) != "test-signature" {
+		return fmt.Errorf("unexpected test manifest signature")
+	}
+	return nil
 }

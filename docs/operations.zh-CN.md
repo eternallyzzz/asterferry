@@ -108,7 +108,7 @@ curl -X POST https://controller.example/api/v1/nodes/gateway-b/runtime/actions \
 
 当前开发 schema 是破坏性契约，不提供 `controller migrate` 或
 SQLite→PostgreSQL 原地转换。需要切换后端或 schema 时，请重新初始化
-Controller，并在 Dashboard 重建资源；v13 之前的数据库和备份 manifest
+Controller，并在 Dashboard 重建资源；v14 之前的数据库和备份 manifest
 都会被拒绝。PostgreSQL 备份/恢复要求执行 CLI 的机器安装
 `pg_dump` 和 `pg_restore`；备份还包含 Controller 配置、master key、CA 和
 TLS 身份。

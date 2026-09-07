@@ -5,6 +5,12 @@
 This release is a deliberate breaking cutover to the normalized Controller/
 data-plane architecture.
 
+- Adds a single `VERSION` release source, CI checks for release-document and
+  database-schema drift, a protected release-public-key fingerprint gate, and
+  an ECDSA P-256-only manifest verifier for native self-update.
+- Adds a cross-process replacement crash test that kills the helper after the
+  executable swap and verifies restart recovery, terminal persistence and
+  manual-required handling for unsafe journals.
 - Adds the SQLite-backed Controller with RBAC, audit, enrollment, scheduling,
   revision checks and encrypted node snapshots; PostgreSQL is now supported as
   the production-scale backend with a bounded pool.
@@ -22,7 +28,7 @@ data-plane architecture.
   30 days.
 - Replaces role-specific YAML, bundles, local Supervisor state and the v6 data
   protocol. Existing node configurations and Controller databases must be
-  initialized again. The Controller store is now a fresh database schema v13
+  initialized again. The Controller store is now a fresh database schema v14
   with a relational aggregate layout and a single canonical database marker;
   old databases and backup manifests are
   rejected without migration.
@@ -55,7 +61,8 @@ data-plane architecture.
   optional external, freshness-checked resource instead of a repository or
   image binary.
 - Adds stable GitHub release detection with Admin-confirmed Controller
-  self-upgrade, SHA256SUMS verification and readiness rollback. Native
+  self-upgrade, a Cosign-signed release manifest bound to SHA256SUMS, and
+  crash-recoverable readiness rollback. Native
   Windows-service, Linux-systemd and WSL Nodes can be upgraded one at a time
   through the Dashboard, REST API or CLI; container and Helm deployments report
   image rollout as the required operation.

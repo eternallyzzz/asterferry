@@ -202,6 +202,7 @@ func (s *Server) requestNodeUpgrade(w http.ResponseWriter, r *http.Request, node
 	}
 	payload, err := json.Marshal(map[string]any{
 		"version": release.Version, "asset_name": asset.Name, "asset_url": asset.URL, "sha256": checksum,
+		"release_manifest_url": release.ManifestURL, "release_manifest_signature_url": release.ManifestSignatureURL,
 		"health_timeout_seconds": int(update.HealthTimeout / time.Second),
 	})
 	if err != nil {

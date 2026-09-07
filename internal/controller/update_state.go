@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,11 +12,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-const (
-	controllerUpdateStateKey = "controller_update_state"
-	nodeUpdateStatePrefix    = "node_update:"
-	updateStateSchemaVersion = 1
-)
+const updateStateSchemaVersion = 1
 
 const (
 	UpdateStateDisabled       = "disabled"
@@ -91,46 +86,73 @@ func controllerSelfUpdateSupported(deployment string) bool {
 	return deployment == "windows-service" || deployment == "systemd" || deployment == "wsl"
 }
 
-func (s *ResourceRepository) loadUpdateSetting(ctx context.Context, key string, destination any) error {
-	var value string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM runtime_settings WHERE key=?`, key).Scan(&value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sql.ErrNoRows
-	}
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal([]byte(value), destination); err != nil {
-		return fmt.Errorf("decode update state %s: %w", key, err)
-	}
-	return nil
+type sqlRowScanner interface {
+	Scan(dest ...any) error
 }
 
-func (s *ResourceRepository) saveUpdateSetting(ctx context.Context, key string, value any) error {
-	encoded, err := json.Marshal(value)
+func scanControllerUpdateState(scanner sqlRowScanner, state *ControllerUpdateState) error {
+	var schemaVersion, supported int
+	var publishedAt, lastCheckedAt sql.NullString
+	var updatedAt string
+	if err := scanner.Scan(
+		&schemaVersion, &state.CurrentVersion, &state.Channel, &state.Deployment, &supported,
+		&state.State, &state.LatestVersion, &state.LatestURL, &publishedAt, &lastCheckedAt,
+		&state.LastError, &state.TargetVersion, &state.PreviousVersion, &updatedAt,
+	); err != nil {
+		return err
+	}
+	state.SchemaVersion = schemaVersion
+	state.Supported = supported != 0
+	var err error
+	state.PublishedAt, err = parseNullableStoredTime("controller_update_state.published_at", publishedAt)
 	if err != nil {
 		return err
 	}
-	if len(encoded) > 1<<20 {
-		return errors.New("update state is too large")
-	}
-	tx, err := s.beginWriteTx(ctx)
+	state.LastCheckedAt, err = parseNullableStoredTime("controller_update_state.last_checked_at", lastCheckedAt)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, string(encoded), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	state.UpdatedAt, err = parseStoredTime("controller_update_state.updated_at", updatedAt)
+	return err
+}
+
+func scanNodeUpdateState(scanner sqlRowScanner, state *NodeUpdateState) error {
+	var schemaVersion, supported int
+	var updatedAt string
+	if err := scanner.Scan(
+		&state.NodeID, &schemaVersion, &state.ActionID, &state.CurrentVersion, &state.TargetVersion,
+		&state.State, &supported, &state.Deployment, &state.Reason, &state.LastError, &updatedAt,
+	); err != nil {
 		return err
 	}
-	return s.commitWriteTx(ctx, tx)
+	state.SchemaVersion = schemaVersion
+	state.Supported = supported != 0
+	var err error
+	state.UpdatedAt, err = parseStoredTime("node_update_states.updated_at", updatedAt)
+	return err
+}
+
+func parseNullableStoredTime(field string, value sql.NullString) (time.Time, error) {
+	if !value.Valid || strings.TrimSpace(value.String) == "" {
+		return time.Time{}, nil
+	}
+	return parseStoredTime(field, value.String)
+}
+
+func nullableStoredTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }
 
 func (s *ResourceRepository) GetControllerUpdateState(ctx context.Context, config Config) (ControllerUpdateState, error) {
 	state := defaultControllerUpdateState(config)
-	if err := s.loadUpdateSetting(ctx, controllerUpdateStateKey, &state); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return state, nil
-		}
+	err := scanControllerUpdateState(s.db.QueryRowContext(ctx, `SELECT schema_version,current_version,channel,deployment,supported,state,latest_version,latest_url,published_at,last_checked_at,last_error,target_version,previous_version,updated_at FROM controller_update_state WHERE singleton=1`), &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
 		return ControllerUpdateState{}, err
 	}
 	if state.SchemaVersion != updateStateSchemaVersion {
@@ -142,19 +164,28 @@ func (s *ResourceRepository) GetControllerUpdateState(ctx context.Context, confi
 func (s *ResourceRepository) SaveControllerUpdateState(ctx context.Context, state ControllerUpdateState) error {
 	state.SchemaVersion = updateStateSchemaVersion
 	state.UpdatedAt = time.Now().UTC()
-	return s.saveUpdateSetting(ctx, controllerUpdateStateKey, state)
-}
-
-func nodeUpdateStateKey(nodeID string) string {
-	return nodeUpdateStatePrefix + strings.TrimSpace(nodeID)
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO controller_update_state(singleton,schema_version,current_version,channel,deployment,supported,state,latest_version,latest_url,published_at,last_checked_at,last_error,target_version,previous_version,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET schema_version=excluded.schema_version,current_version=excluded.current_version,channel=excluded.channel,deployment=excluded.deployment,supported=excluded.supported,state=excluded.state,latest_version=excluded.latest_version,latest_url=excluded.latest_url,published_at=excluded.published_at,last_checked_at=excluded.last_checked_at,last_error=excluded.last_error,target_version=excluded.target_version,previous_version=excluded.previous_version,updated_at=excluded.updated_at`,
+		state.SchemaVersion, state.CurrentVersion, state.Channel, state.Deployment, boolInt(state.Supported), state.State,
+		state.LatestVersion, state.LatestURL, nullableStoredTime(state.PublishedAt), nullableStoredTime(state.LastCheckedAt),
+		state.LastError, state.TargetVersion, state.PreviousVersion, state.UpdatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	return s.commitWriteTx(ctx, tx)
 }
 
 func (s *ResourceRepository) GetNodeUpdateState(ctx context.Context, nodeID string) (NodeUpdateState, error) {
-	state := NodeUpdateState{SchemaVersion: updateStateSchemaVersion, NodeID: nodeID, State: UpdateStateUnsupported}
-	if err := s.loadUpdateSetting(ctx, nodeUpdateStateKey(nodeID), &state); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return state, nil
-		}
+	state := NodeUpdateState{SchemaVersion: updateStateSchemaVersion, NodeID: strings.TrimSpace(nodeID), State: UpdateStateUnsupported}
+	err := scanNodeUpdateState(s.db.QueryRowContext(ctx, `SELECT node_id,schema_version,action_id,current_version,target_version,state,supported,deployment,reason,last_error,updated_at FROM node_update_states WHERE node_id=?`, nodeID), &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state, nil
+	}
+	if err != nil {
 		return NodeUpdateState{}, err
 	}
 	if state.SchemaVersion != updateStateSchemaVersion {
@@ -164,31 +195,18 @@ func (s *ResourceRepository) GetNodeUpdateState(ctx context.Context, nodeID stri
 }
 
 func (s *ResourceRepository) GetApplyingNodeUpdate(ctx context.Context) (NodeUpdateState, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT value FROM runtime_settings WHERE key LIKE ?`, nodeUpdateStatePrefix+"%")
+	state := NodeUpdateState{}
+	err := scanNodeUpdateState(s.db.QueryRowContext(ctx, `SELECT node_id,schema_version,action_id,current_version,target_version,state,supported,deployment,reason,last_error,updated_at FROM node_update_states WHERE state=? ORDER BY updated_at,node_id LIMIT 1`, UpdateStateApplying), &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeUpdateState{}, false, nil
+	}
 	if err != nil {
 		return NodeUpdateState{}, false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var encoded string
-		if err := rows.Scan(&encoded); err != nil {
-			return NodeUpdateState{}, false, err
-		}
-		var state NodeUpdateState
-		if err := json.Unmarshal([]byte(encoded), &state); err != nil {
-			return NodeUpdateState{}, false, fmt.Errorf("decode node update state: %w", err)
-		}
-		if state.SchemaVersion != updateStateSchemaVersion {
-			return NodeUpdateState{}, false, fmt.Errorf("node update state schema version %d is unsupported", state.SchemaVersion)
-		}
-		if state.State == UpdateStateApplying {
-			return state, true, nil
-		}
+	if state.SchemaVersion != updateStateSchemaVersion {
+		return NodeUpdateState{}, false, fmt.Errorf("node update state schema version %d is unsupported", state.SchemaVersion)
 	}
-	if err := rows.Err(); err != nil {
-		return NodeUpdateState{}, false, err
-	}
-	return NodeUpdateState{}, false, nil
+	return state, true, nil
 }
 
 func (s *ResourceRepository) SaveNodeUpdateState(ctx context.Context, state NodeUpdateState) error {
@@ -197,7 +215,21 @@ func (s *ResourceRepository) SaveNodeUpdateState(ctx context.Context, state Node
 	}
 	state.SchemaVersion = updateStateSchemaVersion
 	state.UpdatedAt = time.Now().UTC()
-	return s.saveUpdateSetting(ctx, nodeUpdateStateKey(state.NodeID), state)
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := upsertNodeUpdateState(ctx, tx, state); err != nil {
+		return err
+	}
+	return s.commitWriteTx(ctx, tx)
+}
+
+func upsertNodeUpdateState(ctx context.Context, tx *sql.Tx, state NodeUpdateState) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO node_update_states(node_id,schema_version,action_id,current_version,target_version,state,supported,deployment,reason,last_error,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET schema_version=excluded.schema_version,action_id=excluded.action_id,current_version=excluded.current_version,target_version=excluded.target_version,state=excluded.state,supported=excluded.supported,deployment=excluded.deployment,reason=excluded.reason,last_error=excluded.last_error,updated_at=excluded.updated_at`,
+		state.NodeID, state.SchemaVersion, state.ActionID, state.CurrentVersion, state.TargetVersion, state.State, boolInt(state.Supported), state.Deployment, state.Reason, state.LastError, state.UpdatedAt.Format(time.RFC3339Nano))
+	return err
 }
 
 // SaveNodeUpdateStateIfActive records the request-side applying state without
@@ -215,36 +247,25 @@ func (s *ResourceRepository) SaveNodeUpdateStateIfActive(ctx context.Context, st
 	defer tx.Rollback()
 
 	current := NodeUpdateState{SchemaVersion: updateStateSchemaVersion, NodeID: state.NodeID, State: UpdateStateUnsupported}
-	var encodedCurrent string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM runtime_settings WHERE key=?`, nodeUpdateStateKey(state.NodeID)).Scan(&encodedCurrent)
+	err = scanNodeUpdateState(tx.QueryRowContext(ctx, `SELECT node_id,schema_version,action_id,current_version,target_version,state,supported,deployment,reason,last_error,updated_at FROM node_update_states WHERE node_id=?`+s.selectForUpdateClause(), state.NodeID), &current)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return NodeUpdateState{}, false, err
 	}
 	if err == nil {
-		if decodeErr := json.Unmarshal([]byte(encodedCurrent), &current); decodeErr != nil {
-			return NodeUpdateState{}, false, fmt.Errorf("decode update state %s: %w", nodeUpdateStateKey(state.NodeID), decodeErr)
-		}
 		if current.SchemaVersion != updateStateSchemaVersion {
 			return NodeUpdateState{}, false, fmt.Errorf("node update state schema version %d is unsupported", current.SchemaVersion)
 		}
-	}
-	if current.ActionID == state.ActionID && current.ActionID != "" && isTerminalNodeUpdateState(current.State) {
-		if err := s.commitWriteTx(ctx, tx); err != nil {
-			return NodeUpdateState{}, false, err
+		if current.ActionID == state.ActionID && current.ActionID != "" && isTerminalNodeUpdateState(current.State) {
+			if err := s.commitWriteTx(ctx, tx); err != nil {
+				return NodeUpdateState{}, false, err
+			}
+			return current, false, nil
 		}
-		return current, false, nil
 	}
 
 	state.SchemaVersion = updateStateSchemaVersion
 	state.UpdatedAt = time.Now().UTC()
-	encoded, err := json.Marshal(state)
-	if err != nil {
-		return NodeUpdateState{}, false, err
-	}
-	if len(encoded) > 1<<20 {
-		return NodeUpdateState{}, false, errors.New("update state is too large")
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, nodeUpdateStateKey(state.NodeID), string(encoded), state.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+	if err := upsertNodeUpdateState(ctx, tx, state); err != nil {
 		return NodeUpdateState{}, false, err
 	}
 	if err := s.commitWriteTx(ctx, tx); err != nil {

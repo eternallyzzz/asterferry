@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [string]$OutputDirectory = "tmp/release-check",
     [switch]$SkipDocker
 )
@@ -9,6 +9,10 @@ $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = (Get-Content -Raw -LiteralPath (Join-Path $root "VERSION")).Trim()
+}
 
 function Require-Command([string]$Name) {
     if ($null -eq (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -58,8 +62,6 @@ function Prepare-FrontendScratch {
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?$') {
     throw "Version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N without the leading v"
 }
-$stableVersion = [regex]::Match($Version, '^[0-9]+\.[0-9]+\.[0-9]+').Value
-
 Require-Command "go"
 Require-Command "node"
 Require-Command "npm"
@@ -68,6 +70,7 @@ Require-Command "python"
 if (-not $SkipDocker) {
     Require-Command "docker"
 }
+Invoke-Checked "Release metadata check" "python" @((Join-Path $root "scripts/check-release-metadata.py"), "--version", $Version)
 Invoke-Checked "Toolchain pin check" "python" @((Join-Path $root "scripts/check-toolchain.py"))
 $toolchain = Get-Content -Raw -LiteralPath (Join-Path $root ".toolchain.json") | ConvertFrom-Json
 $expectedNodeVersion = "v$($toolchain.release.node)"
@@ -91,54 +94,6 @@ if (Test-Path -LiteralPath $output) {
 }
 $null = New-Item -ItemType Directory -Force -Path $output
 Remove-FrontendScratch
-
-$versionSources = [ordered]@{}
-$dashboardPackage = Get-Content -Raw -LiteralPath (Join-Path $root "web/dashboard/package.json") | ConvertFrom-Json
-$dashboardLockText = Get-Content -Raw -LiteralPath (Join-Path $root "web/dashboard/package-lock.json")
-$dashboardLockVersion = [regex]::Match($dashboardLockText, '(?m)^  "version":\s*"([^"]+)"\s*,?\r?$')
-if (-not $dashboardLockVersion.Success) {
-    throw "web/dashboard/package-lock.json does not declare a top-level version"
-}
-$versionSources["web/dashboard/package.json"] = [string]$dashboardPackage.version
-$versionSources["web/dashboard/package-lock.json"] = $dashboardLockVersion.Groups[1].Value
-
-foreach ($openapi in @("api/openapi.yaml", "internal/controller/openapi.yaml")) {
-    $openapiText = Get-Content -Raw -LiteralPath (Join-Path $root $openapi)
-    $openapiVersion = [regex]::Match($openapiText, '(?m)^  version:\s*(\S+)\r?$')
-    if (-not $openapiVersion.Success) {
-        throw "$openapi does not declare info.version"
-    }
-    $versionSources[$openapi] = $openapiVersion.Groups[1].Value
-}
-
-$chartPaths = @("deploy/helm/asterferry-controller", "deploy/helm/asterferry-node")
-foreach ($chart in $chartPaths) {
-    $chartPath = Join-Path $root "$chart/Chart.yaml"
-    $chartText = Get-Content -Raw -LiteralPath $chartPath
-    $chartVersion = [regex]::Match($chartText, '(?m)^version:\s*([^\s]+)').Groups[1].Value
-    $appVersion = [regex]::Match($chartText, '(?m)^appVersion:\s*["'']?([^"''\s]+)').Groups[1].Value
-    if ($chartVersion -ne $stableVersion -or $appVersion -ne $stableVersion) {
-        throw "$chart metadata must match $stableVersion; got version=$chartVersion appVersion=$appVersion"
-    }
-    $versionSources["$chart/Chart.yaml version"] = $chartVersion
-    $versionSources["$chart/Chart.yaml appVersion"] = $appVersion
-}
-
-$changelog = Get-Content -Raw -LiteralPath (Join-Path $root "CHANGELOG.md")
-$changelogPattern = "(?m)^## \[$([regex]::Escape($stableVersion))\] - (?:Unreleased|\d{4}-\d{2}-\d{2})\r?$"
-if (-not [regex]::IsMatch($changelog, $changelogPattern)) {
-    throw "CHANGELOG.md has no entry for $stableVersion"
-}
-
-$mismatches = @($versionSources.GetEnumerator() | Where-Object { $_.Value -ne $stableVersion })
-if ($mismatches.Count -gt 0) {
-    $details = ($mismatches | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
-    throw "release version $stableVersion is inconsistent: $details"
-}
-$distinctVersions = @($versionSources.GetEnumerator() | ForEach-Object { $_.Value } | Select-Object -Unique)
-if ($distinctVersions.Count -ne 1) {
-    throw "release version sources disagree: $($versionSources | Out-String)"
-}
 
 Invoke-Checked "OpenAPI generated copy" "python" @("scripts/sync-openapi.py", "--check")
 Invoke-Checked "Source layout check" "python" @((Join-Path $root "scripts/check-source-layout.py"))

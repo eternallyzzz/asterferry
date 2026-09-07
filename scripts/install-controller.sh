@@ -6,25 +6,26 @@ usage() {
   local output_fd=2
   if [[ "$status" == "0" ]]; then output_fd=1; fi
   cat >&$output_fd <<'USAGE'
-Usage: install-controller.sh --grpc-advertise HOST:PORT [options]
+Usage: install-controller.sh [options]
 
 Install the latest AsterFerry Controller release and register it as a systemd
 service. WSL without systemd uses a managed background process instead.
-
-Required:
-  --grpc-advertise HOST:PORT  Address that Nodes can reach (never 0.0.0.0)
+Defaults: HTTPS/gRPC listen on 0.0.0.0, metrics on 127.0.0.1, and the newest
+stable release is downloaded from the GitHub repository.
 
 Options:
-  --repo OWNER/REPO           GitHub repository (default: eternallyzzz/asterferry)
-  --version VERSION           Pin a release; otherwise use the newest published tag
+  --grpc-advertise HOST:PORT  Address that Nodes can reach (default: detected primary IP with the gRPC listen port, falling back to 127.0.0.1)
+  --repo OWNER/REPO           GitHub repository (default: eternallyzzz/asterferry; versions are resolved from this repo)
+  --version VERSION           Pin a release; otherwise the newest stable tag is resolved automatically
   --arch amd64|arm64          Override automatic Linux architecture detection
-  --release-base-url URL      HTTPS release mirror; requires --version
+  --release-base-url URL      HTTPS release mirror (default: GitHub releases for --repo); requires --version
   --data-dir DIR              Controller data directory (default: /var/lib/asterferry)
   --http-listen HOST:PORT     HTTPS listen address (default: 0.0.0.0:8443)
   --grpc-listen HOST:PORT     mTLS gRPC listen address (default: 0.0.0.0:9443)
   --metrics-listen HOST:PORT  Metrics address (default: 127.0.0.1:9090)
   --username USER             Initial Admin username (default: admin)
   --password-file FILE        Protected file containing the initial Admin password
+  --non-interactive, -n      Use defaults/auto-detection without prompting
   -h, --help                  Show this help
 USAGE
   exit "$status"
@@ -33,6 +34,40 @@ USAGE
 die() {
   echo "install-controller: $*" >&2
   exit 1
+}
+
+step() {
+  echo "==> $*"
+}
+
+info() {
+  echo "    $*"
+}
+
+validate_host_port() {
+  local value="$1" label="$2" host port
+  [[ "$value" != *[[:space:]]* ]] || die "$label must not contain whitespace"
+  [[ "$value" =~ ^([^:]+|\[[^]]+\]):[0-9]+$ ]] || die "$label must be host:port (for example controller.example.com:9443)"
+  host="${value%:*}"
+  port="${value##*:}"
+  host="${host#\[}"
+  host="${host%\]}"
+  [[ -n "$host" && "$host" != "0.0.0.0" && "$host" != "::" ]] || die "$label must identify a reachable host, not an unspecified address"
+  (( port >= 1 && port <= 65535 )) || die "$label port must be between 1 and 65535"
+}
+
+detect_advertise_ip() {
+  local ip=""
+  if command -v ip >/dev/null 2>&1; then
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i !~ /^127\./ && $i !~ /^169\.254\./ && $i != "::1") { print $i; exit } }' || true)"
+  fi
+  if [[ -z "$ip" || "$ip" =~ ^127\. || "$ip" =~ ^169\.254\. || "$ip" == "::1" ]]; then
+    return 1
+  fi
+  printf '%s' "$ip"
 }
 
 sanitize_proxy_environment() {
@@ -80,30 +115,116 @@ METRICS_LISTEN="127.0.0.1:9090"
 GRPC_ADVERTISE=""
 USERNAME="admin"
 PASSWORD_FILE=""
+NON_INTERACTIVE=0
+REPO_SET=0
+VERSION_SET=0
+RELEASE_BASE_URL_SET=0
+DATA_DIR_SET=0
+HTTP_LISTEN_SET=0
+GRPC_LISTEN_SET=0
+METRICS_LISTEN_SET=0
+GRPC_ADVERTISE_SET=0
+USERNAME_SET=0
+PASSWORD_FILE_SET=0
+
+original_args=("$@")
 
 while (($# > 0)); do
   case "$1" in
-    --repo) REPO="${2:?missing value for --repo}"; shift 2 ;;
-    --version) VERSION="${2:?missing value for --version}"; shift 2 ;;
+    --repo) REPO="${2:?missing value for --repo}"; REPO_SET=1; shift 2 ;;
+    --version) VERSION="${2:?missing value for --version}"; VERSION_SET=1; shift 2 ;;
     --arch) EXPECTED_ARCH="${2:?missing value for --arch}"; shift 2 ;;
-    --release-base-url) RELEASE_BASE_URL="${2:?missing value for --release-base-url}"; shift 2 ;;
-    --data-dir) DATA_DIR="${2:?missing value for --data-dir}"; shift 2 ;;
-    --http-listen) HTTP_LISTEN="${2:?missing value for --http-listen}"; shift 2 ;;
-    --grpc-listen) GRPC_LISTEN="${2:?missing value for --grpc-listen}"; shift 2 ;;
+    --release-base-url) RELEASE_BASE_URL="${2:?missing value for --release-base-url}"; RELEASE_BASE_URL_SET=1; shift 2 ;;
+    --data-dir) DATA_DIR="${2:?missing value for --data-dir}"; DATA_DIR_SET=1; shift 2 ;;
+    --http-listen) HTTP_LISTEN="${2:?missing value for --http-listen}"; HTTP_LISTEN_SET=1; shift 2 ;;
+    --grpc-listen) GRPC_LISTEN="${2:?missing value for --grpc-listen}"; GRPC_LISTEN_SET=1; shift 2 ;;
     --metrics-listen)
       (($# >= 2)) || die "missing value for --metrics-listen"
       METRICS_LISTEN="$2"
+      METRICS_LISTEN_SET=1
       shift 2
       ;;
-    --grpc-advertise) GRPC_ADVERTISE="${2:?missing value for --grpc-advertise}"; shift 2 ;;
-    --username) USERNAME="${2:?missing value for --username}"; shift 2 ;;
-    --password-file) PASSWORD_FILE="${2:?missing value for --password-file}"; shift 2 ;;
+    --grpc-advertise) GRPC_ADVERTISE="${2:?missing value for --grpc-advertise}"; GRPC_ADVERTISE_SET=1; shift 2 ;;
+    --username) USERNAME="${2:?missing value for --username}"; USERNAME_SET=1; shift 2 ;;
+    --password-file) PASSWORD_FILE="${2:?missing value for --password-file}"; PASSWORD_FILE_SET=1; shift 2 ;;
+    --non-interactive|-n) NON_INTERACTIVE=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown option: $1" >&2; usage 2 ;;
   esac
 done
 
-[[ -n "$GRPC_ADVERTISE" ]] || { echo "--grpc-advertise is required" >&2; usage 2; }
+if [[ -t 0 && "$NON_INTERACTIVE" -eq 0 ]]; then
+  detected_ip="$(detect_advertise_ip || true)"
+  if [[ "$GRPC_ADVERTISE_SET" -eq 0 || -z "$GRPC_ADVERTISE" ]]; then
+    if [[ -n "$detected_ip" ]]; then
+      read -r -p "Controller gRPC advertise address (required) [$detected_ip]: " input || true
+      GRPC_ADVERTISE="${input:-$detected_ip}"
+    else
+      read -r -p "Controller gRPC advertise address (required): " input || true
+      GRPC_ADVERTISE="$input"
+    fi
+  fi
+  if [[ "$REPO_SET" -eq 0 ]]; then
+    read -r -p "GitHub repository [$REPO]: " input || true
+    [[ -n "$input" ]] && REPO="$input"
+  fi
+  if [[ "$RELEASE_BASE_URL_SET" -eq 0 ]]; then
+    default_release_base="https://github.com/$REPO/releases/download"
+    read -r -p "Release base URL [$default_release_base]: " input || true
+    if [[ -n "$input" && "$input" != "$default_release_base" ]]; then
+      RELEASE_BASE_URL="$input"
+      RELEASE_BASE_URL_SET=1
+    else
+      RELEASE_BASE_URL="$default_release_base"
+    fi
+  fi
+  if [[ "$VERSION_SET" -eq 0 ]]; then
+    if [[ "$RELEASE_BASE_URL_SET" -eq 1 ]]; then
+      read -r -p "Release version (required for custom mirror): " input || true
+      VERSION="$input"
+    else
+      read -r -p "Release version [empty for latest stable]: " input || true
+      [[ -n "$input" ]] && VERSION="$input"
+    fi
+  fi
+  if [[ "$DATA_DIR_SET" -eq 0 ]]; then
+    read -r -p "Controller data directory [$DATA_DIR]: " input || true
+    [[ -n "$input" ]] && DATA_DIR="$input"
+  fi
+  if [[ "$HTTP_LISTEN_SET" -eq 0 ]]; then
+    read -r -p "HTTPS listen address [$HTTP_LISTEN]: " input || true
+    [[ -n "$input" ]] && HTTP_LISTEN="$input"
+  fi
+  if [[ "$GRPC_LISTEN_SET" -eq 0 ]]; then
+    read -r -p "gRPC listen address [$GRPC_LISTEN]: " input || true
+    [[ -n "$input" ]] && GRPC_LISTEN="$input"
+  fi
+  if [[ "$METRICS_LISTEN_SET" -eq 0 ]]; then
+    read -r -p "Metrics listen address [$METRICS_LISTEN]: " input || true
+    [[ -n "$input" ]] && METRICS_LISTEN="$input"
+  fi
+  if [[ "$USERNAME_SET" -eq 0 ]]; then
+    read -r -p "Initial Admin username [$USERNAME]: " input || true
+    [[ -n "$input" ]] && USERNAME="$input"
+  fi
+  if [[ "$PASSWORD_FILE_SET" -eq 0 ]]; then
+    read -r -p "Initial Admin password file [empty to generate random password]: " input || true
+    [[ -n "$input" ]] && PASSWORD_FILE="$input"
+  fi
+else
+  if [[ -z "$GRPC_ADVERTISE" ]]; then
+    detected_ip="$(detect_advertise_ip || true)"
+    if [[ -n "$detected_ip" ]]; then
+      GRPC_ADVERTISE="${detected_ip}:${GRPC_LISTEN##*:}"
+      echo "Using detected gRPC advertise address: $GRPC_ADVERTISE" >&2
+    else
+      GRPC_ADVERTISE="127.0.0.1:${GRPC_LISTEN##*:}"
+      echo "Could not detect a non-loopback IP; using loopback default: $GRPC_ADVERTISE" >&2
+    fi
+    echo "  (override with --grpc-advertise HOST:PORT if Nodes cannot reach this address)" >&2
+  fi
+fi
+validate_host_port "$GRPC_ADVERTISE" "grpc advertise address"
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "repo must be OWNER/REPO"
 [[ "$DATA_DIR" = /* && "$DATA_DIR" != *[[:space:]]* ]] || die "data directory must be an absolute path without whitespace"
 [[ -n "$USERNAME" ]] || die "username must not be empty"
@@ -116,13 +237,13 @@ fi
 if [[ -n "$VERSION" ]]; then
   VERSION="${VERSION#v}"
   [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || die "version must be X.Y.Z or X.Y.Z-rc.N"
-elif [[ -n "$RELEASE_BASE_URL" ]]; then
+elif [[ -n "$RELEASE_BASE_URL" && "$RELEASE_BASE_URL_SET" -eq 1 ]]; then
   die "--version is required when --release-base-url is used"
 fi
 
 sanitize_proxy_environment
 
-[[ "$(id -u)" -eq 0 ]] || die "run this installer as root (the generated command uses sudo)"
+[[ "$(id -u)" -eq 0 ]] || die "run this installer as root, for example: sudo bash $0 ${original_args[*]}"
 
 is_wsl=0
 if grep -qi microsoft /proc/version 2>/dev/null || [[ -n "${WSL_INTEROP:-}" ]] || [[ -e /run/WSL ]]; then
@@ -166,8 +287,12 @@ resolve_latest_version() {
   VERSION="${latest_tag#v}"
 }
 
+step "Resolving AsterFerry Controller release"
 [[ -n "$VERSION" ]] || resolve_latest_version
+info "Using AsterFerry Controller v${VERSION} (${EXPECTED_ARCH})"
+info "gRPC advertise: $GRPC_ADVERTISE"
 
+step "Preparing data directory"
 if ! id asterferry >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin asterferry
 fi
@@ -204,6 +329,7 @@ release_host="$(url_host "$release_base")"
 if is_direct_host "$release_host"; then
   release_proxy_args=(--noproxy "$release_host")
 fi
+step "Downloading and verifying Controller assets"
 curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.3 \
   --retry 5 --retry-delay 1 --connect-timeout 10 --max-time 300 \
   "${release_proxy_args[@]}" \
@@ -223,6 +349,7 @@ install -o asterferry -g asterferry -m 0755 "$tmp_dir/asterferry" "$binary_path"
 download_release_file() {
   local name="$1"
   local destination="$tmp_dir/$name"
+  info "Downloading $name"
   curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.3 \
     --retry 5 --retry-delay 1 --connect-timeout 10 --max-time 300 \
     "${release_proxy_args[@]}" \
@@ -234,6 +361,7 @@ download_release_file() {
 }
 
 config_path="$DATA_DIR/controller.json"
+step "Configuring Controller"
 if [[ ! -f "$config_path" ]]; then
   init_args=(
     controller init
@@ -259,6 +387,23 @@ else
 fi
 
 node_installers_dir="$DATA_DIR/node-installers"
+if [[ -f "$config_path" ]]; then
+  node_installers_dir="$(awk -F'"' '
+{
+  for (i = 1; i < NF; i++) {
+    if ($i == "node_installers_dir") {
+      print $(i + 2)
+      exit
+    }
+  }
+}' "$config_path")"
+  [[ -n "$node_installers_dir" ]] || die "Controller configuration does not contain node_installers_dir"
+  if [[ "$node_installers_dir" != /* ]]; then
+    node_installers_dir="$(cd "$(dirname "$config_path")" && pwd)/$node_installers_dir"
+  fi
+fi
+step "Installing Node installer assets"
+info "$node_installers_dir"
 install -d -o asterferry -g asterferry -m 0750 "$node_installers_dir"
 for node_asset in install-node.sh install-node.ps1 node-release.json; do
   download_release_file "$node_asset"
@@ -499,6 +644,7 @@ remove_wsl_boot_hook() {
 }
 
 unit_path="/etc/systemd/system/asterferry-controller.service"
+step "Registering and starting service"
 if [[ "$service_mode" == "systemd" ]]; then
 remove_wsl_boot_hook
 cat > "$unit_path" <<UNIT
@@ -544,6 +690,8 @@ echo "AsterFerry Controller ${VERSION} installed and started"
 echo "config: $config_path"
 if [[ "$service_mode" == "systemd" ]]; then
   echo "service: asterferry-controller.service"
+  echo "status: systemctl status asterferry-controller.service"
+  echo "logs:   journalctl -u asterferry-controller.service -f"
 else
   echo "mode: WSL managed background process (auto-start on WSL launch)"
   echo "status: $wsl_launcher_path status $DATA_DIR"

@@ -1,4 +1,7 @@
 [CmdletBinding()]
+# Defaults: HTTPS/gRPC listen on 0.0.0.0, metrics on 127.0.0.1, and the newest
+# stable release is resolved from the configured GitHub repository when no
+# explicit release URL/version is supplied.
 param(
   [string]$GrpcAdvertise = "",
   [string]$Repo = "eternallyzzz/asterferry",
@@ -16,6 +19,74 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Write-Step {
+  param([Parameter(Mandatory = $true)][string]$Message)
+  Write-Host "==> $Message"
+}
+
+function Write-Info {
+  param([Parameter(Mandatory = $true)][string]$Message)
+  Write-Host "    $Message"
+}
+
+function Assert-HostPort {
+  param(
+    [Parameter(Mandatory = $true)][string]$Value,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  if ($Value -match '\s') {
+    throw "$Label must not contain whitespace"
+  }
+  if ($Value -notmatch '^([^:]+|\[[^\]]+\]):\d+$') {
+    throw "$Label must be host:port (for example controller.example.com:9443)"
+  }
+  if ($Value -match '^(?<host>.+):(?<port>\d+)$') {
+    $hostPart = $Matches['host'] -replace '^\[', '' -replace '\]$', ''
+    $port = [int]$Matches['port']
+    if ($hostPart -eq '' -or $hostPart -eq '0.0.0.0' -or $hostPart -eq '::') {
+      throw "$Label must identify a reachable host, not an unspecified address"
+    }
+    if ($port -lt 1 -or $port -gt 65535) {
+      throw "$Label port must be between 1 and 65535"
+    }
+  }
+}
+
+function Get-DefaultAdvertiseAddress {
+  $grpcPort = ($GrpcListen -split ':')[-1]
+  $candidate = $null
+  try {
+    $candidate = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+      Where-Object {
+        $_.IPAddress -notlike '127.*' -and
+        $_.IPAddress -notlike '169.254.*' -and
+        $_.IPAddress -ne '0.0.0.0' -and
+        $_.AddressState -eq 'Preferred'
+      } |
+      Select-Object -First 1 -ExpandProperty IPAddress
+  } catch {
+    $candidate = $null
+  }
+  if (-not $candidate) {
+    try {
+      $candidate = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+        Where-Object {
+          $_.AddressFamily -eq 'InterNetwork' -and
+          $_.IPAddressToString -notlike '127.*' -and
+          $_.IPAddressToString -notlike '169.254.*'
+        } |
+        Select-Object -First 1 -ExpandProperty IPAddressToString
+    } catch {
+      $candidate = $null
+    }
+  }
+  if ($candidate) {
+    return ("{0}:{1}" -f $candidate, $grpcPort)
+  }
+  return ""
+}
+
 # The source installer leaves these empty and resolves the newest stable release.
 # Release packaging replaces them with the immutable release URL and version.
 $script:embeddedReleaseBaseUrl = ""
@@ -35,7 +106,7 @@ function Invoke-Sc {
 function Assert-Administrator {
   $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
   if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw "run this installer from an elevated PowerShell window"
+    throw "run this installer from an elevated PowerShell window (right-click PowerShell and choose Run as administrator, or use: sudo pwsh -File $PSCommandPath)"
   }
 }
 
@@ -59,9 +130,10 @@ function Read-InstallerValue {
   param(
     [Parameter(Mandatory = $true)][string]$Prompt,
     [string]$Default = "",
+    [string]$DefaultLabel = "",
     [switch]$Required
   )
-  $suffix = if ($Default) { " [$Default]" } else { "" }
+  $suffix = if ($DefaultLabel) { " [$DefaultLabel]" } elseif ($Default) { " [$Default]" } else { "" }
   $value = (Read-Host "$Prompt$suffix").Trim()
   if ([string]::IsNullOrWhiteSpace($value)) {
     $value = $Default
@@ -211,6 +283,7 @@ function Get-ExpectedHash {
 function Download-VerifiedAsset {
   param([Parameter(Mandatory = $true)][string]$Name)
   $destination = Join-Path $TempRoot $Name
+  Write-Info "Downloading $Name"
   Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseRoot/$Name" -OutFile $destination
   $expected = Get-ExpectedHash -Name $Name
   $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
@@ -223,6 +296,15 @@ function Download-VerifiedAsset {
 $repoWasExplicit = $PSBoundParameters.ContainsKey("Repo")
 $releaseBaseUrlWasExplicit = $PSBoundParameters.ContainsKey("ReleaseBaseUrl")
 $versionWasExplicit = $PSBoundParameters.ContainsKey("Version")
+$grpcAdvertiseWasExplicit = $PSBoundParameters.ContainsKey("GrpcAdvertise")
+$dataRootWasExplicit = $PSBoundParameters.ContainsKey("DataRoot")
+$installRootWasExplicit = $PSBoundParameters.ContainsKey("InstallRoot")
+$httpListenWasExplicit = $PSBoundParameters.ContainsKey("HttpListen")
+$grpcListenWasExplicit = $PSBoundParameters.ContainsKey("GrpcListen")
+$metricsListenWasExplicit = $PSBoundParameters.ContainsKey("MetricsListen")
+$usernameWasExplicit = $PSBoundParameters.ContainsKey("Username")
+$passwordFileWasExplicit = $PSBoundParameters.ContainsKey("PasswordFile")
+$serviceNameWasExplicit = $PSBoundParameters.ContainsKey("ServiceName")
 if (-not $repoWasExplicit -and -not $releaseBaseUrlWasExplicit -and $script:embeddedReleaseBaseUrl) {
   $ReleaseBaseUrl = $script:embeddedReleaseBaseUrl
 }
@@ -231,15 +313,77 @@ if (-not $repoWasExplicit -and -not $versionWasExplicit -and $script:embeddedRel
 }
 
 Assert-Administrator
+
+if (-not $NonInteractive) {
+  $detectedAdvertise = Get-DefaultAdvertiseAddress
+  if (-not $grpcAdvertiseWasExplicit -or [string]::IsNullOrWhiteSpace($GrpcAdvertise)) {
+    if ($detectedAdvertise) {
+      $GrpcAdvertise = Read-InstallerValue -Prompt "Controller gRPC advertise address (required)" -Default $detectedAdvertise
+    } else {
+      $GrpcAdvertise = Read-InstallerValue -Prompt "Controller gRPC advertise address (required)" -Required
+    }
+  }
+  if (-not $repoWasExplicit) {
+    $Repo = Read-InstallerValue -Prompt "GitHub repository" -Default $Repo
+  }
+  if (-not $releaseBaseUrlWasExplicit) {
+    $defaultReleaseBase = "https://github.com/$Repo/releases/download"
+    $ReleaseBaseUrl = Read-InstallerValue -Prompt "Release base URL" -Default $defaultReleaseBase
+    if ($ReleaseBaseUrl -and $ReleaseBaseUrl -ne $defaultReleaseBase) {
+      $releaseBaseUrlWasExplicit = $true
+    }
+  }
+  if (-not $versionWasExplicit) {
+    if ($releaseBaseUrlWasExplicit) {
+      $Version = Read-InstallerValue -Prompt "Release version (required for custom mirror)" -Required
+      $Version = $Version.TrimStart('v')
+    } else {
+      $Version = Read-InstallerValue -Prompt "Release version" -DefaultLabel "empty for latest stable"
+    }
+  }
+  if (-not $dataRootWasExplicit) {
+    $DataRoot = Read-InstallerValue -Prompt "Controller data directory" -Default $DataRoot
+  }
+  if (-not $installRootWasExplicit) {
+    $InstallRoot = Read-InstallerValue -Prompt "Controller install directory" -Default $InstallRoot
+  }
+  if (-not $httpListenWasExplicit) {
+    $HttpListen = Read-InstallerValue -Prompt "HTTPS listen address" -Default $HttpListen
+  }
+  if (-not $grpcListenWasExplicit) {
+    $GrpcListen = Read-InstallerValue -Prompt "gRPC listen address" -Default $GrpcListen
+  }
+  if (-not $metricsListenWasExplicit) {
+    $MetricsListen = Read-InstallerValue -Prompt "Metrics listen address" -Default $MetricsListen
+  }
+  if (-not $usernameWasExplicit) {
+    $Username = Read-InstallerValue -Prompt "Initial Admin username" -Default $Username
+  }
+  if (-not $passwordFileWasExplicit) {
+    $PasswordFile = Read-InstallerValue -Prompt "Initial Admin password file" -DefaultLabel "empty to generate random password"
+  }
+  if (-not $serviceNameWasExplicit) {
+    $ServiceName = Read-InstallerValue -Prompt "Windows service name" -Default $ServiceName
+  }
+} elseif (-not $grpcAdvertiseWasExplicit -or [string]::IsNullOrWhiteSpace($GrpcAdvertise)) {
+  $detectedAdvertise = Get-DefaultAdvertiseAddress
+  if ($detectedAdvertise) {
+    $GrpcAdvertise = $detectedAdvertise
+  } else {
+    $GrpcAdvertise = "127.0.0.1:" + (($GrpcListen -split ':')[-1])
+    Write-Host "Could not detect a non-loopback IP; using loopback default: $GrpcAdvertise"
+  }
+  Write-Host "Using gRPC advertise address: $GrpcAdvertise"
+  Write-Host "  (override with -GrpcAdvertise if Nodes cannot reach this address)"
+}
+
 if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw "repo must be OWNER/REPO"
 }
-if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey("GrpcAdvertise")) {
-  $GrpcAdvertise = Read-InstallerValue -Prompt "Controller gRPC advertise address (reachable host:port)" -Required
+if ([string]::IsNullOrWhiteSpace($GrpcAdvertise)) {
+  throw "GrpcAdvertise must be a reachable host:port"
 }
-if ([string]::IsNullOrWhiteSpace($GrpcAdvertise) -or $GrpcAdvertise -match '\s') {
-  throw "GrpcAdvertise must be a reachable host:port without whitespace"
-}
+Assert-HostPort -Value $GrpcAdvertise -Label "Controller gRPC advertise address"
 if (-not [IO.Path]::IsPathRooted($DataRoot) -or -not [IO.Path]::IsPathRooted($InstallRoot)) {
   throw "DataRoot and InstallRoot must be absolute paths"
 }
@@ -253,10 +397,11 @@ if ($ReleaseBaseUrl -and $ReleaseBaseUrl -notmatch '^https://[^\s]+$') {
   throw "ReleaseBaseUrl must use HTTPS"
 }
 
+Write-Step "Resolving AsterFerry Controller installation"
 $Version = $Version.TrimStart('v')
 if ([string]::IsNullOrWhiteSpace($Version)) {
-  if ($ReleaseBaseUrl) {
-    if ($releaseBaseUrlWasExplicit -and -not $NonInteractive) {
+  if ($ReleaseBaseUrl -and $releaseBaseUrlWasExplicit) {
+    if (-not $NonInteractive) {
       $Version = Read-InstallerValue -Prompt "Release version" -Required
       $Version = $Version.TrimStart('v')
     } else {
@@ -268,6 +413,8 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
   }
 }
 Assert-ReleaseVersion -Value $Version
+Write-Info "Version $Version"
+Write-Info "gRPC advertise: $GrpcAdvertise"
 
 $TempRoot = Join-Path $env:TEMP ("asterferry-controller-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TempRoot | Out-Null
@@ -277,6 +424,7 @@ try {
   } else {
     $ReleaseRoot = "https://github.com/$Repo/releases/download/v$Version"
   }
+  Write-Step "Downloading and verifying Controller release"
   $script:SumsPath = Join-Path $TempRoot "SHA256SUMS"
   Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseRoot/SHA256SUMS" -OutFile $script:SumsPath
 
@@ -296,6 +444,7 @@ try {
     throw "release archive does not contain asterferry.exe"
   }
 
+  Write-Step "Configuring Controller"
   $configPath = Join-Path $DataRoot "controller.json"
   $existingConfig = Test-Path -LiteralPath $configPath -PathType Leaf -ErrorAction SilentlyContinue
   $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -341,6 +490,8 @@ try {
     throw "Controller configuration does not contain node_installers_dir"
   }
   $nodeInstallersDir = [string]$config.node_installers_dir
+  Write-Step "Installing Node installer assets"
+  Write-Info $nodeInstallersDir
   New-Item -ItemType Directory -Force -Path $nodeInstallersDir | Out-Null
   Grant-InstallerPathAccess -Path $nodeInstallersDir -Directory
   foreach ($assetName in $nodeAssetNames) {
@@ -357,6 +508,7 @@ try {
 
   Restore-ControllerDataSecurity
 
+  Write-Step "Registering and starting Controller service"
   $serviceCommand = '"{0}" controller run --config "{1}" --service-name "{2}" --service-mode windows-service' -f $binaryPath, $configPath, $ServiceName
   if ($existingService) {
     Invoke-Sc -Arguments @("config", $ServiceName, "binPath=", $serviceCommand, "start=", "auto")
@@ -380,6 +532,7 @@ try {
   Write-Host "AsterFerry Controller $Version installed and started"
   Write-Host "config: $configPath"
   Write-Host "service: $ServiceName"
+  Write-Host "log: $(Join-Path $env:ProgramData ('AsterFerry\logs\' + $ServiceName + '.log'))"
 } finally {
   Remove-InstallerAccess
   Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue

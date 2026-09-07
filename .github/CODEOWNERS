@@ -1,3 +1,4 @@
-# Every change needs an accountable maintainer review. Add a second named
-# maintainer before the v1.0.0 release and enforce this file in branch rules.
+# Every change needs an accountable maintainer review. A second named
+# maintainer is an explicit first-stable-release blocker; replace this comment with
+# the real handle and enforce this file in branch rules before tagging.
 * @eternallyzzz

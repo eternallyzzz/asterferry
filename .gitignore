@@ -7,6 +7,9 @@
 *.key
 *.crt
 *.pem
+# The updater's release verification key is public trust material, not a
+# credential. Keep this one reviewed key in the source distribution.
+!internal/update/release-public-key.pem
 *.token
 *.db
 *.db-*

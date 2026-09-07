@@ -94,6 +94,7 @@ jobs:
         run: |
           python3 scripts/check-source-layout.py
           python3 scripts/check-toolchain.py
+          python3 scripts/check-release-metadata.py
       - name: Check patch whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD
@@ -328,72 +329,21 @@ jobs:
           cache-dependency-path: web/dashboard/package-lock.json
       - name: Pin npm toolchain
         run: npm install --global npm@12.0.2 --registry=https://registry.npmjs.org
-      - name: Validate release tag
+      - name: Validate release tag and metadata
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
-            echo "release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N" >&2
-            exit 1
-          }
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
             echo "release tag must point at a commit reachable from main" >&2
             exit 1
           }
-          version="${GITHUB_REF_NAME#v}"
-          stable_version="${version%%-rc.*}"
-          python3 - "$version" "$stable_version" <<'PY'
-          import json
-          import re
-          import sys
-          from pathlib import Path
-
-          tag_version = sys.argv[1]
-          stable_version = sys.argv[2]
-          versions = {}
-
-          for path in (Path("api/openapi.yaml"), Path("internal/controller/openapi.yaml")):
-              text = path.read_text(encoding="utf-8")
-              match = re.search(r"(?m)^  version:\s*(\S+)\r?$", text)
-              if not match:
-                  raise SystemExit(f"{path} does not declare info.version")
-              versions[str(path)] = match.group(1)
-
-          versions["web/dashboard/package.json"] = json.loads(
-              Path("web/dashboard/package.json").read_text(encoding="utf-8")
-          )["version"]
-          versions["web/dashboard/package-lock.json"] = json.loads(
-              Path("web/dashboard/package-lock.json").read_text(encoding="utf-8")
-          )["packages"][""]["version"]
-
-          for chart in ("deploy/helm/asterferry-controller", "deploy/helm/asterferry-node"):
-              path = Path(chart) / "Chart.yaml"
-              text = path.read_text(encoding="utf-8")
-              chart_version = re.search(r"(?m)^version:\s*(\S+)\r?$", text)
-              app_version = re.search(r'(?m)^appVersion:\s*"?([^"\s]+)"?\r?$', text)
-              if not chart_version or not app_version:
-                  raise SystemExit(f"{path} is missing chart version metadata")
-              versions[f"{path} version"] = chart_version.group(1)
-              versions[f"{path} appVersion"] = app_version.group(1)
-
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          heading = rf"(?m)^## \[{re.escape(stable_version)}\] - (?:Unreleased|\d{{4}}-\d{{2}}-\d{{2}})\r?$"
-          if not re.search(heading, changelog):
-              raise SystemExit(f"CHANGELOG.md has no entry for {stable_version}")
-
-          mismatches = {path: value for path, value in versions.items() if value != stable_version}
-          if mismatches:
-              details = ", ".join(f"{path}={value}" for path, value in mismatches.items())
-              raise SystemExit(f"release version {stable_version} is inconsistent: {details}")
-          if len(set(versions.values())) != 1:
-              raise SystemExit(f"release version sources disagree: {versions}")
-          print(f"release tag {tag_version} is consistent with stable source version {stable_version}")
-          PY
+          python3 scripts/check-release-metadata.py --tag "$GITHUB_REF_NAME"
       - name: Verify generated sources and layout
         run: |
           python3 scripts/sync-openapi.py --check
           python3 scripts/check-source-layout.py
           python3 scripts/check-toolchain.py
+          bash -n scripts/check-release-public-key.sh
       - name: Verify dashboard assets
         run: |
           npm --prefix web/dashboard ci --audit=false --registry=https://registry.npmjs.org --replace-registry-host=always
@@ -516,6 +466,15 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Check out release verification key
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - name: Verify release verification key
+        env:
+          ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256: ${{ secrets.ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256 }}
+        shell: bash
+        run: bash scripts/check-release-public-key.sh
       - name: Download release build
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -537,6 +496,7 @@ jobs:
               artifacts.append({"name": name, "sha256": digest})
           version = os.environ["GITHUB_REF_NAME"][1:]
           manifest = {
+              "schema_version": 1,
               "version": version,
               "tag": os.environ["GITHUB_REF_NAME"],
               "commit": os.environ["GITHUB_SHA"],
@@ -554,6 +514,29 @@ jobs:
               json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
           )
           PY
+      - name: Install Cosign
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.7"
+          cache: false
+      - name: Sign release manifest
+        env:
+          ASTERFERRY_RELEASE_SIGNING_KEY: ${{ secrets.ASTERFERRY_RELEASE_SIGNING_KEY }}
+          ASTERFERRY_RELEASE_SIGNING_PASSWORD: ${{ secrets.ASTERFERRY_RELEASE_SIGNING_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ASTERFERRY_RELEASE_SIGNING_KEY:-}" || { echo "ASTERFERRY_RELEASE_SIGNING_KEY is required for tagged releases" >&2; exit 1; }
+          export GOBIN="$RUNNER_TEMP/asterferry-bin"
+          mkdir -p "$GOBIN"
+          export PATH="$GOBIN:$PATH"
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.3
+          key_path="$RUNNER_TEMP/asterferry-release-signing.key"
+          printf '%s' "$ASTERFERRY_RELEASE_SIGNING_KEY" > "$key_path"
+          export COSIGN_PASSWORD="${ASTERFERRY_RELEASE_SIGNING_PASSWORD:-}"
+          cosign sign-blob --yes --key "$key_path" --output-signature dist/release-manifest.json.sig dist/release-manifest.json
+          cosign verify-blob --key internal/update/release-public-key.pem --signature dist/release-manifest.json.sig dist/release-manifest.json
+          test -s dist/release-manifest.json.sig
       - name: Attest release files
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
@@ -566,6 +549,7 @@ jobs:
             dist/node-release.json
             dist/SHA256SUMS
             dist/release-manifest.json
+            dist/release-manifest.json.sig
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -585,6 +569,7 @@ jobs:
             dist/node-release.json
             dist/SHA256SUMS
             dist/release-manifest.json
+            dist/release-manifest.json.sig
           )
           for asset in "${release_assets[@]}"; do
             test -f "$asset" || { echo "release asset missing or not a file: $asset" >&2; exit 1; }

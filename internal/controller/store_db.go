@@ -138,6 +138,7 @@ func (s *ResourceRepository) initializeSchema(ctx context.Context) error {
 	}
 	statements := controllerSchemaStatements(dialect.schemaTypes())
 	statements = append(statements, runtimeSchemaStatements(dialect.schemaTypes())...)
+	statements = append(statements, updateSchemaStatements(dialect.schemaTypes())...)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -434,6 +435,8 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, dialect databaseDia
 		"runtime_events":          {"id", "event_id", "node_id", "connection_id", "event_type", "payload_json", "created_at"},
 		"runtime_traffic_rollups": {"bucket_start", "node_id", "gateway_id", "agent_id", "assignment_id", "service_id", "protocol", "bytes_in", "bytes_out", "opened", "closed", "rejected", "rate_limited", "active_max"},
 		"runtime_settings":        {"key", "value", "updated_at"},
+		"controller_update_state": {"singleton", "schema_version", "current_version", "channel", "deployment", "supported", "state", "latest_version", "latest_url", "published_at", "last_checked_at", "last_error", "target_version", "previous_version", "updated_at"},
+		"node_update_states":      {"node_id", "schema_version", "action_id", "current_version", "target_version", "state", "supported", "deployment", "reason", "last_error", "updated_at"},
 	}
 	for table, columns := range requiredColumns {
 		for _, column := range columns {
@@ -446,7 +449,7 @@ func validateRequiredTables(ctx context.Context, db *sql.DB, dialect databaseDia
 			}
 		}
 	}
-	for _, index := range append([]string{"idx_node_specs_kind", "idx_controller_leases_expiry", "idx_web_sessions_user", "idx_web_sessions_expiry", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_bindings_gateway", "idx_node_labels_value", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires"}, runtimeSchemaIndexes()...) {
+	for _, index := range append([]string{"idx_node_specs_kind", "idx_controller_leases_expiry", "idx_web_sessions_user", "idx_web_sessions_expiry", "idx_services_agent", "idx_assignments_gateway", "idx_assignments_agent", "idx_assignment_services_service", "idx_assignment_bindings_gateway", "idx_node_labels_value", "idx_assignment_acks_generation", "idx_audit_created", "idx_idempotency_created", "idx_node_bootstraps_expires", "idx_node_update_states_state"}, runtimeSchemaIndexes()...) {
 		var count int
 		if err := db.QueryRowContext(ctx, dialect.indexExistsQuery(), index).Scan(&count); err != nil {
 			return err
@@ -466,7 +469,7 @@ func currentSchemaTables() []string {
 		"services", "service_selector_labels", "assignments", "assignment_services", "assignment_bindings", "assignment_acks",
 		"desired_snapshots", "observed_states", "observed_sessions", "observed_listeners", "audit_events", "idempotency_keys",
 		"enrollment_tokens", "node_bootstraps",
-		"runtime_connections", "runtime_events", "runtime_traffic_rollups", "runtime_settings",
+		"runtime_connections", "runtime_events", "runtime_traffic_rollups", "runtime_settings", "controller_update_state", "node_update_states",
 	}
 }
 

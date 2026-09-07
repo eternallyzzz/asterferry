@@ -7,13 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	ReplacementResultSchemaVersion = 1
+	ReplacementStatePrepared       = "prepared"
+	ReplacementStateReplacing      = "replacing"
+	ReplacementStateWaiting        = "waiting"
+	ReplacementStateRecovering     = "recovering"
 )
 
 type ReplacementOptions struct {
@@ -32,14 +42,22 @@ type ReplacementOptions struct {
 	StatusPath  string
 	PIDFile     string
 	Timeout     time.Duration
+	// AfterReplace is a test-only crash-injection seam. Production callers
+	// leave it nil; when set it runs after the live executable has been
+	// replaced and before the helper records the waiting state.
+	AfterReplace func()
 }
 
 type ReplacementResult struct {
-	ActionID  string    `json:"action_id,omitempty"`
-	Version   string    `json:"version"`
-	State     string    `json:"state"`
-	Error     string    `json:"error,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	SchemaVersion int       `json:"schema_version,omitempty"`
+	ActionID      string    `json:"action_id,omitempty"`
+	Version       string    `json:"version"`
+	State         string    `json:"state"`
+	Error         string    `json:"error,omitempty"`
+	BinaryPath    string    `json:"binary_path,omitempty"`
+	StagedPath    string    `json:"staged_path,omitempty"`
+	BackupPath    string    `json:"backup_path,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // RunReplacementHelper waits for the daemon that launched it, replaces its
@@ -59,33 +77,38 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 	if options.TargetState == "" {
 		options.TargetState = "healthy"
 	}
+	writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStatePrepared, nil))
 	if err := WaitForProcessExit(ctx, options.ParentPID, time.Minute); err != nil {
-		writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "failed", Error: err.Error()})
+		writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err))
 		return err
 	}
+	writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStateReplacing, nil))
 	if err := replaceExecutable(options.BinaryPath, options.StagedPath, options.BackupPath); err != nil {
-		writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "failed", Error: err.Error()})
+		writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err))
 		if selfManagedMode(options.Mode) {
 			if _, startErr := startReplacement(options.BinaryPath, options.RestartArgs); startErr != nil {
 				err = errors.Join(err, fmt.Errorf("restart previous executable: %w", startErr))
-				writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "failed", Error: err.Error()})
+				writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err))
 			}
 		}
 		return err
 	}
-	writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "waiting"})
+	if options.AfterReplace != nil {
+		options.AfterReplace()
+	}
+	writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStateWaiting, nil))
 	if selfManagedMode(options.Mode) {
 		pid, err := startReplacement(options.BinaryPath, options.RestartArgs)
 		if err != nil {
 			if restoreErr := restoreExecutable(options.BinaryPath, options.BackupPath); restoreErr != nil {
 				err = errors.Join(err, fmt.Errorf("restore previous executable: %w", restoreErr))
 			}
-			writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "rolled_back", Error: err.Error()})
+			writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", err))
 			if oldPID, startErr := startReplacement(options.BinaryPath, options.RestartArgs); startErr == nil {
 				writePIDFile(options.PIDFile, oldPID)
 			} else {
 				err = errors.Join(err, fmt.Errorf("restart previous executable: %w", startErr))
-				writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "rolled_back", Error: err.Error()})
+				writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", err))
 			}
 			return err
 		}
@@ -102,7 +125,7 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 		if restoreErr := restoreExecutable(options.BinaryPath, options.BackupPath); restoreErr != nil {
 			healthErr = errors.Join(healthErr, fmt.Errorf("restore previous executable: %w", restoreErr))
 		}
-		writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: "rolled_back", Error: healthErr.Error()})
+		writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", healthErr))
 		if selfManagedMode(options.Mode) {
 			if pid, startErr := startReplacement(options.BinaryPath, options.RestartArgs); startErr == nil {
 				writePIDFile(options.PIDFile, pid)
@@ -110,8 +133,26 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 		}
 		return healthErr
 	}
-	writeReplacementResult(options.StatusPath, ReplacementResult{ActionID: options.ActionID, Version: options.Target, State: options.TargetState})
+	result := replacementResult(options, options.TargetState, nil)
+	writeReplacementResult(options.StatusPath, result)
+	CleanupReplacementArtifacts(result)
 	return nil
+}
+
+func replacementResult(options ReplacementOptions, state string, err error) ReplacementResult {
+	result := ReplacementResult{
+		SchemaVersion: ReplacementResultSchemaVersion,
+		ActionID:      options.ActionID,
+		Version:       options.Target,
+		State:         state,
+		BinaryPath:    options.BinaryPath,
+		StagedPath:    options.StagedPath,
+		BackupPath:    options.BackupPath,
+	}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	return result
 }
 
 func selfManagedMode(mode string) bool {
@@ -251,7 +292,21 @@ func WaitForHTTPSHealth(ctx context.Context, endpoint string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}, Timeout: 10 * time.Second} // local loopback probe; the downloaded binary is still SHA256 verified
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Path != "/readyz" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("health endpoint must be a loopback HTTPS /readyz URL without credentials, query or fragment")
+	}
+	host := strings.Trim(parsed.Hostname(), "[]")
+	if host != "localhost" {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return errors.New("health endpoint must resolve to a loopback address")
+		}
+	}
+	// This probe is intentionally limited to the local Controller/Node
+	// listener. It does not validate a remote certificate, and it never follows
+	// a redirect to turn the exception into a remote request.
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }} // #nosec G402 -- loopback-only readiness probe; release bytes are independently signature and SHA256 verified.
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -301,6 +356,9 @@ func writeReplacementResult(path string, result ReplacementResult) {
 		return
 	}
 	result.UpdatedAt = time.Now().UTC()
+	if result.SchemaVersion == 0 {
+		result.SchemaVersion = ReplacementResultSchemaVersion
+	}
 	data, err := json.Marshal(result)
 	if err != nil {
 		return
@@ -338,7 +396,36 @@ func ReadReplacementResult(path string) (ReplacementResult, error) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return ReplacementResult{}, err
 	}
+	if result.SchemaVersion == 0 {
+		result.SchemaVersion = ReplacementResultSchemaVersion
+	}
+	if result.SchemaVersion != ReplacementResultSchemaVersion {
+		return ReplacementResult{}, fmt.Errorf("replacement result schema version %d is unsupported", result.SchemaVersion)
+	}
 	return result, nil
+}
+
+// ReplacementNeedsRecovery identifies journal states that can be left behind
+// after the helper is killed between the rename and the new process becoming
+// healthy.
+func ReplacementNeedsRecovery(state string) bool {
+	switch state {
+	case ReplacementStatePrepared, ReplacementStateReplacing, ReplacementStateWaiting, ReplacementStateRecovering:
+		return true
+	default:
+		return false
+	}
+}
+
+// CleanupReplacementArtifacts removes only the staged and previous files
+// recorded by the local replacement journal. It deliberately never removes
+// BinaryPath, which may now be the live executable.
+func CleanupReplacementArtifacts(result ReplacementResult) {
+	for _, path := range []string{result.StagedPath, result.BackupPath} {
+		if strings.TrimSpace(path) != "" {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func ReplacementTimeoutSeconds(value time.Duration) string {

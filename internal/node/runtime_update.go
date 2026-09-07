@@ -27,17 +27,21 @@ const (
 	nodeUpdateStateRolledBack     = "rolled_back"
 	nodeUpdateStateManualRequired = "manual_required"
 	nodeUpdateStateWaiting        = "waiting"
+	nodeUpdateStateReplacing      = "replacing"
+	nodeUpdateStateRecovering     = "recovering"
 	nodeUpgradeCapability         = "node-upgrade-v1"
 )
 
 var ErrNodeUpdateRestart = errors.New("node update requested process restart")
 
 type nodeUpgradeRequest struct {
-	Version              string `json:"version"`
-	AssetName            string `json:"asset_name"`
-	AssetURL             string `json:"asset_url"`
-	SHA256               string `json:"sha256"`
-	HealthTimeoutSeconds int    `json:"health_timeout_seconds,omitempty"`
+	Version                     string `json:"version"`
+	AssetName                   string `json:"asset_name"`
+	AssetURL                    string `json:"asset_url"`
+	SHA256                      string `json:"sha256"`
+	ReleaseManifestURL          string `json:"release_manifest_url"`
+	ReleaseManifestSignatureURL string `json:"release_manifest_signature_url"`
+	HealthTimeoutSeconds        int    `json:"health_timeout_seconds,omitempty"`
 }
 
 func (r *Runtime) startNodeUpgrade(ctx context.Context, action *v1.Action, send func(*v1.NodeMessage) error) error {
@@ -83,6 +87,20 @@ func (r *Runtime) startNodeUpgrade(ctx context.Context, action *v1.Action, send 
 	if err := ensureNodeWritableDirectory(filepath.Dir(activeBinary)); err != nil {
 		return r.nodeUpgradeFailure(send, action.GetId(), fmt.Sprintf("active Node binary is not service-writable; run the new installer once: %v", err))
 	}
+	client := r.updateHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: update.DownloadTimeout}
+	}
+	if strings.TrimSpace(request.ReleaseManifestURL) == "" || strings.TrimSpace(request.ReleaseManifestSignatureURL) == "" {
+		return r.nodeUpgradeFailure(send, action.GetId(), "signed release manifest is required for Node self-upgrade")
+	}
+	manifestCtx, manifestCancel := context.WithTimeout(ctx, update.DownloadTimeout)
+	manifestClient := update.Client{HTTPClient: client, UserAgent: "asterferry-node-updater", ManifestVerifier: r.updateManifestVerifier}
+	_, err = manifestClient.VerifyReleaseManifest(manifestCtx, request.ReleaseManifestURL, request.ReleaseManifestSignatureURL, request.Version, request.AssetName, request.SHA256)
+	manifestCancel()
+	if err != nil {
+		return r.nodeUpgradeFailure(send, action.GetId(), fmt.Sprintf("verify signed Node release manifest: %v", err))
+	}
 	if err := sendNodeUpgradeEvent(send, action.GetId(), nodeUpdateStateApplying, request.Version, current, r.runtimeOpts.ServiceMode, ""); err != nil {
 		return err
 	}
@@ -96,10 +114,6 @@ func (r *Runtime) startNodeUpgrade(ctx context.Context, action *v1.Action, send 
 	}
 	archivePath := filepath.Join(workDir, request.AssetName)
 	downloadCtx, cancel := context.WithTimeout(ctx, update.DownloadTimeout)
-	client := r.updateHTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: update.DownloadTimeout}
-	}
 	err = update.Download(downloadCtx, client, update.Asset{Name: request.AssetName, URL: request.AssetURL}, archivePath, request.SHA256)
 	cancel()
 	if err != nil {
@@ -198,7 +212,7 @@ func (r *Runtime) sendPendingNodeUpdate(send func(*v1.NodeMessage) error) error 
 		return nil
 	}
 	current := buildinfo.Current().Version
-	if result.State == nodeUpdateStateWaiting {
+	if result.State == update.ReplacementStatePrepared || result.State == nodeUpdateStateWaiting || result.State == nodeUpdateStateReplacing || result.State == nodeUpdateStateRecovering {
 		if result.Version == "" || result.Version != current {
 			return nil
 		}
@@ -216,6 +230,7 @@ func (r *Runtime) sendPendingNodeUpdate(send func(*v1.NodeMessage) error) error 
 	if err := sendNodeUpgradeEvent(send, result.ActionID, state, result.Version, current, r.runtimeOpts.ServiceMode, result.Error); err != nil {
 		return err
 	}
+	update.CleanupReplacementArtifacts(result)
 	r.updateReportSent = true
 	return nil
 }

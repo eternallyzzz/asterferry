@@ -11,7 +11,7 @@ Usage: install-node.sh --node-id ID --controller HOST:PORT --bootstrap-url HTTPS
 Install the AsterFerry Node release selected by the Controller and register it as a
 systemd service. WSL without systemd uses a managed background process instead.
 
-Required:
+Required (or run interactively and leave them out to be prompted):
   --node-id ID                Immutable Node ID
   --controller HOST:PORT      Controller mTLS gRPC address
   --bootstrap-url HTTPS_URL   Controller HTTPS bootstrap address
@@ -30,6 +30,26 @@ USAGE
 die() {
   echo "install-node: $*" >&2
   exit 1
+}
+
+step() {
+  echo "==> $*"
+}
+
+info() {
+  echo "    $*"
+}
+
+validate_host_port() {
+  local value="$1" label="$2" host port
+  [[ "$value" != *[[:space:]]* ]] || die "$label must not contain whitespace"
+  [[ "$value" =~ ^([^:]+|\[[^]]+\]):[0-9]+$ ]] || die "$label must be host:port (for example controller.example.com:9443)"
+  host="${value%:*}"
+  port="${value##*:}"
+  host="${host#\[}"
+  host="${host%\]}"
+  [[ -n "$host" && "$host" != "0.0.0.0" && "$host" != "::" ]] || die "$label must identify a reachable host, not an unspecified address"
+  (( port >= 1 && port <= 65535 )) || die "$label port must be between 1 and 65535"
 }
 
 sanitize_proxy_environment() {
@@ -90,10 +110,30 @@ while (($# > 0)); do
   esac
 done
 
+if [[ -t 0 ]]; then
+  if [[ -z "$NODE_ID" ]]; then
+    read -r -p "Node ID: " NODE_ID || true
+  fi
+  if [[ -z "$CONTROLLER" ]]; then
+    read -r -p "Controller address (host:port): " CONTROLLER || true
+  fi
+  if [[ -z "$BOOTSTRAP_URL" ]]; then
+    read -r -p "Controller HTTPS bootstrap URL: " BOOTSTRAP_URL || true
+  fi
+  if [[ -z "$TOKEN" ]]; then
+    read -r -s -p "Enrollment token: " TOKEN || true
+    echo
+  fi
+  if [[ -z "$CA_PEM_B64" ]]; then
+    read -r -s -p "Controller CA certificate (base64): " CA_PEM_B64 || true
+    echo
+  fi
+fi
 [[ -n "$NODE_ID" && -n "$CONTROLLER" && -n "$BOOTSTRAP_URL" && -n "$TOKEN" && -n "$CA_PEM_B64" ]] || {
   echo "--node-id, --controller, --bootstrap-url, --token and --ca-pem-b64 are required" >&2
   usage 2
 }
+validate_host_port "$CONTROLLER" "controller address"
 [[ "$BOOTSTRAP_URL" == https://* && "$BOOTSTRAP_URL" != *[[:space:]]* ]] || die "bootstrap URL must be an absolute HTTPS URL"
 BOOTSTRAP_URL="${BOOTSTRAP_URL%/}"
 BOOTSTRAP_HOST="$(url_host "$BOOTSTRAP_URL")"
@@ -103,7 +143,7 @@ BOOTSTRAP_HOST="$(url_host "$BOOTSTRAP_URL")"
 
 sanitize_proxy_environment
 
-[[ "$(id -u)" -eq 0 ]] || die "run this installer as root (the generated command uses sudo)"
+[[ "$(id -u)" -eq 0 ]] || die "run this installer as root, for example: sudo bash $0"
 
 is_wsl=0
 if grep -qi microsoft /proc/version 2>/dev/null || [[ -n "${WSL_INTEROP:-}" ]] || [[ -e /run/WSL ]]; then
@@ -133,6 +173,7 @@ case "$(uname -m)" in
   *) die "unsupported Linux architecture: $(uname -m)" ;;
 esac
 
+step "Preparing Node data directory"
 if ! id asterferry >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin asterferry
 fi
@@ -185,6 +226,7 @@ if [[ "$existing_ca_differs" -eq 1 && "$has_existing_identity" -eq 1 && "$FORCE"
 fi
 
 release_metadata="$tmp_dir/node-release.json"
+step "Requesting Node release from Controller"
 curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.3 \
   --retry 5 --retry-delay 1 --connect-timeout 10 --max-time 300 \
   --noproxy "$BOOTSTRAP_HOST" \
@@ -204,6 +246,7 @@ ARCHIVE="$(awk -F'"' -v key="$artifact_key" '$2 == key { print $4; exit }' "$rel
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || die "Controller returned an invalid Node release version"
 [[ "$RELEASE_BASE_URL" == https://* && "$RELEASE_BASE_URL" != *[[:space:]]* ]] || die "Controller returned an invalid Node release URL"
 [[ "$ARCHIVE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "Controller did not provide a valid Linux Node artifact"
+info "Node release ${VERSION} (${NODE_ARCH})"
 RELEASE_HOST="$(url_host "$RELEASE_BASE_URL")"
 [[ -n "$RELEASE_HOST" ]] || die "Controller returned a Node release URL without a host"
 release_proxy_args=()
@@ -217,6 +260,7 @@ fi
 
 release_base="${RELEASE_BASE_URL%/}/v${VERSION}"
 archive_path="$tmp_dir/$ARCHIVE"
+step "Downloading and verifying Node ${NODE_ARCH} release"
 curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.3 \
   --retry 5 --retry-delay 1 --connect-timeout 10 --max-time 300 \
   "${release_proxy_args[@]}" \
@@ -500,6 +544,7 @@ chmod 0644 "$ca_path"
 install -o asterferry -g asterferry -m 0755 "$tmp_dir/asterferry" "$binary_path"
 
 if [[ "$FORCE" -eq 1 || ! -f "$bootstrap_path" ]]; then
+  step "Enrolling Node with Controller"
   runuser -u asterferry -- "$binary_path" node enroll \
     --controller "$CONTROLLER" \
     --token "$TOKEN" \
@@ -513,6 +558,7 @@ fi
 chown asterferry:asterferry "$bootstrap_path" "$cache_path" 2>/dev/null || true
 chmod 0600 "$bootstrap_path" "$cache_path" 2>/dev/null || true
 
+step "Registering and starting Node service"
 if [[ "$service_mode" == "systemd" ]]; then
 remove_wsl_boot_hook
 cat > "$unit_path" <<UNIT
@@ -559,6 +605,8 @@ else
 fi
 if [[ "$service_mode" == "systemd" ]]; then
   echo "service: ${SERVICE_NAME}.service"
+  echo "status: systemctl status ${SERVICE_NAME}.service"
+  echo "logs:   journalctl -u ${SERVICE_NAME}.service -f"
 else
   echo "mode: WSL managed background process (auto-start on WSL launch)"
   echo "status: $wsl_launcher_path status $DATA_DIR"

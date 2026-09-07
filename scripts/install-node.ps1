@@ -1,10 +1,10 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$NodeId,
-  [Parameter(Mandatory = $true)][string]$Controller,
-  [Parameter(Mandatory = $true)][string]$BootstrapUrl,
-  [Parameter(Mandatory = $true)][string]$Token,
-  [Parameter(Mandatory = $true)][string]$CAPemB64,
+  [Parameter(Mandatory = $true, HelpMessage = "Immutable Node ID")][string]$NodeId,
+  [Parameter(Mandatory = $true, HelpMessage = "Controller mTLS gRPC address (host:port)")][string]$Controller,
+  [Parameter(Mandatory = $true, HelpMessage = "Controller HTTPS bootstrap URL")][string]$BootstrapUrl,
+  [Parameter(Mandatory = $true, HelpMessage = "One-time enrollment token")][string]$Token,
+  [Parameter(Mandatory = $true, HelpMessage = "Controller CA certificate encoded as base64")][string]$CAPemB64,
   [string]$DataRoot = (Join-Path $env:ProgramData "AsterFerry"),
   [string]$InstallRoot = (Join-Path $env:ProgramFiles "AsterFerry"),
   [string]$ServiceName = "AsterFerry-Node",
@@ -12,6 +12,39 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Write-Step {
+  param([Parameter(Mandatory = $true)][string]$Message)
+  Write-Host "==> $Message"
+}
+
+function Write-Info {
+  param([Parameter(Mandatory = $true)][string]$Message)
+  Write-Host "    $Message"
+}
+
+function Assert-HostPort {
+  param(
+    [Parameter(Mandatory = $true)][string]$Value,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  if ($Value -match '\s') {
+    throw "$Label must not contain whitespace"
+  }
+  if ($Value -notmatch '^([^:]+|\[[^\]]+\]):\d+$') {
+    throw "$Label must be host:port (for example controller.example.com:9443)"
+  }
+  if ($Value -match '^(?<host>.+):(?<port>\d+)$') {
+    $hostPart = $Matches['host'] -replace '^\[', '' -replace '\]$', ''
+    $port = [int]$Matches['port']
+    if ($hostPart -eq '' -or $hostPart -eq '0.0.0.0' -or $hostPart -eq '::') {
+      throw "$Label must identify a reachable host, not an unspecified address"
+    }
+    if ($port -lt 1 -or $port -gt 65535) {
+      throw "$Label port must be between 1 and 65535"
+    }
+  }
+}
 
 function Invoke-Sc {
   param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -106,8 +139,11 @@ function Test-DirectHost {
 }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw "run this installer from an elevated PowerShell window"
+  throw "run this installer from an elevated PowerShell window (right-click PowerShell and choose Run as administrator, or use: sudo pwsh -File $PSCommandPath)"
 }
+Write-Step "Starting AsterFerry Node installer"
+Write-Info "Node ID: $NodeId"
+Assert-HostPort -Value $Controller -Label "Controller address"
 if ($BootstrapUrl -notmatch '^https://[^\s]+$') { throw "bootstrap URL must use HTTPS" }
 $bootstrapUri = [Uri]$BootstrapUrl
 $bootstrapHost = $bootstrapUri.DnsSafeHost
@@ -151,6 +187,7 @@ try {
   $caBytes = [Convert]::FromBase64String($CAPemB64)
   [IO.File]::WriteAllBytes($temporaryCaPath, $caBytes)
 
+  Write-Step "Requesting Node release from Controller"
   $bootstrapEndpoint = $BootstrapUrl.TrimEnd("/") + "/bootstrap/node/release"
   Invoke-Curl -Description "downloading node release metadata" -Arguments @(
     "--fail", "--silent", "--show-error", "--location", "--tlsv1.3",
@@ -178,8 +215,10 @@ try {
   }
   $archive = Get-ReleaseArtifact -Metadata $metadata -Key ("windows/" + $arch)
   if ($archive -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Controller returned an unsafe node release artifact name" }
+  Write-Info "Node release $version ($arch)"
 
   $releaseUrl = $releaseBaseUrl.TrimEnd("/") + "/v" + $version
+  Write-Step "Downloading and verifying AsterFerry Node release"
   Invoke-Curl -Description "downloading AsterFerry node release" -Arguments (@(
     "--fail", "--silent", "--show-error", "--location", "--tlsv1.3"
   ) + $releaseProxyArguments + $releaseTLSArguments + @(
@@ -227,7 +266,8 @@ try {
   }
   if ($existing -and $existing.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force }
   if ($Force -or $replaceOrphanedCA) {
-    $recoveryRoot = Join-Path $stateRoot (Join-Path "recovery" (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss"))
+    $recoveryTimestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
+    $recoveryRoot = Join-Path $stateRoot (Join-Path "recovery" $recoveryTimestamp)
     New-Item -ItemType Directory -Force -Path $recoveryRoot | Out-Null
     foreach ($statePath in @($caPath, $bootstrapPath, $cachePath, $cacheKeyPath, $decommissionMarkerPath)) {
       if (Test-Path -LiteralPath $statePath) {
@@ -249,6 +289,7 @@ try {
   Copy-Item -LiteralPath $extractedBinary -Destination $binaryPath -Force
   Copy-Item -LiteralPath $extractedBinary -Destination $installerBinaryPath -Force
   if (-not (Test-Path -LiteralPath $bootstrapPath) -or $Force) {
+    Write-Step "Enrolling Node with Controller"
     & $binaryPath node enroll --controller $Controller --token $Token --node-id $NodeId --ca $caPath --output $bootstrapPath --cache $cachePath
     if ($LASTEXITCODE -ne 0) { throw "AsterFerry enrollment failed with exit code $LASTEXITCODE" }
   } else {
@@ -271,6 +312,7 @@ try {
   # the LocalService atomic rename on an upgrade or re-install.
   Grant-LocalServiceStateAccess -Path $stateRoot
 
+  Write-Step "Registering and starting Node service"
   $binPath = '"{0}" node run --bootstrap "{1}" --service-name "{2}" --service-mode windows-service' -f $binaryPath, $bootstrapPath, $serviceName
   if ($existing) {
     Invoke-Sc -Arguments @("config", $serviceName, "binPath=", $binPath, "start=", "auto", "obj=", "NT AUTHORITY\LocalService")
@@ -295,6 +337,8 @@ try {
   } else {
     Write-Host "AsterFerry $displayName $NodeId $version installed and started"
   }
+  Write-Host "service: $serviceName"
+  Write-Host "log: $(Join-Path $env:ProgramData ('AsterFerry\logs\' + $serviceName + '.log'))"
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -10,7 +10,7 @@ import (
 )
 
 // agentGatewayBindingStorageKey is kept in the existing selector key/value
-// table so the exact Gateway binding can be added without changing the v13
+// table so the exact Gateway binding can be added without changing the current
 // database layout. It is never exposed as a user selector label.
 const agentGatewayBindingStorageKey = "__asterferry_gateway_id"
 

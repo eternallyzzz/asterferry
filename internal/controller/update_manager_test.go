@@ -55,7 +55,10 @@ func TestApplyControllerStagesReleaseAndRequestsRestart(t *testing.T) {
 	manager := NewUpdateManager(config, repositories.Resources)
 	manager.client.HTTPClient = releaseServer.Client()
 	manager.latest = &update.Release{
-		Version: version,
+		Version:              version,
+		ManifestURL:          releaseServer.URL + "/manifest",
+		ManifestSignatureURL: releaseServer.URL + "/signature",
+		ManifestVerified:     true,
 		Assets: map[string]update.Asset{
 			assetName: {Name: assetName, URL: releaseServer.URL + "/controller"},
 		},
@@ -169,6 +172,70 @@ func TestControllerAssetAndHealthURL(t *testing.T) {
 	}
 	if _, err := controllerHealthURL(""); err == nil {
 		t.Fatal("empty Controller HTTPS listen address was accepted")
+	}
+	for _, listen := range []string{"controller.example:8443", "192.0.2.10:8443", "localhost:8443"} {
+		if _, err := controllerHealthURL(listen); err == nil {
+			t.Fatalf("non-loopback Controller health address %q was accepted", listen)
+		}
+	}
+}
+
+func TestPendingControllerReplacementRecoversAfterHelperInterruption(t *testing.T) {
+	useBootstrapTestBuildVersion(t, "1.1.0")
+	root := t.TempDir()
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/readyz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ready.Close()
+	config := DefaultConfig(root)
+	config.HTTPListen = ready.Listener.Addr().String()
+	config.ServiceMode = "systemd"
+	repositories, err := openTestRepositories(filepath.Join(root, "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repositories.Close()
+	manager := NewUpdateManager(config, repositories.Resources)
+	statusPath := manager.controllerUpdateStatusPath()
+	stagedPath := filepath.Join(root, "updates", "staged")
+	backupPath := filepath.Join(root, "updates", "previous")
+	if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagedPath, []byte("staged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, []byte("previous"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	update.WriteReplacementResult(statusPath, update.ReplacementResult{
+		Version:    "1.1.0",
+		State:      update.ReplacementStateWaiting,
+		BinaryPath: filepath.Join(root, "asterferry"),
+		StagedPath: stagedPath,
+		BackupPath: backupPath,
+	})
+	manager.recoverPendingReplacement(context.Background())
+	result, err := update.ReadReplacementResult(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != UpdateStateUpToDate {
+		t.Fatalf("recovered replacement result = %#v", result)
+	}
+	if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("previous binary was not cleaned after recovery: %v", err)
+	}
+	persisted, err := repositories.Resources.GetControllerUpdateState(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != UpdateStateUpToDate || persisted.TargetVersion != "1.1.0" {
+		t.Fatalf("persisted recovery state = %#v", persisted)
 	}
 }
 

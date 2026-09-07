@@ -1,6 +1,6 @@
-# v1.0.0 support matrix
+# Support matrix
 
-The v1.0.0 release is a self-hosted Controller plus generic Node deployment for
+The current release is a self-hosted Controller plus generic Node deployment for
 personal and small-team private networks. SQLite is single-replica; PostgreSQL
 also supports an active/standby pair with external traffic routing.
 
@@ -13,7 +13,7 @@ also supports an active/standby pair with external traffic routing.
 | Controller database | SQLite (default) and PostgreSQL (production-scale) | SQLite test suite and PostgreSQL 16 CI service |
 | Controller availability | One SQLite replica, or exactly two PostgreSQL active/standby replicas with a shared identity/config Secret and external load balancer/Service | Lease/fencing integration, readiness gate, Node reconnect and failover smoke |
 | GeoIP | Optional external MaxMind-compatible file | Read-only mount/path, freshness check and explicit fallback tests |
-| Native self-upgrade | Controller/Node on Windows service, Linux systemd or WSL managed process; amd64 and Linux arm64 Node artifacts | Stable-release discovery, SHA256SUMS verification, readiness rollback and one-Node dispatch tests |
+| Native self-upgrade | Controller/Node on Windows service, Linux systemd or WSL managed process; amd64 and Linux arm64 Node artifacts | Stable-release discovery, Cosign manifest + SHA256SUMS verification, readiness rollback/recovery and one-Node dispatch tests |
 | Container/Helm upgrade | Operator-built image and source-chart rollout by the deployment platform; in-container binary replacement is unsupported | Update API reports rollout-required status; deployment manifests use explicit container mode and image repository |
 
 The exact Go, Node.js and npm release-build pins live in `.toolchain.json` and
@@ -23,7 +23,7 @@ The Dashboard is also tested in CI against the pinned Node.js 22 compatibility
 lane. Dependency upgrades are frozen during the RC soak and are evaluated in a
 separate change.
 
-All Controller and Node binaries in one deployment must use the same v1.x
+All Controller and Node binaries in one deployment must use the same current
 release line. Mixed releases are not a supported upgrade strategy when the
 wire or database contract changes. Nodes installed before the self-upgrade
 capability need one manual installer upgrade before Controller-managed updates

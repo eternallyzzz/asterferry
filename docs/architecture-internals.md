@@ -18,6 +18,31 @@ snapshots, observed state, auth, enrollment, audit, and the low-frequency
 their retention cleanup. The two repositories deliberately share a pool but do
 not call each other's business methods.
 
+## Signed update lifecycle
+
+`internal/update` treats `release-manifest.json` as the signed release root.
+The embedded Cosign public key verifies the detached signature, the manifest
+is checked against the selected stable version and safe asset names, and every
+requested archive digest must match both the manifest and `SHA256SUMS`.
+Controller verifies the release before staging its own archive. Its Node
+action includes the manifest and signature URLs; the Node verifies that same
+manifest and the requested asset digest before downloading. This preserves a
+single trust decision across the Controller-to-Node handoff.
+
+Replacement progress is a local journal rather than database business state:
+`prepared`, `replacing`, `waiting`, `recovering`, and a terminal state record
+the action, target version, live binary, staged binary, and previous binary
+paths. Controller readiness recovery and Node startup reporting consume the
+journal. Terminal success removes staged/previous artifacts only after the
+terminal record is written; an interrupted middle state is recovered on
+startup when the running version and local readiness agree, otherwise it is
+left as `manual_required` with the previous binary path intact.
+
+Update coordination state is stored in the v14 relational tables
+`controller_update_state` and `node_update_states`. The latter has an index on
+`(state, updated_at, node_id)`, so finding the one applying Node is a bounded
+query rather than a JSON scan of `runtime_settings`.
+
 The scheduler consumes `SchedulingRepository`, and the current candidate path
 uses bounded set-based loads for Gateway specs, assignments, and observed state.
 It must not grow a per-candidate SQL lookup loop. Keep the pure `Schedule`
