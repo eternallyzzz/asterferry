@@ -24,8 +24,8 @@ describe("dashboard session", () => {
 
   it("fails a stalled Controller request within the client timeout", async () => {
     vi.useFakeTimers();
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((_input: RequestInfo, init?: RequestInit) => new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: Request) => new Promise((_resolve, reject) => {
+      input.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     })));
     const pending = currentUser();
     const assertion = expect(pending).rejects.toMatchObject({ status: 0, code: "request_timeout" });

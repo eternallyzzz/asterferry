@@ -10,9 +10,17 @@ minor and patch updates are grouped into a monthly review. Major updates are
 manual changes and require compatibility, benchmark and deployment evidence.
 
 The production binary does not require Node.js. Node.js and npm are build-time
-dependencies only. The pinned release toolchain and the separately tested
-Node.js 22 compatibility lane are both recorded in `.toolchain.json`; neither
-lane is allowed to silently float to the newest release.
+dependencies only. Release artifacts use the exact Go 1.26.7, Node.js 24 and
+npm 12 pins recorded in `.toolchain.json`. `go.mod` deliberately declares the
+Go 1.26.0 compatibility floor, and CI tests that floor in a separate lane;
+release and container jobs remain on the exact release pin. The Dashboard is
+likewise tested on the recorded Node.js 22/npm 11 compatibility lane. None of
+these lanes is allowed to silently float to the newest release.
+
+The current `quic-go`, gRPC, Vite and TypeScript versions remain explicit
+release pins. They are not downgraded merely to widen an environment range:
+the compatibility lane proves the supported compiler/runtime floor, while a
+dependency change requires its own API, benchmark and deployment evidence.
 
 The Dashboard lockfile may use an npm `overrides` entry when a transitive
 dependency needs a security fix before its parent releases a new range. The

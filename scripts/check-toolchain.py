@@ -18,6 +18,7 @@ def main() -> int:
     npm = release["npm"]
     postgres = release["postgres"]
     compatibility = toolchain["compatibility"]
+    compatibility_go = compatibility["go"]
     compatibility_node = compatibility["node"]
     compatibility_npm = compatibility["npm"]
 
@@ -28,7 +29,7 @@ def main() -> int:
         "workflow": (root / ".github/workflows/container.yml").read_text(encoding="utf-8"),
     }
     expected = {
-        "go.mod": [f"go {go}"],
+        "go.mod": [f"go {compatibility_go}"],
         "package.json": [
             f'"node": ">={compatibility_node.split(".")[0]} <{int(node.split(".")[0]) + 1}"',
             f'"npm": ">={int(compatibility_npm.split(".")[0])} <{int(npm.split(".")[0]) + 1}"',
@@ -47,7 +48,7 @@ def main() -> int:
     workflow_values = {
         "go-version": (
             re.findall(r"(?m)^\s*go-version:\s*[\"']?([^\"'\s]+)", checks["workflow"]),
-            {go},
+            {go, compatibility_go},
         ),
         "node-version": (
             re.findall(r"(?m)^\s*node-version:\s*[\"']?([^\"'\s]+)", checks["workflow"]),
@@ -66,8 +67,8 @@ def main() -> int:
         print("\n".join(missing), file=sys.stderr)
         return 1
     print(
-        f"Toolchain pin check passed (Go {go}, Node {node}, npm {npm}; "
-        f"compatibility Node {compatibility_node}, npm {compatibility_npm})."
+        f"Toolchain pin check passed (release Go {go}, Node {node}, npm {npm}; "
+        f"compatibility Go {compatibility_go}, Node {compatibility_node}, npm {compatibility_npm})."
     )
     return 0
 

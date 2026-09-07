@@ -11,7 +11,8 @@ function initialTheme(): Theme {
   return "light";
 }
 
-// 模块级单例：主题全局唯一，立即应用以避免首屏闪烁。
+// Module singleton: the theme is global and applied immediately to avoid a
+// first-paint flash.
 const theme = ref<Theme>(initialTheme());
 
 watch(

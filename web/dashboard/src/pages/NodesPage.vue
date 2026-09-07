@@ -63,7 +63,8 @@ async function load() {
     const [result, pending] = await Promise.all([listNodes(), listNodeInstallations()]);
     nodes.value = result.items;
     pendingInstallations.value = pending.items;
-    // 抽屉打开时同步节点最新状态（证书、启用位等会随对账变化）。
+    // Refresh the Node when the drawer opens because reconciliation can change
+    // its certificate and enabled state.
     if (drawerNode.value) {
       const fresh = result.items.find((node) => node.id === drawerNode.value?.id);
       if (fresh) {

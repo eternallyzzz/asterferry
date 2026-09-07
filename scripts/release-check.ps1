@@ -97,6 +97,8 @@ $null = New-Item -ItemType Directory -Force -Path $output
 Remove-FrontendScratch
 
 Invoke-Checked "OpenAPI generated copy" "python" @("scripts/sync-openapi.py", "--check")
+Invoke-Checked "Dashboard generated API client" "npm" @("--prefix", (Join-Path $root "web/dashboard"), "run", "check:api")
+Invoke-Checked "Source language check" "python" @((Join-Path $root "scripts/check-source-language.py"))
 Invoke-Checked "Source layout check" "python" @((Join-Path $root "scripts/check-source-layout.py"))
 Invoke-Checked "Tracked-file secret scan" "python" @((Join-Path $root "scripts/secret-scan.py"))
 if (Test-Path -LiteralPath (Join-Path $root "internal/dataplane/cn.mmdb")) {

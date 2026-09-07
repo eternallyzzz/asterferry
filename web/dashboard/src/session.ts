@@ -4,7 +4,8 @@ import { currentUser, login as controllerLogin, logout as controllerLogout, type
 const controllerUser = ref<ControllerUser | null>(null);
 const controllerError = ref("");
 
-// 权限点自原 ControllerShell 平移：viewer 只读、operator 管业务资源、admin 管身份。
+// These permissions mirror the ControllerShell: viewers read, operators
+// manage business resources and admins manage identities.
 const canOperate = computed(() => controllerUser.value?.role === "operator" || controllerUser.value?.role === "admin");
 const canAdmin = computed(() => controllerUser.value?.role === "admin");
 

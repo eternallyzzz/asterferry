@@ -1,4 +1,4 @@
-// 从原 ControllerShell 提取的纯展示/解析工具，供各页面复用。
+// Shared presentation and parsing helpers extracted from the original shell.
 import { ControllerAPIError } from "../controller-api";
 
 export function formatTime(value: string | undefined | null): string {
@@ -79,7 +79,8 @@ export function parseLabels(value: string): Record<string, string> {
   return labels;
 }
 
-// 逗号/换行分隔的文本与字符串数组互转（egress 端口段、CIDR、route domains 等）。
+// Convert comma/newline-delimited text to and from string arrays (for example,
+// egress port ranges, CIDRs and route domains).
 export function joinList(value: string[] | undefined | null): string {
   return (value ?? []).join(", ");
 }

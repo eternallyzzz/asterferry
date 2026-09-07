@@ -17,7 +17,9 @@ also supports an active/standby pair with external traffic routing.
 | Container/Helm upgrade | Operator-built image and source-chart rollout by the deployment platform; in-container binary replacement is unsupported | Update API reports rollout-required status; deployment manifests use explicit container mode and image repository |
 
 The exact Go, Node.js and npm release-build pins live in `.toolchain.json` and
-are checked against CI, Docker and release scripts. Node.js is a build-only
+are checked against CI, Docker and release scripts. `go.mod` declares the
+recorded Go compatibility floor, which is tested in a separate CI lane; it is
+not a replacement for the exact release build pin. Node.js is a build-only
 dependency; production Controller and Node processes do not need Node.js.
 The Dashboard is also tested in CI against the pinned Node.js 22 compatibility
 lane. Dependency upgrades are frozen during the RC soak and are evaluated in a

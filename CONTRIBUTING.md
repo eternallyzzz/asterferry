@@ -36,7 +36,29 @@ and embedded-asset sources are excluded by the layout check, but new generated
 exceptions must be documented in `scripts/check-source-layout.py`.
 
 API, wire and database changes must update the canonical OpenAPI or protocol
-documentation and state whether the v2.x compatibility contract remains
-intact. The canonical OpenAPI document is
+documentation and state whether the current release-line compatibility
+contract remains intact. The canonical OpenAPI document is
 `internal/controller/openapi.yaml`; run `python scripts/sync-openapi.py` after
 editing it. `api/openapi.yaml` is generated and must not be edited directly.
+The Dashboard client is generated from that same document. Run
+`npm --prefix web/dashboard run generate:api` after an API change and commit
+`web/dashboard/src/generated/controller-api.d.ts`; CI runs `npm run check:api`
+to reject generated-client drift. Request headers, timeout handling and error
+mapping belong in the small handwritten facade in `controller-api.ts`, not in
+duplicated per-endpoint type declarations.
+
+Source comments and maintainer-facing documentation use English as the
+canonical language. Chinese is kept for user-visible Dashboard text and for
+the explicitly localized `docs/*zh-CN.md` operations guide. New comments in
+source files should therefore be English; do not translate product labels or
+operator-facing Chinese UI copy merely to satisfy the source-language rule.
+Run `python scripts/check-source-language.py` before staging source changes;
+CI applies the same check to Go, Python, shell, PowerShell and Dashboard
+source comments.
+
+The Controller remains one Go package for now, but its logical ownership map
+is checked by `scripts/check-source-layout.py` and recorded in
+`internal/controller/boundaries.json`. Keep new files in exactly one area and
+use that map to review dependency direction before considering a package
+split. A package split is a separate design change, not an automatic response
+to file count.

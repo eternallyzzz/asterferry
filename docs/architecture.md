@@ -102,6 +102,14 @@ ChangeBus. The handle owns the connection pool lifecycle; repository methods
 own transactions. There is no business-operation façade that proxies one
 repository through the other.
 
+The Controller is intentionally still one Go package. Its first boundary is a
+logical ownership map in `internal/controller/boundaries.json`, checked by
+`scripts/check-source-layout.py`: composition, HTTP API, auth/enrollment,
+resource storage, runtime telemetry, scheduler, backup/maintenance, updates,
+and Node control. The map is a review and navigation contract, not a claim
+that each area is already an independent package. New files must have one
+owner; extracting packages requires an explicit dependency review.
+
 Writes commit before their corresponding notification is published.
 Notifications are bounded and best effort: durable state remains authoritative
 and periodic reconciliation repairs a missed hint.

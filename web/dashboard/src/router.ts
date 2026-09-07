@@ -22,7 +22,8 @@ const router = createRouter({
   ],
 });
 
-// admin 路由与操作按钮双重守卫中的路由侧；未登录时由 App 的登录门拦截。
+// This is the route-side half of the admin route/action guard; App's login
+// gate handles unauthenticated users.
 router.beforeEach((to) => {
   if (to.meta.requiresAdmin && useSession().controllerUser.value?.role !== "admin") {
     return { name: "overview" };

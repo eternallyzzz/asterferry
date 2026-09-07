@@ -7,6 +7,12 @@ When code moves, update this file in the same change or remove the stale
 detail. Stable ownership and compatibility rules belong in
 [`architecture.md`](architecture.md).
 
+The current Controller file-to-area ownership map is maintained in
+`internal/controller/boundaries.json` and enforced by
+`scripts/check-source-layout.py`. It is deliberately a logical boundary
+while the package remains unified; use the manifest to locate code and review
+cross-area dependencies before proposing a package split.
+
 ## Current Controller composition
 
 `ControllerRepositories` is the composition root. It wires one

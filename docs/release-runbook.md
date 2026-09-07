@@ -22,8 +22,9 @@ automated and every exception is recorded in the release issue.
 4. Run the Linux suite: unit tests, the deterministic behavior-contract and
    state-machine suite, PostgreSQL integration, race, vet,
    staticcheck, govulncheck, Dashboard lint/test/build on the release and
-   Node.js 22 compatibility lanes, OpenAPI generation check, Helm lint/render
-   and the AFDP/2 end-to-end test. Include the PostgreSQL lease/fencing,
+   Node.js 22 compatibility lanes, Go tests/vet/build on the recorded
+   compatibility floor, OpenAPI generation check, Helm lint/render and the
+   AFDP/2 end-to-end test. Include the PostgreSQL lease/fencing,
    persisted-session and two-replica failover tests.
 5. Run AFDP/control-wire fuzz smoke and the protocol benchmark suite. On a PR,
    the same-runner base/head comparison blocks a default regression above 10%.

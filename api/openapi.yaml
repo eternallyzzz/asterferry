@@ -27,7 +27,7 @@ paths:
       description: Query published GitHub stable releases. The check is read-only with respect to the running binary; applying an available release always requires a separate Admin request.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      responses: { '200': { description: Stable Controller release status }, '503': { description: Release metadata unavailable } }
+      responses: { '200': { description: Stable Controller release status, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } }, '503': { description: Release metadata unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } } }
   /controller/update/apply:
     post:
       tags: [operations]
@@ -36,7 +36,7 @@ paths:
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateRequest' } } } }
-      responses: { '202': { description: Controller update started }, '409': { $ref: '#/components/responses/Conflict' }, '503': { description: Update metadata or download unavailable } }
+      responses: { '202': { description: Controller update started, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } }, '409': { $ref: '#/components/responses/Conflict' }, '503': { description: Update metadata or download unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } } }
   /healthz:
     get:
       operationId: healthz
@@ -79,11 +79,13 @@ paths:
   /me:
     get:
       tags: [auth]
+      operationId: getCurrentUser
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses: { '200': { description: Current user, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } } }
   /nodes:
     get:
       tags: [nodes]
+      operationId: listNodes
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: kind, in: query, description: Filter by configured Node behavior, schema: { type: string, enum: [gateway, agent] } }]
       responses: { '200': { description: Nodes, content: { application/json: { schema: { $ref: '#/components/schemas/NodeList' } } } } }
@@ -95,11 +97,12 @@ paths:
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/NodeInput' } } }
-      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Node' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
   /nodes/{nodeId}/spec:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
     get:
       tags: [nodes]
+      operationId: getNodeSpec
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses:
         '200': { description: Configured Node behavior, content: { application/json: { schema: { $ref: '#/components/schemas/NodeSpec' } } } }
@@ -129,6 +132,7 @@ paths:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
     get:
       tags: [nodes]
+      operationId: getNode
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses: { '200': { description: Node, content: { application/json: { schema: { $ref: '#/components/schemas/Node' } } } } }
     patch:
@@ -139,7 +143,7 @@ paths:
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/NodePatch' } } }
-      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Node' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
     delete:
       tags: [nodes]
       operationId: decommissionNode
@@ -166,12 +170,13 @@ paths:
   /node-installations:
     get:
       tags: [operations]
+      operationId: listNodeInstallations
       description: List installation intents that have not enrolled yet. The response never contains the one-time token.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses:
         '200':
           description: Pending node installations.
-          content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/PendingNodeInstallation' } } } } } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/PendingNodeInstallationList' } } }
     post:
       tags: [operations]
       operationId: createNodeInstallation
@@ -230,18 +235,21 @@ paths:
   /nodes/{nodeId}/snapshot:
     get:
       tags: [nodes]
+      operationId: getNodeSnapshot
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }]
-      responses: { '200': { description: Current desired snapshot }, '404': { $ref: '#/components/responses/Unauthorized' } }
+      responses: { '200': { description: Current desired snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/DesiredSnapshot' } } } }, '404': { $ref: '#/components/responses/Unauthorized' } }
   /nodes/{nodeId}/desired:
     get:
       tags: [nodes]
+      operationId: getNodeDesiredSnapshot
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }]
-      responses: { '200': { description: Current desired snapshot }, '404': { $ref: '#/components/responses/Unauthorized' } }
+      responses: { '200': { description: Current desired snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/DesiredSnapshot' } } } }, '404': { $ref: '#/components/responses/Unauthorized' } }
   /nodes/{nodeId}/observed:
     get:
       tags: [nodes]
+      operationId: getNodeObserved
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }]
       responses: { '200': { description: Latest observed state, content: { application/json: { schema: { $ref: '#/components/schemas/ObservedState' } } } }, '404': { $ref: '#/components/responses/Unauthorized' } }
@@ -255,6 +263,7 @@ paths:
   /nodes/{nodeId}/actions/{action}:
     post:
       tags: [operations]
+      operationId: nodeAction
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/NodeId' }
@@ -263,86 +272,98 @@ paths:
         - { $ref: '#/components/parameters/IdempotencyKey' }
         - { $ref: '#/components/parameters/CSRF' }
       description: Runtime actions return 202. The admin-only purge action permanently deletes a decommissioned node identity and returns 204; it never cascades Services or Assignments.
-      responses: { '202': { description: Action accepted }, '204': { description: Node permanently deleted }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '202': { description: Action accepted, content: { application/json: { schema: { $ref: '#/components/schemas/NodeActionResponse' } } } }, '204': { description: Node permanently deleted }, '409': { $ref: '#/components/responses/Conflict' } }
   /nodes/{nodeId}/spec/egress:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
     get:
       tags: [resources]
+      operationId: getNodeEgress
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
-      responses: { '200': { description: Egress policy for the configured Node behavior } }
+      responses: { '200': { description: Egress policy for the configured Node behavior, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } } }
     put:
       tags: [resources]
+      operationId: putNodeEgress
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
-      responses: { '200': { description: Updated egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '200': { description: Updated egress policy, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
     patch:
       tags: [resources]
+      operationId: patchNodeEgress
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }
-      responses: { '200': { description: Updated egress policy }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '200': { description: Updated egress policy, content: { application/json: { schema: { $ref: '#/components/schemas/EgressPolicy' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
   /nodes/{nodeId}/spec/proxies:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent proxy entrances } } }
+    get: { tags: [resources], operationId: listNodeProxies, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent proxy entrances, content: { application/json: { schema: { $ref: '#/components/schemas/ProxyList' } } } } } }
     post:
       tags: [resources]
+      operationId: createNodeProxy
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
-      responses: { '201': { description: Created proxy entrance }, '409': { $ref: '#/components/responses/Conflict' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } }
+      responses: { '201': { description: Created proxy entrance, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
   /nodes/{nodeId}/spec/proxies/{proxyId}:
     parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/ProxyId' }]
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Proxy entrance } } }
+    get: { tags: [resources], operationId: getNodeProxy, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Proxy entrance, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } } } }
     put:
       tags: [resources]
+      operationId: updateNodeProxy
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
-      responses: { '200': { description: Updated proxy entrance } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } }
+      responses: { '200': { description: Updated proxy entrance, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } } }
     patch:
       tags: [resources]
+      operationId: patchNodeProxy
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
-      responses: { '200': { description: Updated proxy entrance } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } }
+      responses: { '200': { description: Updated proxy entrance, content: { application/json: { schema: { $ref: '#/components/schemas/ProxySpec' } } } } }
     delete:
       tags: [resources]
+      operationId: deleteNodeProxy
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Deleted proxy entrance } }
   /nodes/{nodeId}/spec/routes:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent route rules } } }
+    get: { tags: [resources], operationId: listNodeRoutes, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Agent route rules, content: { application/json: { schema: { $ref: '#/components/schemas/RouteList' } } } } } }
     post:
       tags: [resources]
+      operationId: createNodeRoute
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
-      responses: { '201': { description: Created route rule }, '409': { $ref: '#/components/responses/Conflict' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } }
+      responses: { '201': { description: Created route rule, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
   /nodes/{nodeId}/spec/routes/{routeName}:
     parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/RouteName' }]
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Route rule } } }
+    get: { tags: [resources], operationId: getNodeRoute, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Route rule, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } } } }
     put:
       tags: [resources]
+      operationId: updateNodeRoute
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
-      responses: { '200': { description: Updated route rule } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } }
+      responses: { '200': { description: Updated route rule, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } } }
     patch:
       tags: [resources]
+      operationId: patchNodeRoute
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
-      responses: { '200': { description: Updated route rule } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } }
+      responses: { '200': { description: Updated route rule, content: { application/json: { schema: { $ref: '#/components/schemas/RouteRule' } } } } }
     delete:
       tags: [resources]
+      operationId: deleteNodeRoute
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Deleted route rule } }
   /nodes/{nodeId}/actions/schedule:
     post:
       tags: [operations]
+      operationId: scheduleNode
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses:
@@ -351,145 +372,176 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [assignments]
-                properties:
-                  assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+                $ref: '#/components/schemas/ScheduleNodeResponse'
         '409': { $ref: '#/components/responses/Conflict' }
   /services:
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Services } } }
+    get:
+      tags: [resources]
+      operationId: listServices
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: agent_id, in: query, schema: { type: string } }]
+      responses: { '200': { description: Services, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceList' } } } } }
     post:
       tags: [resources]
+      operationId: createService
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }
-      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ServiceInput' } } } }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
   /services/{serviceId}:
     parameters: [{ name: serviceId, in: path, required: true, schema: { type: string } }]
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Service } } }
+    get: { tags: [resources], operationId: getService, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Service, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } } } }
     patch:
       tags: [resources]
+      operationId: updateService
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }
-      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ServicePatch' } } } }
+      responses: { '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Service' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
     delete:
       tags: [resources]
+      operationId: deleteService
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Deleted } }
   /assignments:
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignments } } }
+    get:
+      tags: [resources]
+      operationId: listAssignments
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ name: gateway_id, in: query, schema: { type: string } }, { name: agent_id, in: query, schema: { type: string } }]
+      responses: { '200': { description: Assignments, content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentList' } } } } }
     post:
       tags: [resources]
+      operationId: createAssignment
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }
-      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Conflict' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentInput' } } } }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
   /assignments/{assignmentId}:
     parameters: [{ name: assignmentId, in: path, required: true, schema: { type: string } }]
-    get: { tags: [resources], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignment } } }
+    get: { tags: [resources], operationId: getAssignment, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Assignment, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } } } }
     put:
       tags: [resources]
+      operationId: updateAssignment
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }
-      responses: { '200': { description: Updated }, '409': { $ref: '#/components/responses/Conflict' } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentInput' } } } }
+      responses: { '200': { description: Updated, content: { application/json: { schema: { $ref: '#/components/schemas/Assignment' } } } }, '409': { $ref: '#/components/responses/Conflict' } }
     delete:
       tags: [resources]
+      operationId: deleteAssignment
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Deleted } }
   /enrollment-tokens:
-    get: { tags: [operations], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Enrollment tokens without plaintext secrets } } }
+    get: { tags: [operations], operationId: listEnrollmentTokens, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Enrollment tokens without plaintext secrets, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentTokenList' } } } } } }
     post:
       tags: [operations]
+      operationId: createEnrollmentToken
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentTokenRequest' } } } }
-      responses: { '201': { description: Plaintext is returned once }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
+      responses: { '201': { description: Plaintext is returned once, content: { application/json: { schema: { $ref: '#/components/schemas/EnrollmentTokenResponse' } } } }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
   /enrollment-tokens/{tokenId}:
     delete:
       tags: [operations]
+      operationId: revokeEnrollmentToken
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Revoked } }
   /users:
-    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Users } } }
+    get: { tags: [auth], operationId: listUsers, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: Users, content: { application/json: { schema: { $ref: '#/components/schemas/UserList' } } } } } }
     post:
       tags: [auth]
+      operationId: createUser
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserInput' } } } }
-      responses: { '201': { description: Created } }
+      responses: { '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } } }
   /users/{userId}/tokens:
-    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ name: userId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Token metadata } } }
+    get: { tags: [auth], operationId: listUserTokens, security: [{ bearerAuth: [] }, { cookieAuth: [] }], parameters: [{ name: userId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Token metadata, content: { application/json: { schema: { $ref: '#/components/schemas/APITokenList' } } } } } }
     post:
       tags: [auth]
+      operationId: createUserToken
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/APITokenRequest' } } } }
-      responses: { '201': { description: Plaintext token returned once }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
+      responses: { '201': { description: Plaintext token returned once, content: { application/json: { schema: { $ref: '#/components/schemas/APITokenResponse' } } } }, '409': { description: Request was already created; plaintext cannot be recovered, content: { application/json: { schema: { $ref: '#/components/schemas/SecretAlreadyCreated' } } } } }
   /users/{userId}:
     parameters: [{ name: userId, in: path, required: true, schema: { type: string } }]
-    get: { tags: [auth], security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: User } } }
+    get: { tags: [auth], operationId: getUser, security: [{ bearerAuth: [] }, { cookieAuth: [] }], responses: { '200': { description: User, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } } } }
     patch:
       tags: [auth]
+      operationId: updateUser
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserInput' } } } }
-      responses: { '200': { description: Updated user } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserPatch' } } } }
+      responses: { '200': { description: Updated user, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } } }
     delete:
       tags: [auth]
+      operationId: deleteUser
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Deleted user } }
   /users/{userId}/tokens/{tokenId}:
     delete:
       tags: [auth]
+      operationId: revokeUserToken
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: userId, in: path, required: true, schema: { type: string } }, { name: tokenId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Revoked } }
   /runtime/settings:
     get:
       tags: [runtime]
+      operationId: getRuntimeSettings
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
-      responses: { '200': { description: Runtime operation settings } }
+      responses: { '200': { description: Runtime operation settings, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeSettings' } } } } }
     put:
       tags: [runtime]
+      operationId: setRuntimeSettings
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object, required: [advanced_operations_enabled], properties: { advanced_operations_enabled: { type: boolean } } } } }
-      responses: { '200': { description: Runtime operation settings updated } }
+        content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeSettingsInput' } } }
+      responses: { '200': { description: Runtime operation settings updated, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeSettings' } } } } }
   /runtime/connections:
     get:
       tags: [runtime]
+      operationId: listRuntimeConnections
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters:
         - { name: node_id, in: query, schema: { type: string } }
         - { name: state, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
         - { name: source_ip, in: query, schema: { type: string, description: IPv4 or IPv6 address } }
+        - { name: peer_node_id, in: query, schema: { type: string } }
+        - { name: gateway_id, in: query, schema: { type: string } }
+        - { name: agent_id, in: query, schema: { type: string } }
         - { name: assignment_id, in: query, schema: { type: string } }
         - { name: service_id, in: query, schema: { type: string } }
+        - { name: protocol, in: query, schema: { type: string, enum: [tcp, udp, quic] } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
-      responses: { '200': { description: Current and recently closed connection metadata } }
+      responses: { '200': { description: Current and recently closed connection metadata, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeConnectionList' } } } } }
   /runtime/events:
     get:
       tags: [runtime]
+      operationId: listRuntimeEvents
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: node_id, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }]
-      responses: { '200': { description: Runtime lifecycle events retained for 30 days } }
+      responses: { '200': { description: Runtime lifecycle events retained for 30 days, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeEventList' } } } } }
   /runtime/traffic:
     get:
       tags: [runtime]
+      operationId: listRuntimeTraffic
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: node_id, in: query, schema: { type: string } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 2000 } }]
-      responses: { '200': { description: Per-minute traffic rollups } }
+      responses: { '200': { description: Per-minute traffic rollups, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeTrafficList' } } } } }
   /runtime/stream:
     get:
       tags: [runtime]
+      operationId: runtimeStream
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: node_id, in: query, schema: { type: string } }]
       responses: { '200': { description: Server-sent runtime metadata change notifications, content: { text/event-stream: {} } } }
@@ -497,16 +549,18 @@ paths:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
     post:
       tags: [runtime]
+      operationId: runtimeAction
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeAction' } } }
-      responses: { '202': { description: Runtime action queued }, '403': { description: Advanced operations are disabled } }
+      responses: { '202': { description: Runtime action queued, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeActionResponse' } } } }, '403': { description: Advanced operations are disabled, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } } }
   /nodes/{nodeId}/runtime/connections:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
     get:
       tags: [runtime]
+      operationId: listNodeRuntimeConnections
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters:
         - { name: state, in: query, schema: { type: string } }
@@ -517,11 +571,12 @@ paths:
         - { name: service_id, in: query, schema: { type: string } }
         - { name: protocol, in: query, schema: { type: string, enum: [tcp, udp, quic] } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
-      responses: { '200': { description: Current and recently closed connection metadata for one Node } }
+      responses: { '200': { description: Current and recently closed connection metadata for one Node, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeConnectionList' } } } } }
   /nodes/{nodeId}/runtime/connections/{connectionId}:
     parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }]
     get:
       tags: [runtime]
+      operationId: getNodeRuntimeConnection
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses:
         '200': { description: One current or recently closed connection metadata record, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeConnection' } } } }
@@ -529,23 +584,27 @@ paths:
     parameters: [{ $ref: '#/components/parameters/NodeId' }, { name: connectionId, in: path, required: true, schema: { type: string } }]
     post:
       tags: [runtime]
+      operationId: runtimeConnectionAction
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeAction' } } }
-      responses: { '202': { description: Runtime action queued }, '403': { description: Advanced operations are disabled } }
+      responses: { '202': { description: Runtime action queued, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeActionResponse' } } } }, '403': { description: Advanced operations are disabled, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } } }
   /audit:
     get:
       tags: [audit]
+      operationId: listAudit
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }]
-      responses: { '200': { description: Audit records } }
+      responses: { '200': { description: Audit records, content: { application/json: { schema: { $ref: '#/components/schemas/AuditList' } } } } }
   /events:
     get:
       tags: [audit]
+      operationId: listEvents
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
-      responses: { '200': { description: Event records } }
+      parameters: [{ name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }]
+      responses: { '200': { description: Event records, content: { application/json: { schema: { $ref: '#/components/schemas/AuditList' } } } } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }
@@ -553,7 +612,9 @@ components:
     nodeEnrollmentAuth: { type: apiKey, in: header, name: X-AsterFerry-Enrollment-Token, description: One-time token returned by the Dashboard node installation command generator. }
   parameters:
     NodeId: { name: nodeId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
-    IfMatch: { name: If-Match, in: header, required: true, schema: { type: string, pattern: '^[1-9][0-9]*$' } }
+    ProxyId: { name: proxyId, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 128 } }
+    RouteName: { name: routeName, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 256 } }
+    IfMatch: { name: If-Match, in: header, required: false, description: The server requires this compare-and-swap revision for mutating resources and returns 428 when it is absent., schema: { type: string, pattern: '^[1-9][0-9]*$' } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 128 } }
     CSRF: { name: X-CSRF-Token, in: header, required: false, schema: { type: string, minLength: 32 } }
   responses:
@@ -610,31 +671,48 @@ components:
       properties: { username: { type: string }, password: { type: string, format: password } }
     LoginResponse:
       type: object
+      required: [user, csrf_token]
       properties: { user: { $ref: '#/components/schemas/User' }, csrf_token: { type: string } }
     User:
       type: object
+      required: [id, username, role, enabled, revision, created_at, updated_at]
       properties: { id: { type: string }, username: { type: string }, role: { type: string, enum: [viewer, operator, admin] }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
     UserInput:
       type: object
+      required: [username, password, role]
       properties: { username: { type: string }, password: { type: string, format: password }, role: { type: string, enum: [viewer, operator, admin] } }
     NodeInput:
       type: object
       required: [id, name]
       properties: { id: { type: string }, name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean } }
     NodeSpec:
-      type: object
-      required: [node_id, kind]
       description: The behavior selected for a Node. Exactly one typed document is present.
+      oneOf:
+        - $ref: '#/components/schemas/GatewayNodeSpec'
+        - $ref: '#/components/schemas/AgentNodeSpec'
+      discriminator:
+        propertyName: kind
+        mapping:
+          gateway: '#/components/schemas/GatewayNodeSpec'
+          agent: '#/components/schemas/AgentNodeSpec'
+    GatewayNodeSpec:
+      type: object
+      required: [node_id, kind, gateway]
       properties:
         node_id: { type: string }
-        kind: { type: string, enum: [gateway, agent] }
+        kind: { type: string, enum: [gateway] }
         gateway: { $ref: '#/components/schemas/GatewaySpec' }
+        revision: { type: integer, format: int64, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    AgentNodeSpec:
+      type: object
+      required: [node_id, kind, agent]
+      properties:
+        node_id: { type: string }
+        kind: { type: string, enum: [agent] }
         agent: { $ref: '#/components/schemas/AgentSpec' }
-        revision: { type: integer, format: int64 }
-        updated_at: { type: string, format: date-time }
-      oneOf:
-        - required: [gateway]
-        - required: [agent]
+        revision: { type: integer, format: int64, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
     NodeBootstrapRequest:
       type: object
       required: [platform, arch, script_source]
@@ -664,7 +742,7 @@ components:
         node_id: { type: string, minLength: 1, maxLength: 128, description: Optional immutable identity override; omit this field to let the Controller generate a unique ID. }
         name: { type: string, minLength: 1, maxLength: 256 }
         labels: { type: object, additionalProperties: { type: string } }
-        enabled: { type: boolean, default: true }
+        enabled: { type: boolean, description: Defaults to true when omitted. }
         platform: { type: string, enum: [linux, windows] }
         arch: { type: string, enum: [amd64, arm64] }
         script_source: { type: string, enum: [controller, github], default: controller, description: Where the one-line installer script is downloaded from. The Controller option is recommended. }
@@ -681,17 +759,176 @@ components:
         script_source: { type: string, enum: [controller, github] }
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
+    PendingNodeInstallationList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/PendingNodeInstallation' } }
     NodePatch:
       type: object
       properties: { name: { type: string }, labels: { type: object, additionalProperties: { type: string } }, enabled: { type: boolean }, certificate_state: { type: string, enum: [pending, active, revoked, expired, decommissioned] }, certificate_serial: { type: string } }
     Node:
+      type: object
+      required: [id, name, enabled, certificate_state, revision, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        enabled: { type: boolean }
+        spec_kind: { type: string, enum: [gateway, agent], description: Configured behavior projection; omitted until a spec is saved. }
+        certificate_state: { type: string, enum: [pending, active, revoked, expired, decommissioned] }
+        certificate_serial: { type: string }
+        revision: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NodeList: { type: object, required: [items], properties: { items: { type: array, items: { $ref: '#/components/schemas/Node' } } } }
+    Selector:
+      type: object
+      properties:
+        match_labels: { type: object, additionalProperties: { type: string } }
+    Listener:
+      type: object
+      required: [protocol, bind, port, enabled]
+      properties:
+        protocol: { type: string, enum: [tcp, udp] }
+        bind: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        enabled: { type: boolean }
+    Capacity:
+      type: object
+      required: [max_agents, max_connections, max_services]
+      properties:
+        max_agents: { type: integer, minimum: 0 }
+        max_connections: { type: integer, minimum: 0 }
+        max_services: { type: integer, minimum: 0 }
+    PortRange:
+      type: object
+      required: [min, max]
+      properties:
+        min: { type: integer, minimum: 1, maximum: 65535 }
+        max: { type: integer, minimum: 1, maximum: 65535 }
+    PortPool:
+      type: object
+      properties:
+        tcp: { type: array, items: { $ref: '#/components/schemas/PortRange' } }
+        udp: { type: array, items: { $ref: '#/components/schemas/PortRange' } }
+    TransportPolicy:
+      type: object
+      required: [alpn, max_streams, max_frame_bytes, max_datagram_bytes, handshake_timeout_seconds, idle_timeout_seconds]
+      properties:
+        alpn: { type: string }
+        max_streams: { type: integer, minimum: 0 }
+        max_frame_bytes: { type: integer, minimum: 0 }
+        max_datagram_bytes: { type: integer, minimum: 0 }
+        handshake_timeout_seconds: { type: integer, minimum: 0 }
+        idle_timeout_seconds: { type: integer, minimum: 0 }
+    ObfuscationMetadata:
+      type: object
+      required: [mode, max_padding_bytes, handshake_shaping]
+      properties:
+        mode: { type: string, enum: [standard, camouflage] }
+        key_id: { type: string }
+        previous_key_id: { type: string }
+        max_padding_bytes: { type: integer, minimum: 0 }
+        handshake_shaping: { type: boolean }
+    ObfuscationWrite:
       allOf:
-        - $ref: '#/components/schemas/NodeInput'
+        - $ref: '#/components/schemas/ObfuscationMetadata'
         - type: object
-          properties: { spec_kind: { type: string, enum: [gateway, agent], description: Configured behavior projection; omitted until a spec is saved. }, certificate_state: { type: string, enum: [pending, active, revoked, expired, decommissioned] }, certificate_serial: { type: string }, revision: { type: integer, format: int64 }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
-    NodeList: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Node' } } } }
-    GatewaySpec: { type: object, required: [node_id, public_endpoints], properties: { node_id: { type: string }, public_endpoints: { type: array, items: { type: string } }, listeners: { type: array, items: { type: object } }, capacity: { type: object }, port_pool: { type: object }, transport: { type: object }, obfuscation: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, revision: { type: integer, format: int64 } } }
-    AgentSpec: { type: object, required: [node_id], description: New Agent writes must include gateway_id; gateway_selector-only documents are retained for legacy compatibility, properties: { node_id: { type: string }, gateway_id: { type: string, description: Exact enrolled Gateway node selected for this Agent }, gateway_selector: { type: object, description: Legacy label selector used only when gateway_id is omitted }, proxies: { type: array, items: { type: object } }, routes: { type: array, items: { type: object } }, limits: { type: object }, egress: { $ref: '#/components/schemas/EgressPolicy' }, logging: { type: object }, revision: { type: integer, format: int64 } } }
+          properties:
+            key: { type: string, format: byte, writeOnly: true }
+            previous_key: { type: string, format: byte, writeOnly: true }
+            key_ciphertext: { type: string, format: byte, writeOnly: true }
+            previous_key_ciphertext: { type: string, format: byte, writeOnly: true }
+    ProxySpec:
+      type: object
+      required: [id, protocol, bind, route, enabled]
+      properties:
+        id: { type: string }
+        protocol: { type: string, enum: [tcp, udp] }
+        bind: { type: string }
+        route: { type: string }
+        enabled: { type: boolean }
+    RouteRule:
+      type: object
+      required: [name, destination, enabled]
+      properties:
+        name: { type: string }
+        cidrs: { type: array, items: { type: string } }
+        domains: { type: array, items: { type: string } }
+        geoip: { type: array, items: { type: string } }
+        destination: { type: string }
+        enabled: { type: boolean }
+    AgentLimits:
+      type: object
+      required: [max_connections, max_streams, max_buffer_bytes]
+      properties:
+        max_connections: { type: integer, minimum: 0 }
+        max_streams: { type: integer, minimum: 0 }
+        max_buffer_bytes: { type: integer, minimum: 0 }
+    LoggingPolicy:
+      type: object
+      required: [level, format]
+      properties:
+        level: { type: string }
+        format: { type: string }
+    GatewaySpec:
+      type: object
+      required: [node_id, public_endpoints, capacity, port_pool, transport, obfuscation, egress]
+      properties:
+        node_id: { type: string }
+        public_endpoints: { type: array, items: { type: string } }
+        listeners: { type: array, items: { $ref: '#/components/schemas/Listener' } }
+        labels: { type: object, additionalProperties: { type: string } }
+        capacity: { $ref: '#/components/schemas/Capacity' }
+        port_pool: { $ref: '#/components/schemas/PortPool' }
+        transport: { $ref: '#/components/schemas/TransportPolicy' }
+        obfuscation: { $ref: '#/components/schemas/ObfuscationMetadata' }
+        egress: { $ref: '#/components/schemas/EgressPolicy' }
+        revision: { type: integer, format: int64, readOnly: true }
+    AgentSpec:
+      type: object
+      required: [node_id, gateway_selector, proxies, routes, limits, egress, logging]
+      description: New Agent writes must include gateway_id; gateway_selector-only documents are retained for legacy compatibility.
+      properties:
+        node_id: { type: string }
+        gateway_id: { type: string, description: Exact enrolled Gateway node selected for this Agent }
+        gateway_selector: { $ref: '#/components/schemas/Selector' }
+        proxies: { type: array, items: { $ref: '#/components/schemas/ProxySpec' } }
+        routes: { type: array, items: { $ref: '#/components/schemas/RouteRule' } }
+        limits: { $ref: '#/components/schemas/AgentLimits' }
+        egress: { $ref: '#/components/schemas/EgressPolicy' }
+        logging: { $ref: '#/components/schemas/LoggingPolicy' }
+        revision: { type: integer, format: int64, readOnly: true }
+    DesiredSnapshot:
+      type: object
+      required: [schema_version, node_id, generation, checksum]
+      properties:
+        schema_version: { type: integer, minimum: 1 }
+        node_id: { type: string }
+        generation: { type: integer, format: int64, minimum: 0 }
+        checksum: { type: string }
+        gateway: { $ref: '#/components/schemas/GatewaySpec' }
+        agent: { $ref: '#/components/schemas/AgentSpec' }
+        services: { type: array, items: { $ref: '#/components/schemas/Service' } }
+        assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+    NodeActionResponse:
+      type: object
+      required: [node_id, action, state]
+      properties:
+        node_id: { type: string }
+        action: { type: string }
+        requested_by: { type: string }
+        state: { type: string }
+        assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+        status: { $ref: '#/components/schemas/NodeUpdateStatus' }
+    ScheduleNodeResponse:
+      type: object
+      required: [node_id, action, assignments]
+      properties:
+        node_id: { type: string }
+        action: { type: string, enum: [schedule] }
+        assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
     RuntimeMetrics:
       type: object
       description: Explicit controller-visible runtime metrics. New fields are protocol/API contract changes.
@@ -710,8 +947,8 @@ components:
         runtime_rejected_total: { type: integer, format: int64, minimum: 0 }
         runtime_rate_limited_total: { type: integer, format: int64, minimum: 0 }
         runtime_telemetry_dropped_total: { type: integer, format: int64, minimum: 0 }
-    SessionSummary: { type: object, properties: { id: { type: string }, peer_id: { type: string }, started_at: { type: string, format: date-time }, streams: { type: integer, minimum: 0 } } }
-    ListenerState: { type: object, properties: { protocol: { type: string, enum: [tcp, udp] }, bind: { type: string }, port: { type: integer, minimum: 1, maximum: 65535 }, ready: { type: boolean } } }
+    SessionSummary: { type: object, required: [id, peer_id, started_at, streams], properties: { id: { type: string }, peer_id: { type: string }, started_at: { type: string, format: date-time }, streams: { type: integer, minimum: 0 } } }
+    ListenerState: { type: object, required: [protocol, bind, port, ready], properties: { protocol: { type: string, enum: [tcp, udp] }, bind: { type: string }, port: { type: integer, minimum: 1, maximum: 65535 }, ready: { type: boolean } } }
     SystemInfo:
       type: object
       description: Latest bounded host and resource information reported by a Node.
@@ -752,11 +989,147 @@ components:
         metrics: { $ref: '#/components/schemas/RuntimeMetrics' }
         system_info: { $ref: '#/components/schemas/SystemInfo' }
         observed_at: { type: string, format: date-time }
-    EgressPolicy: { type: object, properties: { enabled: { type: boolean }, tcp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, udp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }, allow_cidrs: { type: array, items: { type: string } }, allow_special_cidrs: { type: array, items: { type: string } }, max_connections: { type: integer, minimum: 0, maximum: 1048576 } } }
-    Service: { type: object, required: [id, agent_id, protocol, local_target, public_bind], properties: { id: { type: string }, agent_id: { type: string }, protocol: { type: string, enum: [tcp, udp] }, local_target: { type: string }, public_bind: { type: string }, public_port: { type: integer, minimum: 0, maximum: 65535 }, gateway_selector: { type: object }, enabled: { type: boolean }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
-    Assignment: { type: object, required: [id, gateway_id, agent_id, generation], properties: { id: { type: string }, gateway_id: { type: string }, agent_id: { type: string }, service_ids: { type: array, items: { type: string } }, bindings: { type: array, items: { type: object } }, generation: { type: integer, format: int64 }, state: { type: string }, public_endpoint: { type: string }, revision: { type: integer, format: int64 }, updated_at: { type: string, format: date-time } } }
-    EnrollmentTokenRequest: { type: object, properties: { ttl_seconds: { type: integer, minimum: 1, maximum: 900 } } }
-    APITokenRequest: { type: object, required: [name], properties: { name: { type: string }, expires_at: { type: string, format: date-time } } }
+    EgressPolicy:
+      type: object
+      required: [enabled, max_connections]
+      properties:
+        enabled: { type: boolean }
+        tcp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }
+        udp_ports: { type: array, items: { type: string, pattern: '^[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?$' } }
+        allow_cidrs: { type: array, items: { type: string } }
+        allow_special_cidrs: { type: array, items: { type: string } }
+        max_connections: { type: integer, minimum: 0, maximum: 1048576 }
+    Binding:
+      type: object
+      required: [service_id, protocol, bind, port]
+      properties:
+        service_id: { type: string }
+        protocol: { type: string, enum: [tcp, udp] }
+        bind: { type: string }
+        port: { type: integer, minimum: 0, maximum: 65535 }
+    Service:
+      type: object
+      required: [id, agent_id, protocol, local_target, public_bind, public_port, gateway_selector, enabled, revision, updated_at]
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        protocol: { type: string, enum: [tcp, udp] }
+        local_target: { type: string }
+        public_bind: { type: string }
+        public_port: { type: integer, minimum: 0, maximum: 65535 }
+        gateway_selector: { $ref: '#/components/schemas/Selector' }
+        enabled: { type: boolean }
+        revision: { type: integer, format: int64, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    ServiceInput:
+      type: object
+      required: [id, agent_id, protocol, local_target, public_bind, public_port, gateway_selector, enabled]
+      properties:
+        id: { type: string }
+        agent_id: { type: string }
+        protocol: { type: string, enum: [tcp, udp] }
+        local_target: { type: string }
+        public_bind: { type: string }
+        public_port: { type: integer, minimum: 0, maximum: 65535 }
+        gateway_selector: { $ref: '#/components/schemas/Selector' }
+        enabled: { type: boolean }
+    ServicePatch:
+      type: object
+      properties:
+        agent_id: { type: string }
+        protocol: { type: string, enum: [tcp, udp] }
+        local_target: { type: string }
+        public_bind: { type: string }
+        public_port: { type: integer, minimum: 0, maximum: 65535 }
+        gateway_selector: { $ref: '#/components/schemas/Selector' }
+        enabled: { type: boolean }
+    Assignment:
+      type: object
+      required: [id, gateway_id, agent_id, service_ids, bindings, generation, state, public_endpoint, obfuscation]
+      properties:
+        id: { type: string }
+        gateway_id: { type: string }
+        agent_id: { type: string }
+        service_ids: { type: array, items: { type: string } }
+        bindings: { type: array, items: { $ref: '#/components/schemas/Binding' } }
+        generation: { type: integer, format: int64, minimum: 0 }
+        state: { type: string, enum: [pending, applied, degraded, draining] }
+        public_endpoint: { type: string }
+        obfuscation: { $ref: '#/components/schemas/ObfuscationMetadata' }
+        revision: { type: integer, format: int64, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    AssignmentInput:
+      type: object
+      required: [id, gateway_id, agent_id, service_ids]
+      properties:
+        id: { type: string }
+        gateway_id: { type: string }
+        agent_id: { type: string }
+        service_ids: { type: array, items: { type: string } }
+        bindings: { type: array, items: { $ref: '#/components/schemas/Binding' } }
+        generation: { type: integer, format: int64, minimum: 0 }
+        state: { type: string, enum: [pending, applied, degraded, draining] }
+        public_endpoint: { type: string }
+    EnrollmentTokenRequest:
+      type: object
+      properties:
+        ttl_seconds: { type: integer, minimum: 1, maximum: 900 }
+    APITokenRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        expires_at: { type: string, format: date-time, nullable: true }
+    EnrollmentTokenMeta:
+      type: object
+      required: [id, expires_at, created_at]
+      properties:
+        id: { type: string }
+        expires_at: { type: string, format: date-time }
+        used_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    EnrollmentTokenResponse:
+      type: object
+      required: [token, token_metadata]
+      properties:
+        token: { type: string, writeOnly: true }
+        token_metadata: { $ref: '#/components/schemas/EnrollmentTokenMeta' }
+        created_by: { type: string }
+    APITokenMeta:
+      type: object
+      required: [id, user_id, name, created_at]
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        name: { type: string }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    APITokenResponse:
+      type: object
+      required: [token, metadata]
+      properties:
+        token: { type: string, writeOnly: true }
+        metadata: { $ref: '#/components/schemas/APITokenMeta' }
+        created_by: { type: string }
+    UserPatch:
+      type: object
+      properties:
+        username: { type: string }
+        password: { type: string, format: password, writeOnly: true }
+        role: { type: string, enum: [viewer, operator, admin] }
+        enabled: { type: boolean }
+    RuntimeSettings:
+      type: object
+      required: [advanced_operations_enabled, runtime_retention_days]
+      properties:
+        advanced_operations_enabled: { type: boolean }
+        runtime_retention_days: { type: integer, minimum: 1 }
+    RuntimeSettingsInput:
+      type: object
+      required: [advanced_operations_enabled]
+      properties:
+        advanced_operations_enabled: { type: boolean }
     RuntimeRateLimit: { type: object, required: [direction, bytes_per_second, burst_bytes, expires_at], properties: { direction: { type: string, enum: [in, out, both] }, bytes_per_second: { type: integer, format: int64 }, burst_bytes: { type: integer, format: int64 }, expires_at: { type: string, format: date-time } } }
     RuntimeConnection:
       type: object
@@ -785,6 +1158,50 @@ components:
         rate_in_bps: { type: number, format: double, minimum: 0, description: Cumulative average bytes per second since started_at }
         rate_out_bps: { type: number, format: double, minimum: 0, description: Cumulative average bytes per second since started_at }
         limit: { $ref: '#/components/schemas/RuntimeRateLimit' }
+    RuntimeConnectionList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RuntimeConnection' } }
+    RuntimeTrafficRollup:
+      type: object
+      required: [bucket_start, node_id, protocol, bytes_in, bytes_out, opened, closed, rejected, rate_limited, active_max]
+      properties:
+        bucket_start: { type: string, format: date-time }
+        node_id: { type: string }
+        gateway_id: { type: string }
+        agent_id: { type: string }
+        assignment_id: { type: string }
+        service_id: { type: string }
+        protocol: { type: string }
+        bytes_in: { type: integer, format: int64, minimum: 0 }
+        bytes_out: { type: integer, format: int64, minimum: 0 }
+        opened: { type: integer, format: int64, minimum: 0 }
+        closed: { type: integer, format: int64, minimum: 0 }
+        rejected: { type: integer, format: int64, minimum: 0 }
+        rate_limited: { type: integer, format: int64, minimum: 0 }
+        active_max: { type: integer, format: int64, minimum: 0 }
+    RuntimeTrafficList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RuntimeTrafficRollup' } }
+    RuntimeEventRecord:
+      type: object
+      required: [id, event_id, node_id, type, payload, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        event_id: { type: string }
+        node_id: { type: string }
+        connection_id: { type: string }
+        type: { type: string }
+        payload: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    RuntimeEventList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RuntimeEventRecord' } }
     RuntimeAction:
       type: object
       required: [action]
@@ -796,6 +1213,65 @@ components:
         bytes_per_second: { type: integer, format: int64, minimum: 1 }
         burst_bytes: { type: integer, format: int64, minimum: 1 }
         ttl_seconds: { type: integer, minimum: 60, maximum: 86400 }
+    RuntimeActionResponse:
+      type: object
+      required: [node_id, action, state]
+      properties:
+        node_id: { type: string }
+        action: { type: string }
+        state: { type: string, enum: [queued, delivered] }
+    ServiceList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Service' } }
+    AssignmentList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
+    ProxyList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProxySpec' } }
+    RouteList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RouteRule' } }
+    EnrollmentTokenList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/EnrollmentTokenMeta' } }
+    APITokenList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/APITokenMeta' } }
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/User' } }
+    AuditRecord:
+      type: object
+      required: [id, actor, action, resource, resource_id, revision, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        actor: { type: string }
+        action: { type: string }
+        resource: { type: string }
+        resource_id: { type: string }
+        revision: { type: integer, format: int64 }
+        attributes: { type: object, additionalProperties: { type: string } }
+        created_at: { type: string, format: date-time }
+    AuditList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AuditRecord' } }
     SecretAlreadyCreated:
       type: object
       required: [error, token_recoverable]

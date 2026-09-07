@@ -8,7 +8,8 @@ export interface ToastItem {
   message: string;
 }
 
-// 模块级单例：任何页面 push 的 Toast 都由 AppShell 中的 ToastHost 渲染。
+// Module singleton: every page publishes toasts rendered by AppShell's
+// ToastHost.
 const toasts = reactive<ToastItem[]>([]);
 let nextId = 1;
 
