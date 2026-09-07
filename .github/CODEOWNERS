@@ -1,0 +1,3 @@
+# Every change needs an accountable maintainer review. Add a second named
+# maintainer before the v1.0.0 release and enforce this file in branch rules.
+* @eternallyzzz

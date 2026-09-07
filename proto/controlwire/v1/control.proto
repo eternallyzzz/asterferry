@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package asterferry.controlwire.v1;
+
+option go_package = "asterferry/internal/controlwire/v1;controlwirev1";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+enum ApplyStatus {
+  APPLY_STATUS_UNSPECIFIED = 0;
+  APPLY_STATUS_ACCEPTED = 1;
+  APPLY_STATUS_APPLIED = 2;
+  APPLY_STATUS_REJECTED = 3;
+}
+
+message ApplyError {
+  string code = 1;
+  string field_path = 2;
+  string message = 3;
+  bool retryable = 4;
+}
+
+message EnrollRequest {
+  string token = 1;
+  reserved 2;
+  string node_id = 3;
+  bytes csr_der = 4;
+}
+
+message CertificateBundle {
+  bytes certificate_der = 1;
+  bytes ca_certificate_der = 2;
+  string serial = 3;
+  google.protobuf.Timestamp not_before = 4;
+  google.protobuf.Timestamp not_after = 5;
+}
+
+message EnrollResponse {
+  CertificateBundle certificate = 1;
+  uint32 schema_version = 2;
+}
+
+message Hello {
+  string node_id = 1;
+  reserved 2;
+  repeated string capabilities = 3;
+  uint32 schema_version = 4;
+  uint64 applied_generation = 5;
+  string applied_checksum = 6;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp sent_at = 1;
+  uint64 applied_generation = 2;
+  bool healthy = 3;
+}
+
+message ApplyResult {
+  uint64 generation = 1;
+  string checksum = 2;
+  ApplyStatus status = 3;
+  ApplyError error = 4;
+}
+
+message DesiredSnapshot {
+  uint32 schema_version = 1;
+  string node_id = 2;
+  uint64 generation = 3;
+  string checksum = 4;
+  // Canonical JSON is carried inside the protobuf envelope so generated
+  // clients remain independent of the Go domain package.
+  bytes document_json = 5;
+}
+
+message ObservedState {
+  uint32 schema_version = 1;
+  string node_id = 2;
+  uint64 applied_generation = 3;
+  bool healthy = 4;
+  bool degraded = 5;
+  ApplyError last_error = 6;
+  bytes document_json = 7;
+  google.protobuf.Timestamp observed_at = 8;
+}
+
+message Event {
+  string id = 1;
+  string type = 2;
+  string message = 3;
+  bytes attributes_json = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message EventBatch {
+  repeated Event events = 1;
+}
+
+message RenewCertificate {
+  bytes csr_der = 1;
+}
+
+message Action {
+  string id = 1;
+  string name = 2;
+  bytes payload_json = 3;
+}
+
+message NodeMessage {
+  oneof body {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    ApplyResult apply_result = 3;
+    ObservedState observed_state = 4;
+    EventBatch event_batch = 5;
+    RenewCertificate renew_certificate = 6;
+  }
+}
+
+message ControllerMessage {
+  oneof body {
+    DesiredSnapshot desired_snapshot = 1;
+    Action action = 2;
+    CertificateBundle certificate_bundle = 3;
+  }
+}
+
+service Control {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc Connect(stream NodeMessage) returns (stream ControllerMessage);
+  rpc Health(google.protobuf.Empty) returns (Heartbeat);
+}
