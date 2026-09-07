@@ -16,6 +16,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# The source installer leaves these empty and resolves the newest stable release.
+# Release packaging replaces them with the immutable release URL and version.
+$script:embeddedReleaseBaseUrl = ""
+$script:embeddedReleaseVersion = ""
 $script:installerIdentity = $null
 $script:installerAccessGranted = $false
 $script:installerAccessPaths = @()
@@ -216,45 +220,22 @@ function Download-VerifiedAsset {
   return $destination
 }
 
+$repoWasExplicit = $PSBoundParameters.ContainsKey("Repo")
+$releaseBaseUrlWasExplicit = $PSBoundParameters.ContainsKey("ReleaseBaseUrl")
+$versionWasExplicit = $PSBoundParameters.ContainsKey("Version")
+if (-not $repoWasExplicit -and -not $releaseBaseUrlWasExplicit -and $script:embeddedReleaseBaseUrl) {
+  $ReleaseBaseUrl = $script:embeddedReleaseBaseUrl
+}
+if (-not $repoWasExplicit -and -not $versionWasExplicit -and $script:embeddedReleaseVersion) {
+  $Version = $script:embeddedReleaseVersion
+}
+
 Assert-Administrator
 if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
   throw "repo must be OWNER/REPO"
 }
-if (-not $NonInteractive) {
-  if (-not $PSBoundParameters.ContainsKey("GrpcAdvertise")) {
-    $GrpcAdvertise = Read-InstallerValue -Prompt "Controller gRPC advertise address (reachable host:port)" -Required
-  }
-  if (-not $PSBoundParameters.ContainsKey("ReleaseBaseUrl")) {
-    $ReleaseBaseUrl = Read-InstallerValue -Prompt "Release base URL (press Enter for GitHub)"
-  }
-  if (-not $PSBoundParameters.ContainsKey("Version")) {
-    if ($ReleaseBaseUrl) {
-      $Version = Read-InstallerValue -Prompt "Release version" -Required
-    } else {
-      $Version = Read-InstallerValue -Prompt "Release version (press Enter for latest)"
-    }
-  }
-  if (-not $PSBoundParameters.ContainsKey("DataRoot")) {
-    $DataRoot = Read-InstallerValue -Prompt "Controller data directory" -Default $DataRoot
-  }
-  if (-not $PSBoundParameters.ContainsKey("InstallRoot")) {
-    $InstallRoot = Read-InstallerValue -Prompt "Controller install directory" -Default $InstallRoot
-  }
-  if (-not $PSBoundParameters.ContainsKey("HttpListen")) {
-    $HttpListen = Read-InstallerValue -Prompt "HTTPS listen address" -Default $HttpListen
-  }
-  if (-not $PSBoundParameters.ContainsKey("GrpcListen")) {
-    $GrpcListen = Read-InstallerValue -Prompt "gRPC listen address" -Default $GrpcListen
-  }
-  if (-not $PSBoundParameters.ContainsKey("MetricsListen")) {
-    $MetricsListen = Read-InstallerValue -Prompt "Metrics listen address" -Default $MetricsListen
-  }
-  if (-not $PSBoundParameters.ContainsKey("ServiceName")) {
-    $ServiceName = Read-InstallerValue -Prompt "Windows service name" -Default $ServiceName
-  }
-  if (-not $PSBoundParameters.ContainsKey("Username")) {
-    $Username = Read-InstallerValue -Prompt "Initial Admin username" -Default $Username
-  }
+if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey("GrpcAdvertise")) {
+  $GrpcAdvertise = Read-InstallerValue -Prompt "Controller gRPC advertise address (reachable host:port)" -Required
 }
 if ([string]::IsNullOrWhiteSpace($GrpcAdvertise) -or $GrpcAdvertise -match '\s') {
   throw "GrpcAdvertise must be a reachable host:port without whitespace"
@@ -275,11 +256,12 @@ if ($ReleaseBaseUrl -and $ReleaseBaseUrl -notmatch '^https://[^\s]+$') {
 $Version = $Version.TrimStart('v')
 if ([string]::IsNullOrWhiteSpace($Version)) {
   if ($ReleaseBaseUrl) {
-    if ($NonInteractive) {
-      throw "Version is required when ReleaseBaseUrl is used in non-interactive mode"
+    if ($releaseBaseUrlWasExplicit -and -not $NonInteractive) {
+      $Version = Read-InstallerValue -Prompt "Release version" -Required
+      $Version = $Version.TrimStart('v')
+    } else {
+      throw "Version is required when ReleaseBaseUrl is used"
     }
-    $Version = Read-InstallerValue -Prompt "Release version" -Required
-    $Version = $Version.TrimStart('v')
   }
   if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = Resolve-LatestVersion

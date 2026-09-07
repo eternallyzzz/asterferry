@@ -1,5 +1,6 @@
 //go:build !windows
 
+// Package windowsservice runs daemons as console processes or Windows services.
 package windowsservice
 
 import "context"

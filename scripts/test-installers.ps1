@@ -46,6 +46,25 @@ foreach ($script in @("scripts/install-controller.ps1", "scripts/install-node.ps
     }
 }
 
+$controllerInstaller = Join-Path $root "scripts/install-controller.ps1"
+$controllerText = Get-Content -Raw -LiteralPath $controllerInstaller
+Assert-Contains $controllerInstaller '$script:embeddedReleaseBaseUrl = ""'
+Assert-Contains $controllerInstaller '$script:embeddedReleaseVersion = ""'
+Assert-Contains $controllerInstaller '0.0.0.0:8443'
+Assert-Contains $controllerInstaller '0.0.0.0:9443'
+foreach ($obsoletePrompt in @(
+    'Read-InstallerValue -Prompt "Release base URL',
+    'Read-InstallerValue -Prompt "HTTPS listen address',
+    'Read-InstallerValue -Prompt "gRPC listen address',
+    'Read-InstallerValue -Prompt "Metrics listen address',
+    'Read-InstallerValue -Prompt "Windows service name',
+    'Read-InstallerValue -Prompt "Initial Admin username'
+)) {
+    if ($controllerText.Contains($obsoletePrompt)) {
+        throw "$controllerInstaller still prompts for an optional default: $obsoletePrompt"
+    }
+}
+
 foreach ($script in $shellInstallers) {
     Assert-Contains $script "--disable"
 }

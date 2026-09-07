@@ -117,7 +117,7 @@ sudo systemctl enable --now asterferry-node.service
 
 ### 1. 安装 Controller
 
-安装脚本从 GitHub 获取最新语义化 Release，下载并校验 Controller，同时把 Node 安装脚本和 Node Release 元数据放入 Controller 数据目录；不会把 Node 二进制提前下载到 Controller。
+源码中的安装脚本从 GitHub 获取最新稳定语义化 Release，下载并校验 Controller，同时把 Node 安装脚本和 Node Release 元数据放入 Controller 数据目录；不会把 Node 二进制提前下载到 Controller。发布资产中的同名脚本会固定到它所属的具体 Release，因此不需要再输入 GitHub 下载地址或版本。
 
 ```bash
 curl --fail --silent --show-error --location \
@@ -128,13 +128,41 @@ curl --fail --silent --show-error --location \
 
 脚本默认监听 `0.0.0.0:8443` 和 `0.0.0.0:9443`。原生 Linux 或启用了 systemd 的 WSL2 会创建并启动 `asterferry-controller.service`；未启用 systemd 的 WSL2 会自动使用 WSL 后台进程和启动钩子。首次生成的 Admin 密码会在输出中显示一次。
 
-Windows 使用管理员 PowerShell 下载并执行对应脚本；不传参数时脚本会交互询问 Controller 地址，直接回车可使用默认值：
+Windows 11 启用 `sudo` 后，在普通 PowerShell 中下载并执行源码入口脚本：
 
 ```powershell
-& ([scriptblock]::Create((curl.exe --fail --silent --show-error --location --tlsv1.3 "https://raw.githubusercontent.com/eternallyzzz/asterferry/main/scripts/install-controller.ps1" | Out-String)))
+$installer = Join-Path ([IO.Path]::GetTempPath()) "asterferry-install-controller.ps1"
+try {
+  curl.exe --fail --silent --show-error --location --proto '=https' --tlsv1.3 `
+    "https://raw.githubusercontent.com/eternallyzzz/asterferry/main/scripts/install-controller.ps1" `
+    --output $installer
+  if ($LASTEXITCODE -ne 0) { throw "failed to download the Controller installer" }
+  sudo pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
+  if ($LASTEXITCODE -ne 0) { throw "Controller installer failed" }
+} finally {
+  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+}
 ```
 
-它会下载 Windows Controller、Node 安装脚本和发布元数据，创建并启动 `AsterFerry-Controller` 服务。自动化部署时再通过参数传入值，并加上 `-NonInteractive`；首次生成的 Admin 密码会在输出中显示一次。
+脚本只会询问 Node 可访问的 Controller gRPC 广播地址；HTTPS 和 gRPC 默认分别监听 `0.0.0.0:8443`、`0.0.0.0:9443`，其他安装目录、服务名和用户名直接使用默认值。它会下载 Windows Controller、Node 安装脚本和发布元数据，创建并启动 `AsterFerry-Controller` 服务。首次生成的 Admin 密码会在输出中显示一次。
+
+需要固定到某个已发布版本时，直接下载该版本的发布资产即可；下面的脚本已经内置 `v1.0.0-rc.2` 的下载地址和版本，不需要填写 `-ReleaseBaseUrl` 或 `-Version`：
+
+```powershell
+$installer = Join-Path ([IO.Path]::GetTempPath()) "asterferry-install-controller.ps1"
+try {
+  curl.exe --fail --silent --show-error --location --proto '=https' --tlsv1.3 `
+    "https://github.com/eternallyzzz/asterferry/releases/download/v1.0.0-rc.2/install-controller.ps1" `
+    --output $installer
+  if ($LASTEXITCODE -ne 0) { throw "failed to download the Controller installer" }
+  sudo pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
+  if ($LASTEXITCODE -ne 0) { throw "Controller installer failed" }
+} finally {
+  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+}
+```
+
+未启用 Windows `sudo` 时，请在“管理员：PowerShell”中执行相同命令，并将 `sudo pwsh` 改为 `pwsh`。
 
 ### 2. 安装通用 Node
 

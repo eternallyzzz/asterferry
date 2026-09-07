@@ -45,7 +45,10 @@ source version. Each release must publish `install-controller.sh`,
 Controller installers download the Node scripts and metadata into the
 Controller data directory; they do not download Node binaries. On Windows,
 `install-controller.ps1` also creates or updates the `AsterFerry-Controller`
-service. Dashboard-generated commands use the Controller-hosted script by
+service. The source-tree Windows installer resolves the newest stable release;
+the copy attached to a release embeds that release's immutable download base
+URL and version, so it can be executed without asking the operator for either
+value. Dashboard-generated commands use the Controller-hosted script by
 default, or the matching GitHub Release script when the operator selects that
 source. Both paths use the Controller-provided metadata to select and verify
 the Node archive. Controller and Node are published and upgraded as one

@@ -415,7 +415,6 @@ jobs:
         run: |
           set -euo pipefail
           bash -n scripts/install-controller.sh scripts/install-node.sh
-          pwsh -NoLogo -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw -LiteralPath 'scripts/install-controller.ps1')) | Out-Null; [scriptblock]::Create((Get-Content -Raw -LiteralPath 'scripts/install-node.ps1')) | Out-Null"
           cp scripts/install-controller.ps1 dist/install-controller.ps1
           cp scripts/install-node.sh dist/install-node.sh
           cp scripts/install-node.ps1 dist/install-node.ps1
@@ -440,7 +439,20 @@ jobs:
               },
           }
           Path("dist/node-release.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+          controller_path = Path("dist/install-controller.ps1")
+          controller_text = controller_path.read_text(encoding="utf-8")
+          embedded_values = {
+              '$script:embeddedReleaseBaseUrl = ""': f'$script:embeddedReleaseBaseUrl = {json.dumps(metadata["release_base_url"])}',
+              '$script:embeddedReleaseVersion = ""': f'$script:embeddedReleaseVersion = {json.dumps(version)}',
+          }
+          for marker, replacement in embedded_values.items():
+              if controller_text.count(marker) != 1:
+                  raise SystemExit(f"expected exactly one Controller installer marker: {marker}")
+              controller_text = controller_text.replace(marker, replacement, 1)
+          controller_path.write_text(controller_text, encoding="utf-8")
           PY
+          pwsh -NoLogo -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw -LiteralPath 'scripts/install-controller.ps1')) | Out-Null; [scriptblock]::Create((Get-Content -Raw -LiteralPath 'scripts/install-node.ps1')) | Out-Null; [scriptblock]::Create((Get-Content -Raw -LiteralPath 'dist/install-controller.ps1')) | Out-Null"
       - name: Generate source SBOM
         uses: anchore/sbom-action@da167eac915b4e86f08b264dbdbc867b61be6f0c # v0.20.5
         with:
@@ -577,4 +589,8 @@ jobs:
           for asset in "${release_assets[@]}"; do
             test -f "$asset" || { echo "release asset missing or not a file: $asset" >&2; exit 1; }
           done
-          gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" "${release_flags[@]}"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${release_assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" "${release_flags[@]}"
+          fi
