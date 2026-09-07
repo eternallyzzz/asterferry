@@ -214,16 +214,20 @@ func buildShellInstallerCommand(installerURL, source, caB64, token, args string)
 	// rejected by some Bash versions when nounset is enabled, which made the
 	// generated one-line installer exit before it could download anything.
 	sanitizeProxy := `for _asterferry_proxy_name in http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY; do _asterferry_proxy_value="$(printenv "$_asterferry_proxy_name" 2>/dev/null || true)"; if [[ "$_asterferry_proxy_value" =~ [[:space:]] ]]; then unset "$_asterferry_proxy_name"; fi; done; `
+	// Bootstrap commands are often copied from a root shell or a minimal
+	// container that does not have sudo installed. Only acquire sudo when the
+	// caller is not already root.
+	privilege := `if [[ "$(id -u)" -eq 0 ]]; then _asterferry_privilege=; else command -v sudo >/dev/null 2>&1 || { echo 'sudo is required when not running as root' >&2; exit 1; }; sudo -v; _asterferry_privilege=sudo; fi; `
 	if source == NodeInstallScriptSourceController {
 		noProxy := ""
 		if host := installerURLHostname(installerURL); host != "" {
 			noProxy = " --noproxy " + shellQuote(host)
 		}
-		return fmt.Sprintf("(set -euo pipefail; %ssudo -v; ca_b64=%s; enrollment_token=%s; tmp_dir=\"$(mktemp -d -t asterferry-bootstrap.XXXXXX)\"; trap 'rm -rf \"$tmp_dir\"' EXIT; ca_file=\"$tmp_dir/controller-ca.crt\"; script_file=\"$tmp_dir/install-node.sh\"; printf '%%s' \"$ca_b64\" | base64 --decode > \"$ca_file\"; %s%s --cacert \"$ca_file\" --header \"%s: $enrollment_token\" --output \"$script_file\" %s; test -s \"$script_file\" || { echo 'AsterFerry Node installer download returned an empty script' >&2; exit 1; }; sudo bash \"$script_file\" %s)",
-			sanitizeProxy, shellQuote(caB64), shellQuote(token), common, noProxy, nodeEnrollmentTokenHeader, shellQuote(installerURL), args)
+		return fmt.Sprintf("(set -euo pipefail; %s%s ca_b64=%s; enrollment_token=%s; tmp_dir=\"$(mktemp -d -t asterferry-bootstrap.XXXXXX)\"; trap 'rm -rf \"$tmp_dir\"' EXIT; ca_file=\"$tmp_dir/controller-ca.crt\"; script_file=\"$tmp_dir/install-node.sh\"; printf '%%s' \"$ca_b64\" | base64 --decode > \"$ca_file\"; %s%s --cacert \"$ca_file\" --header \"%s: $enrollment_token\" --output \"$script_file\" %s; test -s \"$script_file\" || { echo 'AsterFerry Node installer download returned an empty script' >&2; exit 1; }; ${_asterferry_privilege} bash \"$script_file\" %s)",
+			sanitizeProxy, privilege, shellQuote(caB64), shellQuote(token), common, noProxy, nodeEnrollmentTokenHeader, shellQuote(installerURL), args)
 	}
-	return fmt.Sprintf("(set -euo pipefail; %ssudo -v; ca_b64=%s; enrollment_token=%s; tmp_dir=\"$(mktemp -d -t asterferry-bootstrap.XXXXXX)\"; trap 'rm -rf \"$tmp_dir\"' EXIT; script_file=\"$tmp_dir/install-node.sh\"; %s --output \"$script_file\" %s; test -s \"$script_file\" || { echo 'AsterFerry Node installer download returned an empty script' >&2; exit 1; }; sudo bash \"$script_file\" %s)",
-		sanitizeProxy, shellQuote(caB64), shellQuote(token), common, shellQuote(installerURL), args)
+	return fmt.Sprintf("(set -euo pipefail; %s%s ca_b64=%s; enrollment_token=%s; tmp_dir=\"$(mktemp -d -t asterferry-bootstrap.XXXXXX)\"; trap 'rm -rf \"$tmp_dir\"' EXIT; script_file=\"$tmp_dir/install-node.sh\"; %s --output \"$script_file\" %s; test -s \"$script_file\" || { echo 'AsterFerry Node installer download returned an empty script' >&2; exit 1; }; ${_asterferry_privilege} bash \"$script_file\" %s)",
+		sanitizeProxy, privilege, shellQuote(caB64), shellQuote(token), common, shellQuote(installerURL), args)
 }
 
 func buildPowerShellInstallerCommand(installerURL, source, caB64, token, args string) string {

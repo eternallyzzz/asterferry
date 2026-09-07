@@ -112,8 +112,10 @@ func TestNodeBootstrapCommandIncludesBootstrapAndEnrollmentInputs(t *testing.T) 
 		"--cacert \"$ca_file\"",
 		"--noproxy 'controller.example.com'",
 		"X-AsterFerry-Enrollment-Token: $enrollment_token",
+		`if [[ "$(id -u)" -eq 0 ]]; then _asterferry_privilege=; else`,
+		"command -v sudo >/dev/null 2>&1",
 		"sudo -v",
-		"sudo bash \"$script_file\"",
+		`${_asterferry_privilege} bash "$script_file"`,
 		"curl --disable",
 	} {
 		if !strings.Contains(linux.Command, want) {
