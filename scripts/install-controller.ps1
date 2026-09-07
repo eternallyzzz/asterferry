@@ -260,12 +260,15 @@ function Assert-ReleaseVersion {
 
 function Resolve-LatestVersion {
   $headers = @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "asterferry-installer" }
-  $release = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/latest"
-  $tag = [string]$release.tag_name
-  if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-    throw "no published stable release was found for $Repo"
+  $releases = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases?per_page=100"
+  foreach ($release in @($releases)) {
+    if ($release.draft) { continue }
+    $tag = [string]$release.tag_name
+    if ($tag -match '^v\d+\.\d+\.\d+(-rc\.\d+)?$') {
+      return $tag.TrimStart('v')
+    }
   }
-  return ([string]$tag).TrimStart('v')
+  throw "no published release was found for $Repo"
 }
 
 function Get-ExpectedHash {
@@ -338,7 +341,17 @@ if (-not $NonInteractive) {
       $Version = Read-InstallerValue -Prompt "Release version (required for custom mirror)" -Required
       $Version = $Version.TrimStart('v')
     } else {
-      $Version = Read-InstallerValue -Prompt "Release version" -DefaultLabel "empty for latest stable"
+      $suggestedVersion = $null
+      try {
+        $suggestedVersion = Resolve-LatestVersion
+      } catch {
+        Write-Warning "could not resolve the latest stable release from GitHub; leaving version empty will retry later"
+      }
+      if ($suggestedVersion) {
+        $Version = Read-InstallerValue -Prompt "Release version" -Default $suggestedVersion
+      } else {
+        $Version = Read-InstallerValue -Prompt "Release version" -DefaultLabel "empty for latest stable"
+      }
     }
   }
   if (-not $dataRootWasExplicit) {
@@ -464,6 +477,7 @@ try {
     $initArguments = @(
       "controller", "init",
       "--dir", $DataRoot,
+      "--force",
       "--http-listen", $HttpListen,
       "--grpc-listen", $GrpcListen,
       "--grpc-advertise", $GrpcAdvertise,

@@ -281,9 +281,20 @@ resolve_latest_version() {
   response="$(curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.3 \
     -H 'Accept: application/vnd.github+json' \
     -H 'User-Agent: asterferry-installer' \
-    "https://api.github.com/repos/${REPO}/releases/latest")" || die "cannot query GitHub stable release for ${REPO}"
-  latest_tag="$(printf '%s\n' "$response" | awk -F'"' '/"tag_name"[[:space:]]*:/ { print $4; exit }')"
-  [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "no published stable release was found for ${REPO}"
+    "https://api.github.com/repos/${REPO}/releases?per_page=100")" || die "cannot query GitHub releases for ${REPO}"
+  latest_tag="$(printf '%s\n' "$response" | awk -F'"' '
+{
+  for (i = 1; i < NF; i++) {
+    if ($i == "tag_name") {
+      tag = $(i + 2)
+      if (tag ~ /^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$/) {
+        print tag
+        exit
+      }
+    }
+  }
+}')"
+  [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || die "no published release was found for ${REPO}"
   VERSION="${latest_tag#v}"
 }
 
@@ -366,6 +377,7 @@ if [[ ! -f "$config_path" ]]; then
   init_args=(
     controller init
     --dir "$DATA_DIR"
+    --force
     --http-listen "$HTTP_LISTEN"
     --grpc-listen "$GRPC_LISTEN"
     --grpc-advertise "$GRPC_ADVERTISE"
