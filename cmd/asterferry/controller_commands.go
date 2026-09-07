@@ -15,13 +15,42 @@ import (
 
 	"asterferry/internal/controller"
 	"asterferry/internal/node"
+	"asterferry/internal/update"
 	"asterferry/internal/windowsservice"
 	"github.com/spf13/cobra"
 )
 
 func newControllerCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "controller", Short: "run and administer the AsterFerry Controller"}
-	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
+	cmd.AddCommand(newControllerInitCommand(), newControllerConfigureCommand(), newControllerRunCommand(), newControllerUpdateCommand(), newControllerUpdateHelperCommand(), newControllerBackupCommand(), newControllerRestoreCommand())
+	return cmd
+}
+
+func newControllerUpdateHelperCommand() *cobra.Command {
+	var options controller.UpdateHelperOptions
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:    "update-helper",
+		Short:  "replace a Controller binary after the parent exits",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			options.Timeout = timeout
+			return controller.RunUpdateHelper(cmd.Context(), options)
+		},
+	}
+	cmd.Flags().IntVar(&options.ParentPID, "pid", 0, "parent Controller process id")
+	cmd.Flags().StringVar(&options.BinaryPath, "binary", "", "active Controller executable")
+	cmd.Flags().StringVar(&options.StagedPath, "staged", "", "verified staged executable")
+	cmd.Flags().StringVar(&options.BackupPath, "backup", "", "rollback executable path")
+	cmd.Flags().StringVar(&options.HealthURL, "health-url", "", "local Controller readiness URL")
+	cmd.Flags().StringVar(&options.Target, "target", "", "target release version")
+	cmd.Flags().StringVar(&options.Mode, "mode", "", "deployment mode")
+	cmd.Flags().StringVar(&options.ServiceName, "service-name", "", "service name")
+	cmd.Flags().StringVar(&options.StatusPath, "status-path", "", "replacement status file")
+	cmd.Flags().StringVar(&options.PIDFile, "pid-file", "", "managed WSL process id file")
+	cmd.Flags().StringArrayVar(&options.RestartArgs, "restart-arg", nil, "argument passed to the restarted Controller")
+	cmd.Flags().DurationVar(&timeout, "timeout", update.HealthTimeout, "health check timeout")
 	return cmd
 }
 
@@ -103,7 +132,7 @@ func newControllerConfigureCommand() *cobra.Command {
 }
 
 func newControllerRunCommand() *cobra.Command {
-	var path, metricsListen, serviceName string
+	var path, metricsListen, serviceName, serviceMode string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "run the HTTPS REST and mTLS gRPC Controller servers",
@@ -120,6 +149,9 @@ func newControllerRunCommand() *cobra.Command {
 						return err
 					}
 				}
+				config.ServiceMode = serviceMode
+				config.ServiceName = serviceName
+				config.ProcessArgs = append([]string(nil), os.Args[1:]...)
 				instance, err := controller.New(config)
 				if err != nil {
 					return err
@@ -135,6 +167,7 @@ func newControllerRunCommand() *cobra.Command {
 	cmd.Flags().StringVarP(&path, "config", "c", filepath.Join("controller", "controller.json"), "Controller JSON configuration")
 	cmd.Flags().StringVar(&metricsListen, "metrics-listen", "", "override internal metrics listen address; empty disables")
 	cmd.Flags().StringVar(&serviceName, "service-name", "AsterFerry-Controller", "Windows service name when launched by the Service Control Manager")
+	cmd.Flags().StringVar(&serviceMode, "service-mode", "foreground", "runtime deployment mode: foreground, windows-service, systemd, wsl or container")
 	return cmd
 }
 
@@ -222,7 +255,37 @@ func newEnrollTokenCreateCommand() *cobra.Command {
 
 func newNodeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "node", Short: "enroll and run the generic AsterFerry node daemon"}
-	cmd.AddCommand(newNodeEnrollCommand(), newNodeRunCommand())
+	cmd.AddCommand(newNodeEnrollCommand(), newNodeRunCommand(), newNodeUpdateHelperCommand())
+	return cmd
+}
+
+func newNodeUpdateHelperCommand() *cobra.Command {
+	var options update.ReplacementOptions
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:    "update-helper",
+		Short:  "replace a Node binary after the parent exits",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			options.Timeout = timeout
+			options.TargetState = "healthy"
+			return update.RunReplacementHelper(cmd.Context(), options)
+		},
+	}
+	cmd.Flags().IntVar(&options.ParentPID, "pid", 0, "parent Node process id")
+	cmd.Flags().StringVar(&options.BinaryPath, "binary", "", "active Node executable")
+	cmd.Flags().StringVar(&options.StagedPath, "staged", "", "verified staged executable")
+	cmd.Flags().StringVar(&options.BackupPath, "backup", "", "rollback executable path")
+	cmd.Flags().StringVar(&options.ReadyPath, "ready-path", "", "Node health status file")
+	cmd.Flags().StringVar(&options.Target, "target", "", "target release version")
+	cmd.Flags().StringVar(&options.ActionID, "action-id", "", "Controller action identifier")
+	cmd.Flags().StringVar(&options.Mode, "mode", "", "deployment mode")
+	cmd.Flags().StringVar(&options.ServiceName, "service-name", "", "service name")
+	cmd.Flags().StringVar(&options.StatusPath, "status-path", "", "replacement status file")
+	cmd.Flags().StringVar(&options.PIDFile, "pid-file", "", "managed WSL process id file")
+	cmd.Flags().StringArrayVar(&options.RestartArgs, "restart-arg", nil, "argument passed to the restarted Node")
+	cmd.Flags().DurationVar(&timeout, "timeout", update.HealthTimeout, "health check timeout")
 	return cmd
 }
 
@@ -290,7 +353,7 @@ func newNodeRunCommand() *cobra.Command {
 			return &codedError{code: 2, err: errors.New("--bootstrap is required; configure behavior in the Controller Dashboard")}
 		}
 		return windowsservice.Run(cmd.Context(), serviceName, func(ctx context.Context) error {
-			return runNodeBootstrapWithMode(ctx, bootstrapPath, geoIPDatabasePath, serviceMode, cmd.ErrOrStderr())
+			return runNodeBootstrapWithOptions(ctx, bootstrapPath, geoIPDatabasePath, serviceName, serviceMode, append([]string(nil), os.Args[1:]...), cmd.ErrOrStderr())
 		})
 	}}
 	cmd.Flags().StringVar(&bootstrapPath, "bootstrap", "", "Controller-enrolled node bootstrap JSON")
@@ -300,11 +363,7 @@ func newNodeRunCommand() *cobra.Command {
 	return cmd
 }
 
-func runNodeBootstrap(ctx context.Context, path, geoIPDatabasePath string, errorsOut io.Writer) error {
-	return runNodeBootstrapWithMode(ctx, path, geoIPDatabasePath, "foreground", errorsOut)
-}
-
-func runNodeBootstrapWithMode(ctx context.Context, path, geoIPDatabasePath, serviceMode string, errorsOut io.Writer) error {
+func runNodeBootstrapWithOptions(ctx context.Context, path, geoIPDatabasePath, serviceName, serviceMode string, processArgs []string, errorsOut io.Writer) error {
 	bootstrap, err := node.LoadBootstrap(path)
 	if err != nil {
 		return err
@@ -313,6 +372,9 @@ func runNodeBootstrapWithMode(ctx context.Context, path, geoIPDatabasePath, serv
 		BootstrapPath:     path,
 		GeoIPDatabasePath: geoIPDatabasePath,
 		ServiceMode:       serviceMode,
+		ServiceName:       serviceName,
+		ProcessArgs:       processArgs,
+		UpdateStatusPath:  filepath.Join(filepath.Dir(path), "node-update.json"),
 		Logger:            slog.New(slog.NewTextHandler(errorsOut, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	})
 	if err != nil {

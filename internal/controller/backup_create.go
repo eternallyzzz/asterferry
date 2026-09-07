@@ -145,7 +145,7 @@ func backupPayloadFilesWithNodeInstallers(config Config, backend databaseBackend
 			return nil, fmt.Errorf("inspect Node installer asset %q: %w", name, err)
 		}
 		if info.IsDir() {
-			return nil, fmt.Errorf("Node installer asset %q is a directory", name)
+			return nil, fmt.Errorf("node installer asset %q is a directory", name)
 		}
 		files = append(files, name)
 	}

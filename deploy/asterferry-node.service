@@ -5,13 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/asterferry node run --bootstrap /var/lib/asterferry/node-bootstrap.json --service-mode systemd
+ExecStart=/var/lib/asterferry/bin/asterferry node run --bootstrap /var/lib/asterferry/node-bootstrap.json --service-mode systemd
 WorkingDirectory=/var/lib/asterferry
 User=asterferry
 Group=asterferry
 UMask=0077
 Restart=on-failure
 RestartSec=2s
+KillMode=process
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

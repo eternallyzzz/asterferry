@@ -14,6 +14,29 @@ tags:
   - name: audit
   - name: runtime
 paths:
+  /controller/update:
+    get:
+      tags: [operations]
+      operationId: getControllerUpdate
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses: { '200': { description: Stable Controller release status, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } } }
+  /controller/update/check:
+    post:
+      tags: [operations]
+      operationId: checkControllerUpdate
+      description: Query published GitHub stable releases. The check is read-only with respect to the running binary; applying an available release always requires a separate Admin request.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      responses: { '200': { description: Stable Controller release status }, '503': { description: Release metadata unavailable } }
+  /controller/update/apply:
+    post:
+      tags: [operations]
+      operationId: applyControllerUpdate
+      description: Download and verify the latest stable Controller archive over HTTPS using SHA256SUMS, restart the native service and roll back automatically if /readyz does not recover.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateRequest' } } } }
+      responses: { '202': { description: Controller update started }, '409': { $ref: '#/components/responses/Conflict' }, '503': { description: Update metadata or download unavailable } }
   /healthz:
     get:
       operationId: healthz
@@ -222,13 +245,20 @@ paths:
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }]
       responses: { '200': { description: Latest observed state, content: { application/json: { schema: { $ref: '#/components/schemas/ObservedState' } } } }, '404': { $ref: '#/components/responses/Unauthorized' } }
+  /nodes/{nodeId}/update:
+    get:
+      tags: [operations]
+      operationId: getNodeUpdate
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/NodeId' }]
+      responses: { '200': { description: Node self-upgrade capability and status, content: { application/json: { schema: { $ref: '#/components/schemas/NodeUpdateStatus' } } } } }
   /nodes/{nodeId}/actions/{action}:
     post:
       tags: [operations]
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/NodeId' }
-        - { name: action, in: path, required: true, schema: { type: string, enum: [drain, reconnect, resync, decommission, purge] } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [drain, reconnect, resync, decommission, purge, upgrade] } }
         - { $ref: '#/components/parameters/IfMatch', description: Required when action is purge; the node must already be decommissioned. }
         - { $ref: '#/components/parameters/IdempotencyKey' }
         - { $ref: '#/components/parameters/CSRF' }
@@ -530,6 +560,50 @@ components:
     Unauthorized: { description: Authentication required }
     Conflict: { description: Revision or unique binding conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   schemas:
+    ControllerUpdateRequest:
+      type: object
+      properties: { version: { type: string, pattern: '^[0-9]+\.[0-9]+\.[0-9]+$' } }
+    ControllerUpdateState:
+      type: object
+      required: [schema_version, current_version, channel, deployment, supported, state, updated_at]
+      properties:
+        schema_version: { type: integer }
+        current_version: { type: string }
+        channel: { type: string, enum: [stable] }
+        deployment: { type: string }
+        supported: { type: boolean }
+        state: { type: string, enum: [disabled, checking, up_to_date, available, applying, failed, rolled_back, manual_required, unsupported] }
+        latest_version: { type: string }
+        latest_url: { type: string, format: uri }
+        published_at: { type: string, format: date-time }
+        last_checked_at: { type: string, format: date-time }
+        last_error: { type: string }
+        target_version: { type: string }
+        previous_version: { type: string }
+        updated_at: { type: string, format: date-time }
+    ControllerUpdateResponse:
+      type: object
+      required: [reason, status]
+      properties: { reason: { type: string }, status: { $ref: '#/components/schemas/ControllerUpdateState' } }
+    NodeUpdateStatus:
+      type: object
+      required: [schema_version, node_id, state, supported, updated_at]
+      properties:
+        schema_version: { type: integer }
+        node_id: { type: string }
+        action_id: { type: string }
+        current_version: { type: string }
+        target_version: { type: string }
+        latest_version: { type: string }
+        latest_url: { type: string, format: uri }
+        state: { type: string, enum: [up_to_date, applying, failed, rolled_back, manual_required, unsupported] }
+        supported: { type: boolean }
+        deployment: { type: string }
+        platform: { type: string, enum: [linux, windows] }
+        architecture: { type: string }
+        reason: { type: string }
+        last_error: { type: string }
+        updated_at: { type: string, format: date-time }
     LoginRequest:
       type: object
       required: [username, password]

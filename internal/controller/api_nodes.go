@@ -93,6 +93,10 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 		s.nodeRuntimeAction(w, r, nodeID, parts[2:])
 		return
 	}
+	if len(parts) == 2 && parts[1] == "update" {
+		s.nodeUpdate(w, r, nodeID)
+		return
+	}
 	if len(parts) == 2 && r.Method == http.MethodGet && (parts[1] == "observed" || parts[1] == "snapshot" || parts[1] == "desired") {
 		if _, ok := s.authorize(w, r, RoleViewer); !ok {
 			return
@@ -252,8 +256,16 @@ func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusAccepted, map[string]any{"node_id": nodeID, "action": action, "assignments": assignments})
 			return
 		}
-		if action != "drain" && action != "reconnect" && action != "resync" && action != "decommission" && action != "purge" {
+		if action != "drain" && action != "reconnect" && action != "resync" && action != "decommission" && action != "purge" && action != "upgrade" {
 			writeError(w, http.StatusBadRequest, "unknown_action", "unsupported node action")
+			return
+		}
+		if action == "upgrade" {
+			if user.Role != RoleAdmin {
+				writeError(w, http.StatusForbidden, "forbidden", "Node upgrades require an administrator")
+				return
+			}
+			s.requestNodeUpgrade(w, r, nodeID, user)
 			return
 		}
 		if action == "purge" {

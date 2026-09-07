@@ -15,8 +15,9 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     source = root / "internal" / "controller" / "openapi.yaml"
     generated = root / "api" / "openapi.yaml"
-    generated_header = b"# Code generated from internal/controller/openapi.yaml; DO NOT EDIT.\n"
     source_bytes = source.read_bytes()
+    line_ending = b"\r\n" if b"\r\n" in source_bytes else b"\n"
+    generated_header = b"# Code generated from internal/controller/openapi.yaml; DO NOT EDIT." + line_ending
     generated_bytes = generated_header + source_bytes
     if generated.exists() and generated.read_bytes() == generated_bytes:
         return 0

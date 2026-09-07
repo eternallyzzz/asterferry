@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -8,15 +9,23 @@ import (
 // ChangeBus owns all process-local subscriptions. It has no database handle
 // and is safe to close before the shared database handle is released.
 type ChangeBus struct {
-	actionMu     sync.Mutex
-	actionSubs   map[string]map[uint64]*actionSubscription
-	snapshotSubs map[string]map[uint64]*snapshotSubscription
-	changeMu     sync.Mutex
-	changeSubs   map[uint64]*resourceChangeSubscription
-	runtimeMu    sync.Mutex
-	runtimeSubs  map[uint64]*runtimeChangeSubscription
-	close        sync.Once
-	closed       atomic.Bool
+	actionMu       sync.Mutex
+	actionSubs     map[string]map[uint64]*actionSubscription
+	snapshotSubs   map[string]map[uint64]*snapshotSubscription
+	changeMu       sync.Mutex
+	changeSubs     map[uint64]*resourceChangeSubscription
+	runtimeMu      sync.Mutex
+	runtimeSubs    map[uint64]*runtimeChangeSubscription
+	capabilityMu   sync.RWMutex
+	capabilities   map[string]nodeCapability
+	nextCapability atomic.Uint64
+	close          sync.Once
+	closed         atomic.Bool
+}
+
+type nodeCapability struct {
+	token uint64
+	items []string
 }
 
 func newChangeBus() *ChangeBus { return &ChangeBus{} }
@@ -57,5 +66,53 @@ func (b *ChangeBus) Close() {
 			delete(b.runtimeSubs, id)
 		}
 		b.runtimeMu.Unlock()
+
+		b.capabilityMu.Lock()
+		b.capabilities = nil
+		b.capabilityMu.Unlock()
 	})
+}
+
+// SetNodeCapabilities records the capabilities from the currently
+// authenticated control stream. The token lets a reconnecting stream remove
+// only its own registration while an overlapping old stream unwinds.
+func (b *ChangeBus) SetNodeCapabilities(nodeID string, capabilities []string) uint64 {
+	if b == nil {
+		return 0
+	}
+	token := b.nextCapability.Add(1)
+	items := append([]string(nil), capabilities...)
+	b.capabilityMu.Lock()
+	if b.capabilities == nil {
+		b.capabilities = make(map[string]nodeCapability)
+	}
+	if !b.closed.Load() {
+		b.capabilities[strings.TrimSpace(nodeID)] = nodeCapability{token: token, items: items}
+	}
+	b.capabilityMu.Unlock()
+	return token
+}
+
+func (b *ChangeBus) ClearNodeCapabilities(nodeID string, token uint64) {
+	if b == nil {
+		return
+	}
+	b.capabilityMu.Lock()
+	defer b.capabilityMu.Unlock()
+	if current, ok := b.capabilities[strings.TrimSpace(nodeID)]; ok && current.token == token {
+		delete(b.capabilities, strings.TrimSpace(nodeID))
+	}
+}
+
+func (b *ChangeBus) NodeCapabilities(nodeID string) []string {
+	if b == nil {
+		return nil
+	}
+	b.capabilityMu.RLock()
+	defer b.capabilityMu.RUnlock()
+	current, ok := b.capabilities[strings.TrimSpace(nodeID)]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), current.items...)
 }

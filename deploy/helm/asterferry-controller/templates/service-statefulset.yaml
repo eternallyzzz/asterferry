@@ -83,6 +83,8 @@ spec:
 {{- end }}
             - --metrics-listen
             - {{ if .Values.metrics.enabled }}{{ .Values.metrics.listen | quote }}{{ else }}""{{ end }}
+            - --service-mode
+            - container
           ports:
             - name: https
               containerPort: {{ .Values.controller.httpsPort }}

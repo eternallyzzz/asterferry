@@ -36,6 +36,41 @@ export interface ControllerNodePatch {
   certificate_serial?: string;
 }
 
+export interface ControllerUpdateState {
+  schema_version: number;
+  current_version: string;
+  channel: string;
+  deployment: string;
+  supported: boolean;
+  state: string;
+  latest_version?: string;
+  latest_url?: string;
+  published_at?: string;
+  last_checked_at?: string;
+  last_error?: string;
+  target_version?: string;
+  previous_version?: string;
+  updated_at: string;
+}
+
+export interface NodeUpdateStatus {
+  schema_version: number;
+  node_id: string;
+  action_id?: string;
+  current_version?: string;
+  target_version?: string;
+  latest_version?: string;
+  latest_url?: string;
+  state: string;
+  supported: boolean;
+  deployment?: string;
+  platform?: string;
+  architecture?: string;
+  reason?: string;
+  last_error?: string;
+  updated_at: string;
+}
+
 export type NodeSpecKind = "gateway" | "agent";
 export interface ControllerSelector {
   match_labels?: Record<string, string>;
@@ -384,7 +419,11 @@ export function listNodeInstallations(token?: string): Promise<{ items: PendingN
 export function createNodeInstallation(input: NodeInstallationRequest, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>("/node-installations", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(input) }, token); }
 export function reissueNodeInstallation(id: string, token?: string, idempotencyKey?: string): Promise<NodeBootstrapResponse> { return request<NodeBootstrapResponse>(`/node-installations/${encodeURIComponent(id)}/reissue`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
 export function deleteNodeInstallation(id: string, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/node-installations/${encodeURIComponent(id)}`, { method: "DELETE", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
-export function nodeAction(id: string, action: "drain" | "reconnect" | "resync" | "decommission", token?: string, idempotencyKey?: string): Promise<{ state: string }> { return request<{ state: string }>(`/nodes/${encodeURIComponent(id)}/actions/${action}`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
+export function nodeAction(id: string, action: "drain" | "reconnect" | "resync" | "decommission" | "upgrade", token?: string, idempotencyKey?: string): Promise<{ state: string; status?: NodeUpdateStatus }> { return request<{ state: string; status?: NodeUpdateStatus }>(`/nodes/${encodeURIComponent(id)}/actions/${action}`, { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
+export function getNodeUpdate(id: string, token?: string): Promise<NodeUpdateStatus> { return request<NodeUpdateStatus>(`/nodes/${encodeURIComponent(id)}/update`, {}, token); }
+export function getControllerUpdate(token?: string): Promise<{ reason: string; status: ControllerUpdateState }> { return request<{ reason: string; status: ControllerUpdateState }>("/controller/update", {}, token); }
+export function checkControllerUpdate(token?: string, idempotencyKey?: string): Promise<{ reason: string; status: ControllerUpdateState }> { return request<{ reason: string; status: ControllerUpdateState }>("/controller/update/check", { method: "POST", headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined }, token); }
+export function applyControllerUpdate(version?: string, token?: string, idempotencyKey?: string): Promise<{ reason: string; status: ControllerUpdateState }> { return request<{ reason: string; status: ControllerUpdateState }>("/controller/update/apply", { method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(version ? { version } : {}) }, token); }
 export function getNodeSpec(id: string, token?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, {}, token); }
 export function putNodeSpec(id: string, spec: ControllerNodeSpecInput, revision?: number, token?: string, idempotencyKey?: string): Promise<ControllerNodeSpec> { return request<ControllerNodeSpec>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "PUT", headers: { "Content-Type": "application/json", ...(revision !== undefined ? { "If-Match": String(revision) } : {}), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) }, body: JSON.stringify(spec) }, token); }
 export function deleteNodeSpec(id: string, revision: number, token?: string, idempotencyKey?: string): Promise<void> { return request<void>(`/nodes/${encodeURIComponent(id)}/spec`, { method: "DELETE", headers: { "If-Match": String(revision), ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) } }, token); }

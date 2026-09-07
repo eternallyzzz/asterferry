@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"asterferry/internal/atomicfile"
 	"asterferry/internal/jsonutil"
+	"asterferry/internal/update"
 )
 
 const (
@@ -49,6 +51,17 @@ type Config struct {
 	// the corresponding table.
 	IdempotencyRetentionHours int64 `json:"idempotency_retention_hours"`
 	AuditRetentionDays        int64 `json:"audit_retention_days"`
+	// Stable release checks are enabled by default. The interval is persisted
+	// in seconds so controller.json remains human-readable.
+	UpdateCheckEnabled         bool  `json:"update_check_enabled"`
+	UpdateCheckIntervalSeconds int64 `json:"update_check_interval_seconds"`
+	// ServiceMode is process-local deployment provenance supplied by the run
+	// command. It is intentionally not persisted in controller.json.
+	ServiceMode string `json:"-"`
+	// ServiceName and ProcessArgs are process-local restart metadata used by
+	// the self-updater. They are populated by the CLI and never persisted.
+	ServiceName string   `json:"-"`
+	ProcessArgs []string `json:"-"`
 	// SourcePath is process-local provenance used by backup helpers. It is not
 	// serialized into controller.json and does not affect configuration
 	// validation.
@@ -58,21 +71,23 @@ type Config struct {
 func DefaultConfig(dir string) Config {
 	dir = filepath.Clean(dir)
 	return Config{
-		HTTPListen:                ":8443",
-		MetricsListen:             "127.0.0.1:9090",
-		GRPCListen:                ":9443",
-		DatabaseDriver:            DatabaseDriverSQLite,
-		DatabasePath:              filepath.Join(dir, "controller.db"),
-		NodeInstallersDir:         filepath.Join(dir, "node-installers"),
-		CAKeyPath:                 filepath.Join(dir, "ca", "ca.key"),
-		CACertPath:                filepath.Join(dir, "ca", "ca.crt"),
-		TLSCertPath:               filepath.Join(dir, "tls", "controller.crt"),
-		TLSKeyPath:                filepath.Join(dir, "tls", "controller.key"),
-		MasterKeyPath:             filepath.Join(dir, "master.key"),
-		DashboardEnable:           true,
-		LogLevel:                  "info",
-		IdempotencyRetentionHours: 24,
-		AuditRetentionDays:        90,
+		HTTPListen:                 ":8443",
+		MetricsListen:              "127.0.0.1:9090",
+		GRPCListen:                 ":9443",
+		DatabaseDriver:             DatabaseDriverSQLite,
+		DatabasePath:               filepath.Join(dir, "controller.db"),
+		NodeInstallersDir:          filepath.Join(dir, "node-installers"),
+		CAKeyPath:                  filepath.Join(dir, "ca", "ca.key"),
+		CACertPath:                 filepath.Join(dir, "ca", "ca.crt"),
+		TLSCertPath:                filepath.Join(dir, "tls", "controller.crt"),
+		TLSKeyPath:                 filepath.Join(dir, "tls", "controller.key"),
+		MasterKeyPath:              filepath.Join(dir, "master.key"),
+		DashboardEnable:            true,
+		LogLevel:                   "info",
+		IdempotencyRetentionHours:  24,
+		AuditRetentionDays:         90,
+		UpdateCheckEnabled:         true,
+		UpdateCheckIntervalSeconds: int64(update.DefaultCheckEvery / time.Second),
 	}
 }
 
@@ -126,6 +141,9 @@ func (c Config) Validate() error {
 	if c.IdempotencyRetentionHours < 0 || c.AuditRetentionDays < 0 {
 		return errors.New("controller history retention values cannot be negative")
 	}
+	if c.UpdateCheckIntervalSeconds < 15 || c.UpdateCheckIntervalSeconds > int64((7*24*time.Hour)/time.Second) {
+		return errors.New("controller update_check_interval_seconds must be between 15 and 604800")
+	}
 	return nil
 }
 
@@ -159,6 +177,12 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if _, ok := fields["audit_retention_days"]; !ok {
 			config.AuditRetentionDays = defaults.AuditRetentionDays
+		}
+		if _, ok := fields["update_check_enabled"]; !ok {
+			config.UpdateCheckEnabled = defaults.UpdateCheckEnabled
+		}
+		if _, ok := fields["update_check_interval_seconds"]; !ok || config.UpdateCheckIntervalSeconds == 0 {
+			config.UpdateCheckIntervalSeconds = defaults.UpdateCheckIntervalSeconds
 		}
 	}
 	if err := config.Validate(); err != nil {

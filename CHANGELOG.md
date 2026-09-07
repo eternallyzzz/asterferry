@@ -54,5 +54,10 @@ data-plane architecture.
   management HTTPS metrics remain authenticated. GeoIP routing is now an
   optional external, freshness-checked resource instead of a repository or
   image binary.
+- Adds stable GitHub release detection with Admin-confirmed Controller
+  self-upgrade, SHA256SUMS verification and readiness rollback. Native
+  Windows-service, Linux-systemd and WSL Nodes can be upgraded one at a time
+  through the Dashboard, REST API or CLI; container and Helm deployments report
+  image rollout as the required operation.
 - Adds release-candidate tagging, seven-day soak guidance, tracked-secret
   scanning, protocol fuzz smoke and same-runner benchmark regression gates.

@@ -8,22 +8,25 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"asterferry/internal/dashboard"
 )
 
 type Server struct {
-	resources    *ResourceRepository
-	runtime      *RuntimeRepository
-	changes      *ChangeBus
-	config       Config
-	http         *http.Server
-	metricsHTTP  *http.Server
-	loginLimiter *loginLimiter
-	metrics      *ControllerMetrics
-	scheduler    *Scheduler
-	leadership   *leadership
+	resources     *ResourceRepository
+	runtime       *RuntimeRepository
+	changes       *ChangeBus
+	config        Config
+	http          *http.Server
+	metricsHTTP   *http.Server
+	loginLimiter  *loginLimiter
+	metrics       *ControllerMetrics
+	scheduler     *Scheduler
+	leadership    *leadership
+	update        *UpdateManager
+	nodeUpgradeMu sync.Mutex
 }
 
 const (
@@ -63,6 +66,7 @@ func newServer(config Config, repositories *ControllerRepositories, scheduler *S
 		}
 	}
 	server := &Server{resources: resources, runtime: runtime, changes: changes, config: config, loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler, leadership: resources.leadership}
+	server.update = NewUpdateManager(config, resources)
 	// Runtime SSE is intentionally long-lived.  Per-request handlers retain
 	// their own bounded read/decode limits; the write deadline must not cut off
 	// a healthy event stream after an absolute 30-second wall clock interval.
@@ -116,6 +120,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/me", s.me)
 	mux.HandleFunc("/api/v1/nodes", s.nodes)
 	mux.HandleFunc("/api/v1/nodes/", s.nodeAction)
+	mux.HandleFunc("/api/v1/controller/update", s.controllerUpdate)
+	mux.HandleFunc("/api/v1/controller/update/", s.controllerUpdate)
 	mux.HandleFunc("/api/v1/node-installations", s.nodeInstallations)
 	mux.HandleFunc("/api/v1/node-installations/", s.nodeInstallationAction)
 	mux.HandleFunc("/api/v1/services", s.services)

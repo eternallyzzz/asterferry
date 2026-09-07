@@ -128,7 +128,7 @@ func validateBootstrapConfiguration(config Config, scriptSource string) (NodeRel
 	// Controller must never silently target a different Node release.
 	built := strings.TrimPrefix(strings.TrimSpace(buildinfo.Version), "v")
 	if built != "" && built != "dev" && validReleaseVersion(built) && built != strings.TrimPrefix(metadata.Version, "v") {
-		return NodeReleaseMetadata{}, nil, fmt.Errorf("Node release metadata version %q does not match Controller binary version %q", metadata.Version, buildinfo.Version)
+		return NodeReleaseMetadata{}, nil, fmt.Errorf("node release metadata version %q does not match Controller binary version %q", metadata.Version, buildinfo.Version)
 	}
 	if source == NodeInstallScriptSourceController {
 		for _, installer := range []string{bootstrapInstallerUnix, bootstrapInstallerWindows} {

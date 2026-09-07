@@ -98,7 +98,7 @@ func (s *ResourceRepository) PublishAction(ctx context.Context, nodeID, name, pa
 }
 
 func validateRuntimeAction(name string) error {
-	if name != "drain" && name != "reconnect" && name != "resync" && name != "decommission" && name != "runtime_connection" && name != "clear_runtime_controls" {
+	if name != "drain" && name != "reconnect" && name != "resync" && name != "decommission" && name != "runtime_connection" && name != "clear_runtime_controls" && name != "node_upgrade" {
 		return errors.New("runtime action name is unsupported")
 	}
 	return nil
@@ -137,29 +137,38 @@ func (b *ChangeBus) publishAction(nodeID string, action RuntimeAction) bool {
 // idempotency key covers both the audit and the delivery request, so a client
 // retry never emits the same action twice.
 func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name, payload string, options WriteOptions) (bool, error) {
+	_, delivered, err := s.RequestNodeActionWithID(ctx, nodeID, name, payload, options)
+	return delivered, err
+}
+
+// RequestNodeActionWithID is the action variant used by upgrade orchestration.
+// The action identifier is returned so the durable node-update state and the
+// node's post-restart result can be correlated without exposing database
+// internals to the HTTP layer.
+func (s *ResourceRepository) RequestNodeActionWithID(ctx context.Context, nodeID, name, payload string, options WriteOptions) (string, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	nodeID = strings.TrimSpace(nodeID)
 	name = strings.TrimSpace(name)
 	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
-		return false, err
+		return "", false, err
 	}
 	if err := validateRuntimeAction(name); err != nil {
-		return false, err
+		return "", false, err
 	}
 	if len(payload) > 1<<20 || strings.ContainsAny(payload, "\x00") {
-		return false, errors.New("runtime action payload is too large")
+		return "", false, errors.New("runtime action payload is too large")
 	}
 	if payload != "" {
 		var value any
 		if err := json.Unmarshal([]byte(payload), &value); err != nil {
-			return false, errors.New("runtime action payload must be valid JSON")
+			return "", false, errors.New("runtime action payload must be valid JSON")
 		}
 	}
 	actionID, err := randomID()
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	request := struct {
 		NodeID  string `json:"node_id"`
@@ -168,32 +177,33 @@ func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name
 	}{NodeID: nodeID, Name: name, Payload: payload}
 	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	defer tx.Rollback()
 	hit, err := idempotencyHit(ctx, tx, options.IdempotencyKey, request)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if hit {
 		var response struct {
-			Delivered bool `json:"delivered"`
+			ActionID  string `json:"action_id"`
+			Delivered bool   `json:"delivered"`
 		}
 		var data []byte
 		if err := tx.QueryRowContext(ctx, `SELECT response_json FROM idempotency_keys WHERE key=?`, strings.TrimSpace(options.IdempotencyKey)).Scan(&data); err != nil {
-			return false, err
+			return "", false, err
 		}
 		if err := json.Unmarshal(data, &response); err != nil {
-			return false, err
+			return "", false, err
 		}
-		return response.Delivered, s.commitWriteTx(ctx, tx)
+		return response.ActionID, response.Delivered, s.commitWriteTx(ctx, tx)
 	}
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id=?`, nodeID).Scan(&exists); err != nil {
-		return false, err
+		return "", false, err
 	}
 	if err := insertAudit(ctx, tx, options.Actor, "action:"+name, "node", nodeID, 0, map[string]string{"action_id": actionID}); err != nil {
-		return false, err
+		return "", false, err
 	}
 	// Delivery is best effort and happens after commit. Persist a delivery
 	// hint so an idempotent retry returns the same accepted/queued result
@@ -202,17 +212,17 @@ func (s *ResourceRepository) RequestNodeAction(ctx context.Context, nodeID, name
 	// broker is reported as queued for an explicit retry.
 	deliveryHint := s.ChangeBus().actionCanDeliver(nodeID)
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"action_id": actionID, "delivered": deliveryHint}); err != nil {
-		return false, err
+		return "", false, err
 	}
 	if err := s.commitWriteTx(ctx, tx); err != nil {
-		return false, err
+		return "", false, err
 	}
 	delivered := s.ChangeBus().publishAction(nodeID, RuntimeAction{ID: actionID, Name: name, Payload: []byte(payload)})
 	if strings.TrimSpace(options.IdempotencyKey) != "" {
 		// Return the durable result for idempotent requests. A concurrent stream
 		// close may make the best-effort publish return false even though the
 		// request was accepted and should remain replay-safe.
-		return deliveryHint, nil
+		return actionID, deliveryHint, nil
 	}
-	return delivered, nil
+	return actionID, delivered, nil
 }

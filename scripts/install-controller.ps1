@@ -184,12 +184,10 @@ function Assert-ReleaseVersion {
 
 function Resolve-LatestVersion {
   $headers = @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "asterferry-installer" }
-  $releases = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases?per_page=100"
-  $tag = $releases |
-    Where-Object { [string]$_.tag_name -match '^v\d+\.\d+\.\d+(-rc\.\d+)?$' } |
-    Select-Object -First 1 -ExpandProperty tag_name
-  if ([string]::IsNullOrWhiteSpace([string]$tag)) {
-    throw "no published semantic release was found for $Repo"
+  $release = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri "https://api.github.com/repos/$Repo/releases/latest"
+  $tag = [string]$release.tag_name
+  if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+    throw "no published stable release was found for $Repo"
   }
   return ([string]$tag).TrimStart('v')
 }
@@ -322,10 +320,14 @@ try {
   if ($existingService -and $existingService.Status -ne "Stopped") {
     Stop-Service -Name $ServiceName -Force
   }
-  New-Item -ItemType Directory -Force -Path $InstallRoot, $DataRoot | Out-Null
+  New-Item -ItemType Directory -Force -Path $InstallRoot, $DataRoot, (Join-Path $DataRoot "bin") | Out-Null
   Grant-InstallerAccess -Path $DataRoot -ConfigPath $configPath -ConfigExists $existingConfig
-  $binaryPath = Join-Path $InstallRoot "asterferry.exe"
+  # The service account must be able to atomically replace the active binary
+  # during a Controller-managed upgrade. Keep the Program Files copy as an
+  # installer-facing cache, while running the service from the data-owned path.
+  $binaryPath = Join-Path $DataRoot "bin\asterferry.exe"
   Copy-Item -LiteralPath $extractedBinary.FullName -Destination $binaryPath -Force
+  Copy-Item -LiteralPath $extractedBinary.FullName -Destination (Join-Path $InstallRoot "asterferry.exe") -Force
 
   if (-not $existingConfig) {
     $initArguments = @(
@@ -373,7 +375,7 @@ try {
 
   Restore-ControllerDataSecurity
 
-  $serviceCommand = '"{0}" controller run --config "{1}" --service-name "{2}"' -f $binaryPath, $configPath, $ServiceName
+  $serviceCommand = '"{0}" controller run --config "{1}" --service-name "{2}" --service-mode windows-service' -f $binaryPath, $configPath, $ServiceName
   if ($existingService) {
     Invoke-Sc -Arguments @("config", $ServiceName, "binPath=", $serviceCommand, "start=", "auto")
   } else {

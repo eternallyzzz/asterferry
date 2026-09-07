@@ -6,8 +6,8 @@ The current release establishes the public compatibility line:
 
 - AFDP/2 and control/3 are the supported wire protocols.
 - The REST/OpenAPI contract, snapshot schema and backup format are stable
-  inputs for v2.x.
-- A v2.x release may add optional fields and endpoints, but must not silently
+  inputs for v1.x.
+- A v1.x release may add optional fields and endpoints, but must not silently
   change the meaning of existing fields, authentication requirements, wire
   framing, or persisted data.
 - A breaking wire, API, or database change belongs in v2. It requires a
@@ -25,6 +25,15 @@ Before any upgrade, export a Controller backup and verify that it can be
 listed/restored into a disposable directory using the same release line. Keep
 the previous installation intact until the new process passes readiness and a
 Node data-plane smoke test.
+
+Patch and minor self-upgrades use only published stable GitHub Releases and
+the repository's `SHA256SUMS` file. Release candidates are not selected by the
+automatic checker. Native Windows services, Linux systemd services and WSL
+managed processes can be upgraded in place with automatic readiness rollback;
+container and Helm deployments must roll out a new image. A Node from before
+the self-upgrade capability requires one manual run of the current installer
+first. The updater preserves the database, CA/TLS identity, master key,
+bootstrap, cache and configuration.
 
 ## Recovery objectives
 

@@ -15,6 +15,7 @@ import {
 	ControllerAPIError,
   deleteNodeSpec,
 	getNodeSpec,
+	getNodeUpdate,
 	listNodes,
 	nodeAction,
 	putNodeSpec,
@@ -23,6 +24,7 @@ import {
 	type ControllerGatewaySpecInput,
 	type ControllerNode,
 	type ControllerNodeSpecInput,
+	type NodeUpdateStatus,
 	type EgressPolicy,
 	type NodeBootstrapResponse,
   type NodeInstallScriptSource,
@@ -72,6 +74,9 @@ const installResult = ref<NodeBootstrapResponse | null>(null);
 const installError = ref("");
 const installing = ref(false);
 const copiedInstallCommand = ref(false);
+const nodeUpdate = ref<NodeUpdateStatus | null>(null);
+const nodeUpdateLoading = ref(false);
+const nodeUpdating = ref(false);
 let gatewayRequestVersion = 0;
 
 const activeKind = computed(() => specKind.value ?? selectedKind.value);
@@ -156,7 +161,10 @@ function resetDetailState() {
   gatewayError.value = "";
   gatewayRequestVersion++;
   specValid.value = true;
-  specError.value = "";
+	specError.value = "";
+	nodeUpdate.value = null;
+	nodeUpdateLoading.value = false;
+	nodeUpdating.value = false;
 }
 
 async function loadGatewayNodes(nodeID: string) {
@@ -221,12 +229,25 @@ watch(
     const node = props.node;
     resetDetailState();
     void loadSpec(node);
+	void loadNodeUpdate(node.id);
   },
   { immediate: true },
 );
 
 function reloadSpec() {
   if (props.node) void loadSpec(props.node);
+}
+
+async function loadNodeUpdate(nodeID: string) {
+  nodeUpdateLoading.value = true;
+  try {
+    const result = await getNodeUpdate(nodeID);
+    if (props.node?.id === nodeID) nodeUpdate.value = result;
+  } catch (caught) {
+    if (props.node?.id === nodeID) notify.error(describeError(caught));
+  } finally {
+    if (props.node?.id === nodeID) nodeUpdateLoading.value = false;
+  }
 }
 
 function openInstall() {
@@ -359,6 +380,30 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
     notify.error(describeError(caught));
   }
 }
+
+async function requestNodeUpgrade() {
+  if (!props.node) return;
+  nodeUpdating.value = true;
+  try {
+    const result = await nodeAction(props.node.id, "upgrade", undefined, newIdempotencyKey());
+    nodeUpdate.value = result.status ?? nodeUpdate.value;
+    notify.success(`${props.node.id}：Node 升级请求已${result.state === "delivered" ? "下发" : "排队"}。`);
+    emit("changed");
+    await loadNodeUpdate(props.node.id);
+  } catch (caught) {
+    notify.error(describeError(caught));
+    await loadNodeUpdate(props.node.id);
+  } finally {
+    nodeUpdating.value = false;
+  }
+}
+
+function updateTone(state?: string): "good" | "warn" | "bad" | "neutral" {
+  if (state === "up_to_date") return "good";
+  if (state === "available" || state === "applying" || state === "checking") return "warn";
+  if (state === "failed" || state === "rolled_back") return "bad";
+  return "neutral";
+}
 </script>
 
 <template>
@@ -392,6 +437,20 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
             <button type="button" class="af-button secondary" @click="runAction('resync')">对账</button>
             <button type="button" class="af-button secondary" @click="runAction('reconnect')">重连</button>
             <button type="button" class="af-button secondary" @click="runAction('drain')">排空</button>
+          </div>
+          <div v-if="session.canAdmin.value && !nodeDecommissioned" class="update-box">
+            <div>
+              <span class="muted action-label">Node 自升级</span>
+              <div v-if="nodeUpdateLoading" class="form-note">正在读取升级状态…</div>
+              <div v-else class="update-summary">
+                <StatusPill :tone="updateTone(nodeUpdate?.state)">{{ nodeUpdate?.state || "未知" }}</StatusPill>
+                <span>{{ nodeUpdate?.current_version || "—" }}<template v-if="nodeUpdate?.latest_version"> → {{ nodeUpdate.latest_version }}</template></span>
+                <span v-if="nodeUpdate?.deployment" class="muted">{{ nodeUpdate.deployment }}</span>
+              </div>
+              <p v-if="nodeUpdate?.reason" class="form-note">{{ nodeUpdate.reason }}</p>
+              <p v-if="nodeUpdate?.last_error" class="section-error">{{ nodeUpdate.last_error }}</p>
+            </div>
+            <button type="button" class="af-button primary" :disabled="nodeUpdating || !nodeUpdate?.supported || nodeUpdate?.state === 'applying'" @click="requestNodeUpgrade">{{ nodeUpdating ? "下发中…" : nodeUpdate?.state === "applying" ? "升级中…" : "确认升级" }}</button>
           </div>
           <div v-if="session.canAdmin.value" class="action-row">
             <span class="muted action-label">节点安装</span>
@@ -580,6 +639,27 @@ async function runAction(action: "drain" | "reconnect" | "resync") {
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--af-border-soft);
+}
+.update-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-sm);
+  background: var(--af-panel-soft);
+}
+.update-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+@media (max-width: 700px) {
+  .update-box { align-items: flex-start; flex-direction: column; }
 }
 .action-label { font-size: 12px; }
 .loading-row {

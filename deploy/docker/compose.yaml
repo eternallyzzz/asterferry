@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     image: ${ASTERFERRY_IMAGE:-asterferry:local}
     user: "${ASTERFERRY_CONTAINER_UID:-10001}:${ASTERFERRY_CONTAINER_GID:-10001}"
-    command: ["controller", "run", "--config", "/var/lib/asterferry/controller.json"]
+    command: ["controller", "run", "--config", "/var/lib/asterferry/controller.json", "--service-mode", "container"]
     restart: unless-stopped
     stop_grace_period: 20s
     init: true

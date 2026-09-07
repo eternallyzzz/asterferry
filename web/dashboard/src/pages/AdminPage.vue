@@ -19,8 +19,12 @@ import {
   updateUser,
   getRuntimeSettings,
   setRuntimeSettings,
+  getControllerUpdate,
+  checkControllerUpdate,
+  applyControllerUpdate,
   type ControllerUser,
   type EnrollmentTokenMeta,
+  type ControllerUpdateState,
 } from "../controller-api";
 import { usePolling } from "../composables/usePolling";
 import { useNotify } from "../composables/useNotify";
@@ -32,6 +36,9 @@ const users = ref<ControllerUser[]>([]);
 const tokens = ref<EnrollmentTokenMeta[]>([]);
 const advancedOperationsEnabled = ref(false);
 const savingRuntimeSettings = ref(false);
+const controllerUpdate = ref<ControllerUpdateState | null>(null);
+const checkingControllerUpdate = ref(false);
+const applyingControllerUpdate = ref(false);
 
 const userFormOpen = ref(false);
 const userForm = ref({ username: "", password: "", role: "viewer" as ControllerUser["role"] });
@@ -49,10 +56,11 @@ const revoking = ref(false);
 
 async function load() {
   try {
-    const [userResult, tokenResult, runtimeSettings] = await Promise.all([listUsers(), listEnrollmentTokens(), getRuntimeSettings()]);
+    const [userResult, tokenResult, runtimeSettings, updateResult] = await Promise.all([listUsers(), listEnrollmentTokens(), getRuntimeSettings(), getControllerUpdate()]);
     users.value = userResult.items;
     tokens.value = tokenResult.items;
     advancedOperationsEnabled.value = runtimeSettings.advanced_operations_enabled;
+    controllerUpdate.value = updateResult.status;
   } catch (caught) {
     notify.error(describeError(caught));
   } finally {
@@ -155,6 +163,37 @@ async function confirmRevoke() {
     revoking.value = false;
   }
 }
+
+async function checkForControllerUpdate() {
+  checkingControllerUpdate.value = true;
+  try {
+    controllerUpdate.value = (await checkControllerUpdate(undefined, newIdempotencyKey())).status;
+    notify.success("已完成稳定版本检查。" );
+  } catch (caught) {
+    notify.error(describeError(caught));
+  } finally {
+    checkingControllerUpdate.value = false;
+  }
+}
+
+async function applyControllerUpdateNow() {
+  applyingControllerUpdate.value = true;
+  try {
+    controllerUpdate.value = (await applyControllerUpdate(controllerUpdate.value?.latest_version, undefined, newIdempotencyKey())).status;
+    notify.success("Controller 升级已启动，页面将在服务恢复后自动刷新。" );
+  } catch (caught) {
+    notify.error(describeError(caught));
+  } finally {
+    applyingControllerUpdate.value = false;
+  }
+}
+
+function updateTone(state?: string): "good" | "warn" | "bad" | "neutral" {
+  if (state === "up_to_date") return "good";
+  if (state === "available" || state === "applying" || state === "checking") return "warn";
+  if (state === "failed" || state === "rolled_back") return "bad";
+  return "neutral";
+}
 </script>
 
 <template>
@@ -205,6 +244,24 @@ async function confirmRevoke() {
         <button type="button" :class="['af-button', advancedOperationsEnabled ? 'danger' : 'primary']" :disabled="savingRuntimeSettings" @click="toggleAdvancedOperations">{{ savingRuntimeSettings ? "保存中…" : advancedOperationsEnabled ? "关闭高级操作" : "开启高级操作" }}</button>
       </div>
       <p class="form-note">运行时事件与分钟流量汇总默认保留 30 天。</p>
+    </PanelCard>
+
+    <PanelCard title="Controller 稳定版本升级">
+      <div class="runtime-setting">
+        <div>
+          <div class="update-summary">
+            <StatusPill :tone="updateTone(controllerUpdate?.state)">{{ controllerUpdate?.state || "未检查" }}</StatusPill>
+            <strong>{{ controllerUpdate?.current_version || "—" }}</strong>
+            <span v-if="controllerUpdate?.latest_version">→ {{ controllerUpdate.latest_version }}</span>
+          </div>
+          <p class="form-note">自动检测 GitHub stable release；升级始终需要 Admin 确认。容器部署请通过镜像滚动更新。</p>
+          <p v-if="controllerUpdate?.last_error" class="form-error">{{ controllerUpdate.last_error }}</p>
+        </div>
+        <div class="row-actions">
+          <button type="button" class="af-button secondary" :disabled="checkingControllerUpdate" @click="checkForControllerUpdate">{{ checkingControllerUpdate ? "检查中…" : "立即检查" }}</button>
+          <button v-if="controllerUpdate?.state === 'available' && controllerUpdate.supported" type="button" class="af-button primary" :disabled="applyingControllerUpdate" @click="applyControllerUpdateNow">{{ applyingControllerUpdate ? "升级中…" : "确认升级" }}</button>
+        </div>
+      </div>
     </PanelCard>
 
     <div class="enroll-grid">
@@ -368,6 +425,12 @@ async function confirmRevoke() {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+}
+.update-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 @media (max-width: 700px) {
   .runtime-setting { align-items: flex-start; flex-direction: column; }

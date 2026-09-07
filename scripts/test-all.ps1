@@ -246,7 +246,7 @@ try {
     if (Test-Path -LiteralPath $controllerSmoke) {
         Remove-Item -LiteralPath $controllerSmoke -Recurse -Force
     }
-    Invoke-Logged "CLI Controller init smoke test" "go" @("run", "./cmd/asterferry", "controller", "init", "--dir", $controllerSmoke, "--username", "smoke-admin", "--password", "smoke-password")
+    Invoke-Logged "CLI Controller init smoke test" "go" @("run", "./cmd/asterferry", "controller", "init", "--dir", $controllerSmoke, "--grpc-advertise", "127.0.0.1:9443", "--username", "smoke-admin", "--password", "smoke-password")
     Invoke-Logged "CLI AFDP/control version smoke test" "go" @("run", "./cmd/asterferry", "version")
     if ($SkipRace) {
         Write-Host "== Windows race tests skipped by -SkipRace =="

@@ -109,7 +109,7 @@ func loadNodeReleaseMetadata(config Config) (NodeReleaseMetadata, error) {
 	var metadata NodeReleaseMetadata
 	if err := jsonutil.DecodeStrict(data, &metadata); err != nil {
 		if errors.Is(err, jsonutil.ErrTrailingJSON) {
-			return NodeReleaseMetadata{}, errors.New("Node release metadata contains trailing JSON")
+			return NodeReleaseMetadata{}, errors.New("node release metadata contains trailing JSON")
 		}
 		return NodeReleaseMetadata{}, fmt.Errorf("decode Node release metadata: %w", err)
 	}

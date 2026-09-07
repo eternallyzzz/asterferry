@@ -61,9 +61,11 @@ go build -tags=dashboard_assets -trimpath -ldflags="-s -w" -o dist/asterferry.ex
 sudo useradd --system --home-dir /var/lib/asterferry \
   --shell /usr/sbin/nologin asterferry 2>/dev/null || true
 sudo install -d -o asterferry -g asterferry -m 0700 /var/lib/asterferry
-sudo install -m 0755 dist/asterferry-linux-amd64 /usr/local/bin/asterferry
+sudo install -d -o asterferry -g asterferry -m 0750 /var/lib/asterferry/bin
+sudo install -o asterferry -g asterferry -m 0755 \
+  dist/asterferry-linux-amd64 /var/lib/asterferry/bin/asterferry
 
-sudo -u asterferry /usr/local/bin/asterferry controller init \
+sudo -u asterferry /var/lib/asterferry/bin/asterferry controller init \
   --dir /var/lib/asterferry \
   --http-listen 0.0.0.0:8443 \
   --grpc-listen 0.0.0.0:9443 \
@@ -87,11 +89,13 @@ sudo systemctl enable --now asterferry-controller.service
 sudo useradd --system --home-dir /var/lib/asterferry \
   --shell /usr/sbin/nologin asterferry 2>/dev/null || true
 sudo install -d -o asterferry -g asterferry -m 0700 /var/lib/asterferry
-sudo install -m 0755 dist/asterferry-linux-amd64 /usr/local/bin/asterferry
+sudo install -d -o asterferry -g asterferry -m 0750 /var/lib/asterferry/bin
+sudo install -o asterferry -g asterferry -m 0755 \
+  dist/asterferry-linux-amd64 /var/lib/asterferry/bin/asterferry
 sudo install -o asterferry -g asterferry -m 0644 controller-ca.crt \
   /var/lib/asterferry/controller-ca.crt
 
-sudo -u asterferry /usr/local/bin/asterferry node enroll \
+sudo -u asterferry /var/lib/asterferry/bin/asterferry node enroll \
   --controller 47.98.144.86:9443 \
   --token '<token>' \
   --node-id '<controller-generated-node-id>' \
@@ -168,6 +172,24 @@ curl -k https://47.98.144.86:8443/healthz
 
 WSL 未启用 systemd 时，使用安装器输出的 WSL 管理命令和 `controller.log`、`node.log` 查看状态，不使用 `systemctl`。
 
+## 自动检测和升级
+
+Controller 默认每 6 小时从 GitHub 查询最新的正式版 Release；`-rc`、草稿和其他预发布版本不会触发自动升级。Controller 会先在 Dashboard 的管理页面显示可用版本，只有管理员明确确认后才会下载带 `SHA256SUMS` 校验的归档，并在 `/readyz` 恢复失败时自动回滚。
+
+原生 Windows 服务、Linux systemd 和无 systemd 的 WSL Node 支持由 Controller 逐台下发 Node 自升级。旧安装如果没有 `node-upgrade-v1` 能力，必须先用一次新的安装脚本升级；容器和 Helm 部署只报告需要滚动更新镜像，不会替换容器内的二进制。升级会保留数据库、CA、TLS 身份、master key、bootstrap、缓存和配置。
+
+除 Dashboard 外，也可以使用 CLI（需要 HTTPS API Token）：
+
+```bash
+asterferry controller update status --url https://controller.example:8443 --token "$ASTERFERRY_API_TOKEN"
+asterferry controller update check --url https://controller.example:8443 --token "$ASTERFERRY_API_TOKEN"
+asterferry controller update apply --url https://controller.example:8443 --token "$ASTERFERRY_API_TOKEN"
+asterferry controller update node --node-id '<node-id>' \
+  --url https://controller.example:8443 --token "$ASTERFERRY_API_TOKEN"
+```
+
+升级 Controller 前仍应先完成一次可恢复的备份；CLI 的 `--insecure-tls` 只适合本机临时探测。
+
 ## 节点退役、替换和永久删除
 
 “退役”会撤销旧证书并保留 Service、规格和审计数据。原机器上的旧 Node 不会凭旧证书自动重新注册；要复用原机器，在节点详情生成替换注册命令即可，无需卸载二进制。替换命令会清理旧身份和缓存、申请新证书并重新启动服务。
@@ -183,7 +205,7 @@ WSL 未启用 systemd 时，使用安装器输出的 WSL 管理命令和 `contro
 Controller 备份应包含数据库、CA、TLS 身份和 master key：
 
 ```bash
-sudo -u asterferry /usr/local/bin/asterferry controller backup \
+sudo -u asterferry /var/lib/asterferry/bin/asterferry controller backup \
   --config /var/lib/asterferry/controller.json \
   --output /var/backups/asterferry
 ```

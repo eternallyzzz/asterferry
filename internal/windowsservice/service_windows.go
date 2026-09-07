@@ -1,5 +1,6 @@
 //go:build windows
 
+// Package windowsservice runs daemons as console processes or Windows services.
 package windowsservice
 
 import (
@@ -21,7 +22,7 @@ func Run(ctx context.Context, name string, run func(context.Context) error) erro
 		ctx = context.Background()
 	}
 	if run == nil {
-		return errors.New("Windows service runner requires a daemon function")
+		return errors.New("windows service runner requires a daemon function")
 	}
 	isService, err := svc.IsWindowsService()
 	if err != nil {
@@ -31,7 +32,7 @@ func Run(ctx context.Context, name string, run func(context.Context) error) erro
 		return run(ctx)
 	}
 	if name == "" {
-		return errors.New("Windows service name must not be empty")
+		return errors.New("windows service name must not be empty")
 	}
 	return svc.Run(name, &handler{name: name, run: run})
 }

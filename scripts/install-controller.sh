@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 usage() {
   local status="${1:-0}"
-  cat >&2 <<'USAGE'
+  local output_fd=2
+  if [[ "$status" == "0" ]]; then output_fd=1; fi
+  cat >&$output_fd <<'USAGE'
 Usage: install-controller.sh --grpc-advertise HOST:PORT [options]
 
 Install the latest AsterFerry Controller release and register it as a systemd
@@ -88,7 +90,11 @@ while (($# > 0)); do
     --data-dir) DATA_DIR="${2:?missing value for --data-dir}"; shift 2 ;;
     --http-listen) HTTP_LISTEN="${2:?missing value for --http-listen}"; shift 2 ;;
     --grpc-listen) GRPC_LISTEN="${2:?missing value for --grpc-listen}"; shift 2 ;;
-    --metrics-listen) METRICS_LISTEN="${2:?missing value for --metrics-listen}"; shift 2 ;;
+    --metrics-listen)
+      (($# >= 2)) || die "missing value for --metrics-listen"
+      METRICS_LISTEN="$2"
+      shift 2
+      ;;
     --grpc-advertise) GRPC_ADVERTISE="${2:?missing value for --grpc-advertise}"; shift 2 ;;
     --username) USERNAME="${2:?missing value for --username}"; shift 2 ;;
     --password-file) PASSWORD_FILE="${2:?missing value for --password-file}"; shift 2 ;;
@@ -154,9 +160,9 @@ resolve_latest_version() {
   response="$(curl --disable --fail --silent --show-error --location --proto '=https' --tlsv1.3 \
     -H 'Accept: application/vnd.github+json' \
     -H 'User-Agent: asterferry-installer' \
-    "https://api.github.com/repos/${REPO}/releases?per_page=100")" || die "cannot query GitHub releases for ${REPO}"
-  latest_tag="$(printf '%s\n' "$response" | awk -F'"' '/"tag_name"[[:space:]]*:/ { if ($4 ~ /^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$/) { print $4; exit } }')"
-  [[ -n "$latest_tag" ]] || die "no published semantic release was found for ${REPO}"
+    "https://api.github.com/repos/${REPO}/releases/latest")" || die "cannot query GitHub stable release for ${REPO}"
+  latest_tag="$(printf '%s\n' "$response" | awk -F'"' '/"tag_name"[[:space:]]*:/ { print $4; exit }')"
+  [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "no published stable release was found for ${REPO}"
   VERSION="${latest_tag#v}"
 }
 
@@ -166,7 +172,9 @@ if ! id asterferry >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin asterferry
 fi
 install -d -o asterferry -g asterferry -m 0700 "$DATA_DIR"
-install -d -m 0755 /usr/local/bin
+binary_dir="$DATA_DIR/bin"
+binary_path="$binary_dir/asterferry"
+install -d -o asterferry -g asterferry -m 0750 "$binary_dir"
 
 tmp_dir="$(mktemp -d -t asterferry-controller.XXXXXX)"
 password_copy=""
@@ -210,7 +218,7 @@ printf '%s  %s\n' "$expected" "$tmp_dir/$archive" | sha256sum --check --status -
 tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
 [[ -f "$tmp_dir/asterferry" ]] || die "release archive does not contain asterferry"
 chmod 0755 "$tmp_dir/asterferry"
-install -m 0755 "$tmp_dir/asterferry" /usr/local/bin/asterferry
+install -o asterferry -g asterferry -m 0755 "$tmp_dir/asterferry" "$binary_path"
 
 download_release_file() {
   local name="$1"
@@ -245,7 +253,7 @@ if [[ ! -f "$config_path" ]]; then
     install -o asterferry -g asterferry -m 0600 "$PASSWORD_FILE" "$password_copy"
     init_args+=(--password-file "$password_copy")
   fi
-  runuser -u asterferry -- /usr/local/bin/asterferry "${init_args[@]}"
+  runuser -u asterferry -- "$binary_path" "${init_args[@]}"
 else
   echo "existing Controller configuration found; initialization skipped"
 fi
@@ -268,6 +276,7 @@ data_dir="${2:?data directory is required}"
 config_path="$data_dir/controller.json"
 pid_path="$data_dir/controller.pid"
 log_path="$data_dir/controller.log"
+binary_path="$data_dir/bin/asterferry"
 
 matching_process() {
   local pid="$1" command_line
@@ -333,7 +342,7 @@ if [[ ! -e "$log_path" ]]; then
 fi
 chown asterferry:asterferry "$log_path"
 chmod 0600 "$log_path"
-runuser -u asterferry -- sh -c 'nohup /usr/local/bin/asterferry controller run --config "$1" >>"$2" 2>&1 </dev/null & printf "%s\n" "$!" > "$3"' sh "$config_path" "$log_path" "$pid_path"
+runuser -u asterferry -- sh -c 'nohup "$1" controller run --config "$2" --service-mode wsl >>"$3" 2>&1 </dev/null & printf "%s\n" "$!" > "$4"' sh "$binary_path" "$config_path" "$log_path" "$pid_path"
 for _ in 1 2 3 4 5; do
   pid="$(read_pid)"
   if [[ -n "$pid" ]] && matching_process "$pid"; then
@@ -500,13 +509,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/asterferry controller run --config $config_path
+ExecStart=$binary_path controller run --config $config_path --service-mode systemd
 WorkingDirectory=$DATA_DIR
 User=asterferry
 Group=asterferry
 UMask=0077
 Restart=on-failure
 RestartSec=2s
+KillMode=process
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

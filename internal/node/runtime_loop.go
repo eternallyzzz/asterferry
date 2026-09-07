@@ -8,9 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"asterferry/internal/update"
 )
 
 const (
@@ -38,6 +43,12 @@ func (r *Runtime) Run(ctx context.Context) error {
 	r.runCtx = ctx
 	dataPlane := r.dataPlane
 	r.runtimeMu.Unlock()
+	pidPath := ""
+	if strings.TrimSpace(r.runtimeOpts.UpdateStatusPath) != "" {
+		pidPath = filepath.Join(filepath.Dir(r.runtimeOpts.UpdateStatusPath), "node.pid")
+		update.WritePIDFile(pidPath, os.Getpid())
+		defer update.RemovePIDFileIfOwner(pidPath, os.Getpid())
+	}
 	if dataPlane != nil {
 		if err := dataPlane.Start(ctx); err != nil {
 			return err
@@ -50,6 +61,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 		err := r.runConnection(ctx)
 		if ctx.Err() != nil {
 			return nil
+		}
+		if errors.Is(err, ErrNodeUpdateRestart) {
+			return err
 		}
 		if err != nil {
 			// A normal transport outage deliberately leaves the last data
@@ -181,7 +195,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 	}
 	state := r.observedState()
 	appliedChecksum := r.reconciler.AppliedChecksum()
-	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.CurrentControlProtocolVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5", "runtime-telemetry-v1", "runtime-control-v1"}}}}); err != nil {
+	if err := send(&v1.NodeMessage{Body: &v1.NodeMessage_Hello{Hello: &v1.Hello{NodeId: bootstrap.NodeID, SchemaVersion: domain.CurrentControlProtocolVersion, AppliedGeneration: state.AppliedGeneration, AppliedChecksum: appliedChecksum, Capabilities: []string{"tcp", "udp", "http", "socks5", "runtime-telemetry-v1", "runtime-control-v1", nodeUpgradeCapability}}}}); err != nil {
 		return err
 	}
 	r.reconciler.MarkConnected(time.Now().UTC())
@@ -259,6 +273,13 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				}
 				if runtimeActionAllows(action, "runtime-telemetry-v1") {
 					startRuntimeTelemetry()
+				}
+				if err := r.sendPendingNodeUpdate(send); err != nil {
+					return err
+				}
+			case "node_upgrade":
+				if err := r.startNodeUpgrade(ctx, action, send); err != nil {
+					return err
 				}
 			case "runtime_connection", "clear_runtime_controls":
 				dataPlane := r.DataPlane()

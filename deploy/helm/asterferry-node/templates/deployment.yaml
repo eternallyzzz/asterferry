@@ -42,6 +42,8 @@ spec:
             - run
             - --bootstrap
             - /var/lib/asterferry/state/bootstrap.json
+            - --service-mode
+            - container
 {{- if .Values.geoip.enabled }}
             - --geoip-db
             - {{ .Values.geoip.path | quote }}

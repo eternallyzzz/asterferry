@@ -14,6 +14,7 @@ command -v docker >/dev/null 2>&1 || fail "Docker CLI is required"
 docker info >/dev/null 2>&1 || fail "Docker Engine is unavailable"
 
 go_version="${ASTERFERRY_EXPECTED_GO_VERSION:-}"
+go_version="${go_version#go}"
 if [[ -z "$go_version" && -f "$root/.toolchain.json" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     go_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["release"]["go"])' "$root/.toolchain.json")"

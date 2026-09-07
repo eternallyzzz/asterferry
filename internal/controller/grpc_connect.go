@@ -160,6 +160,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	}
 	s.streams[hello.GetNodeId()] = entry
 	s.streamMu.Unlock()
+	capabilityToken := s.changes.SetNodeCapabilities(hello.GetNodeId(), hello.GetCapabilities())
 	// Leadership can change while the handshake is materializing the
 	// snapshot. Re-check after publishing the stream so a loss event that
 	// raced Drain cannot leave a newly admitted standby connection alive.
@@ -184,6 +185,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 		}
 		s.streamMu.Unlock()
 		cancel()
+		s.changes.ClearNodeCapabilities(hello.GetNodeId(), capabilityToken)
 		if wasCurrent {
 			markCtx, markCancel := context.WithTimeout(context.Background(), time.Second)
 			if err := s.runtime.MarkRuntimeConnectionsUnknown(markCtx, hello.GetNodeId(), time.Now().UTC()); err != nil {
@@ -499,6 +501,11 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				for key, value := range attributes {
 					if len(key) > 128 || len(value) > 2048 || strings.ContainsAny(key, "\x00\r\n") || strings.ContainsAny(value, "\x00\r\n") {
 						return status.Error(codes.InvalidArgument, "event attributes are invalid")
+					}
+				}
+				if event.GetType() == "node_upgrade" {
+					if err := s.applyNodeUpgradeEvent(stream.Context(), hello.GetNodeId(), attributes); err != nil {
+						return status.Error(codes.InvalidArgument, err.Error())
 					}
 				}
 				if err := s.resources.RecordEvent(stream.Context(), hello.GetNodeId(), event.GetId(), event.GetType(), event.GetMessage(), hello.GetNodeId(), attributes); err != nil {

@@ -141,11 +141,12 @@ $bootstrapPath = Join-Path $stateRoot "node-bootstrap.json"
 $cachePath = Join-Path $stateRoot "snapshot.cache"
 $cacheKeyPath = Join-Path $stateRoot "snapshot.key"
 $decommissionMarkerPath = "$bootstrapPath.decommissioned"
-$binaryPath = Join-Path $installRoot "asterferry.exe"
+$binaryPath = Join-Path $stateRoot "bin\asterferry.exe"
+$installerBinaryPath = Join-Path $installRoot "asterferry.exe"
 $serviceName = $ServiceName
 $displayName = "AsterFerry Node"
 
-New-Item -ItemType Directory -Force -Path $tempRoot, $installRoot, $stateRoot, $extractRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $tempRoot, $installRoot, $stateRoot, (Join-Path $stateRoot "bin"), $extractRoot | Out-Null
 try {
   $caBytes = [Convert]::FromBase64String($CAPemB64)
   [IO.File]::WriteAllBytes($temporaryCaPath, $caBytes)
@@ -246,6 +247,7 @@ try {
     [IO.File]::WriteAllBytes($caPath, $caBytes)
   }
   Copy-Item -LiteralPath $extractedBinary -Destination $binaryPath -Force
+  Copy-Item -LiteralPath $extractedBinary -Destination $installerBinaryPath -Force
   if (-not (Test-Path -LiteralPath $bootstrapPath) -or $Force) {
     & $binaryPath node enroll --controller $Controller --token $Token --node-id $NodeId --ca $caPath --output $bootstrapPath --cache $cachePath
     if ($LASTEXITCODE -ne 0) { throw "AsterFerry enrollment failed with exit code $LASTEXITCODE" }

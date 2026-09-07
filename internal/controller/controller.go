@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"asterferry/internal/update"
 	"google.golang.org/grpc"
 )
 
@@ -22,6 +25,7 @@ type Controller struct {
 	metrics         *ControllerMetrics
 	leadership      *leadership
 	Scheduler       *Scheduler
+	update          *UpdateManager
 	grpcListener    net.Listener
 	httpListener    net.Listener
 	metricsListener net.Listener
@@ -40,6 +44,8 @@ type Controller struct {
 	waitDone        chan struct{}
 	waitErr         error
 	logger          *slog.Logger
+	restartMu       sync.Mutex
+	restartErr      error
 	startMu         sync.Mutex
 	started         bool
 	closed          bool
@@ -82,7 +88,7 @@ func New(config Config) (*Controller, error) {
 		repositories.Close()
 		return nil, err
 	}
-	return &Controller{Config: config, Repositories: repositories, HTTP: httpServer, metrics: controllerMetrics, leadership: leader, Scheduler: scheduler, logger: slog.Default()}, nil
+	return &Controller{Config: config, Repositories: repositories, HTTP: httpServer, metrics: controllerMetrics, leadership: leader, Scheduler: scheduler, update: httpServer.update, logger: slog.Default()}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) error {
@@ -132,6 +138,10 @@ func (c *Controller) Start(ctx context.Context) error {
 	c.grpcServeErr = grpcServeErr
 	c.waitDone = make(chan struct{})
 	c.reconcileCancel = cancel
+	update.WritePIDFile(filepath.Join(filepath.Dir(c.Config.MasterKeyPath), "controller.pid"), os.Getpid())
+	if c.update != nil {
+		c.update.SetRestartCallback(c.requestRestart)
+	}
 	httpServeErr := make(chan error, 1)
 	c.httpServeErr = httpServeErr
 	go func() {
@@ -229,6 +239,9 @@ func (c *Controller) startLeader(ctx context.Context, epoch uint64) {
 		if err := c.Repositories.Runtime.MarkAllRuntimeConnectionsUnknown(leaderCtx, time.Now().UTC()); err != nil && leaderCtx.Err() == nil {
 			c.logReconcileFailure(fmt.Errorf("mark runtime connections unknown on leadership epoch %d: %w", epoch, err))
 		}
+		if c.update != nil {
+			c.update.Start(leaderCtx)
+		}
 		var loops sync.WaitGroup
 		loops.Add(2)
 		go func() {
@@ -295,7 +308,10 @@ func (c *Controller) monitorServers(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			finish(nil)
+			c.restartMu.Lock()
+			restartErr := c.restartErr
+			c.restartMu.Unlock()
+			finish(restartErr)
 			return
 		case err, ok := <-c.grpcServeErr:
 			if !ok {
@@ -357,6 +373,23 @@ func (c *Controller) monitorServers(ctx context.Context) {
 			finish(fmt.Errorf("metrics serve failed: %w", err))
 			return
 		}
+	}
+}
+
+func (c *Controller) requestRestart(err error) {
+	if c == nil {
+		return
+	}
+	if err == nil {
+		err = ErrControllerUpdateRestart
+	}
+	c.restartMu.Lock()
+	if c.restartErr == nil {
+		c.restartErr = err
+	}
+	c.restartMu.Unlock()
+	if c.reconcileCancel != nil {
+		c.reconcileCancel()
 	}
 }
 
@@ -466,6 +499,7 @@ func (c *Controller) Close() error {
 	c.closed = true
 	c.startMu.Unlock()
 	c.closeOnce.Do(func() {
+		update.RemovePIDFileIfOwner(filepath.Join(filepath.Dir(c.Config.MasterKeyPath), "controller.pid"), os.Getpid())
 		if c.reconcileCancel != nil {
 			c.reconcileCancel()
 		}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"time"
@@ -24,6 +25,9 @@ type RuntimeOptions struct {
 	GeoIPDatabasePath      string
 	GeoIPMaxAge            time.Duration
 	ServiceMode            string
+	ServiceName            string
+	ProcessArgs            []string
+	UpdateStatusPath       string
 	SystemInfoInterval     time.Duration
 	SystemInfoCollector    *systeminfo.Collector
 }
@@ -44,6 +48,10 @@ type Runtime struct {
 	systemInfo          *domain.SystemInfo
 	systemInfoAt        time.Time
 	systemInfoCollector *systeminfo.Collector
+	updateReportMu      sync.Mutex
+	updateReportSent    bool
+	updateHTTPClient    *http.Client
+	startUpdateHelper   func(string, []string) (int, error)
 }
 
 func NewRuntime(bootstrap Bootstrap, options RuntimeOptions) (*Runtime, error) {

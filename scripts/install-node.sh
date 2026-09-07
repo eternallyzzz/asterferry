@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 usage() {
   local status="${1:-0}"
-  cat >&2 <<'USAGE'
+  local output_fd=2
+  if [[ "$status" == "0" ]]; then output_fd=1; fi
+  cat >&$output_fd <<'USAGE'
 Usage: install-node.sh --node-id ID --controller HOST:PORT --bootstrap-url HTTPS_URL --token TOKEN --ca-pem-b64 BASE64 [options]
 
 Install the AsterFerry Node release selected by the Controller and register it as a
@@ -135,7 +137,9 @@ if ! id asterferry >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin asterferry
 fi
 install -d -o asterferry -g asterferry -m 0700 "$DATA_DIR"
-install -d -m 0755 /usr/local/bin
+binary_dir="$DATA_DIR/bin"
+binary_path="$binary_dir/asterferry"
+install -d -o asterferry -g asterferry -m 0750 "$binary_dir"
 
 tmp_dir="$(mktemp -d -t asterferry-node.XXXXXX)"
 cleanup() { rm -rf "$tmp_dir"; }
@@ -241,6 +245,7 @@ data_dir="${2:?data directory is required}"
 bootstrap_path="$data_dir/node-bootstrap.json"
 pid_path="$data_dir/node.pid"
 log_path="$data_dir/node.log"
+binary_path="$data_dir/bin/asterferry"
 
 matching_process() {
   local pid="$1" command_line
@@ -306,7 +311,7 @@ if [[ ! -e "$log_path" ]]; then
 fi
 chown asterferry:asterferry "$log_path"
 chmod 0600 "$log_path"
-  runuser -u asterferry -- sh -c 'nohup /usr/local/bin/asterferry node run --bootstrap "$1" --service-mode wsl >>"$2" 2>&1 </dev/null & printf "%s\n" "$!" > "$3"' sh "$bootstrap_path" "$log_path" "$pid_path"
+  runuser -u asterferry -- sh -c 'nohup "$1" node run --bootstrap "$2" --service-mode wsl >>"$3" 2>&1 </dev/null & printf "%s\n" "$!" > "$4"' sh "$binary_path" "$bootstrap_path" "$log_path" "$pid_path"
 for _ in 1 2 3 4 5; do
   pid="$(read_pid)"
   if [[ -n "$pid" ]] && matching_process "$pid"; then
@@ -492,10 +497,10 @@ if [[ ! -f "$ca_path" || "$existing_ca_differs" -eq 1 ]]; then
 fi
 chown asterferry:asterferry "$ca_path"
 chmod 0644 "$ca_path"
-install -m 0755 "$tmp_dir/asterferry" /usr/local/bin/asterferry
+install -o asterferry -g asterferry -m 0755 "$tmp_dir/asterferry" "$binary_path"
 
 if [[ "$FORCE" -eq 1 || ! -f "$bootstrap_path" ]]; then
-  runuser -u asterferry -- /usr/local/bin/asterferry node enroll \
+  runuser -u asterferry -- "$binary_path" node enroll \
     --controller "$CONTROLLER" \
     --token "$TOKEN" \
     --node-id "$NODE_ID" \
@@ -518,13 +523,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/asterferry node run --bootstrap $bootstrap_path --service-mode systemd
+ExecStart=$binary_path node run --bootstrap $bootstrap_path --service-mode systemd
 WorkingDirectory=$DATA_DIR
 User=asterferry
 Group=asterferry
 UMask=0077
 Restart=on-failure
 RestartSec=2s
+KillMode=process
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
