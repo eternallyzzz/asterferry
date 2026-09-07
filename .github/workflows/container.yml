@@ -95,6 +95,7 @@ jobs:
           python3 scripts/check-source-layout.py
           python3 scripts/check-toolchain.py
           python3 scripts/check-release-metadata.py
+          python3 scripts/test-release-public-key.py
       - name: Check patch whitespace
         shell: bash
         run: git diff --check HEAD^ HEAD
@@ -208,6 +209,20 @@ jobs:
         run: go mod verify
       - name: Scan tracked files for release secrets
         run: python scripts/secret-scan.py
+      - name: Test release-key checker
+        run: python scripts/test-release-public-key.py
+      - name: Verify Windows release-key gate contract
+        shell: pwsh
+        run: |
+          $env:ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256 = "d45bc1981a2225280679a45f7266d60c074c113db69c0545b1f8554c25e67fc3"
+          $gateOutput = (& pwsh -NoLogo -NoProfile -File scripts/check-release-public-key.ps1 2>&1 | Out-String)
+          $gateExitCode = $LASTEXITCODE
+          if ($gateExitCode -eq 0) {
+            throw "The development release verification key was accepted"
+          }
+          if ($gateOutput -notmatch "development placeholder") {
+            throw "The Windows release-key gate did not execute its key validation: $gateOutput"
+          }
       - name: Run tests
         run: go test ./...
       - name: Run behavior contract and state-machine tests
@@ -344,6 +359,7 @@ jobs:
           python3 scripts/check-source-layout.py
           python3 scripts/check-toolchain.py
           bash -n scripts/check-release-public-key.sh
+          python3 scripts/check-release-public-key.py --help >/dev/null
       - name: Verify dashboard assets
         run: |
           npm --prefix web/dashboard ci --audit=false --registry=https://registry.npmjs.org --replace-registry-host=always

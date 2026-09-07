@@ -49,6 +49,11 @@ automated and every exception is recorded in the release issue.
    fingerprint, and replace the placeholder public key in
    `internal/update/release-public-key.pem` with its matching ECDSA P-256
    public key. Confirm `cosign verify-blob` succeeds locally before tagging.
+   On Windows, set the reviewed value of
+   `$env:ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256` before running
+   `scripts/release-check.ps1`; the local gate uses Python and does not require
+   OpenSSL. Do not derive the expected value from the checked-in key during the
+   preflight, because that would defeat the protected-key check.
 
 ## RC and soak
 

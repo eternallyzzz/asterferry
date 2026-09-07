@@ -11,6 +11,9 @@ data-plane architecture.
 - Adds a cross-process replacement crash test that kills the helper after the
   executable swap and verifies restart recovery, terminal persistence and
   manual-required handling for unsafe journals.
+- Records original and target executable digests in the replacement journal,
+  reconciles prepared states against on-disk files during Controller and Node
+  recovery, and makes the release-key gate runnable without OpenSSL on Windows.
 - Adds the SQLite-backed Controller with RBAC, audit, enrollment, scheduling,
   revision checks and encrypted node snapshots; PostgreSQL is now supported as
   the production-scale backend with a bounded pool.

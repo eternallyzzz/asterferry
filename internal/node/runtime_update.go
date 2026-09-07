@@ -212,13 +212,33 @@ func (r *Runtime) sendPendingNodeUpdate(send func(*v1.NodeMessage) error) error 
 		return nil
 	}
 	current := buildinfo.Current().Version
-	if result.State == update.ReplacementStatePrepared || result.State == nodeUpdateStateWaiting || result.State == nodeUpdateStateReplacing || result.State == nodeUpdateStateRecovering {
-		if result.Version == "" || result.Version != current {
-			return nil
+	pending := update.ReplacementNeedsRecovery(result.State)
+	cleanup := false
+	if pending {
+		diskState, inspectErr := update.ClassifyReplacementFiles(result)
+		switch {
+		case inspectErr != nil:
+			result.State = nodeUpdateStateManualRequired
+			result.Error = inspectErr.Error()
+		case diskState == update.ReplacementDiskStateOriginalIntact:
+			result.State = nodeUpdateStateFailed
+			result.Error = "replacement did not install the target executable; the previous executable remains active"
+			cleanup = true
+		case diskState == update.ReplacementDiskStateTargetInstalled && result.Version != "" && result.Version == current:
+			result.State = "healthy"
+			result.Error = ""
+			cleanup = true
+		case diskState == update.ReplacementDiskStatePartial || diskState == update.ReplacementDiskStateIndeterminate:
+			result.State = nodeUpdateStateManualRequired
+			result.Error = fmt.Sprintf("replacement files are in an indeterminate state (%s); manual recovery is required", diskState)
+		default:
+			result.State = nodeUpdateStateManualRequired
+			result.Error = "replacement target does not match the running Node version"
 		}
-		result.State = "healthy"
-		result.Error = ""
-		update.WriteReplacementResult(path, result)
+		result.SchemaVersion = update.ReplacementResultSchemaVersion
+		if err := update.WriteReplacementResult(path, result); err != nil {
+			return err
+		}
 	}
 	state := result.State
 	if state == "healthy" {
@@ -230,7 +250,12 @@ func (r *Runtime) sendPendingNodeUpdate(send func(*v1.NodeMessage) error) error 
 	if err := sendNodeUpgradeEvent(send, result.ActionID, state, result.Version, current, r.runtimeOpts.ServiceMode, result.Error); err != nil {
 		return err
 	}
-	update.CleanupReplacementArtifacts(result)
+	if !pending && state != nodeUpdateStateManualRequired {
+		cleanup = true
+	}
+	if cleanup {
+		update.CleanupReplacementArtifacts(result)
+	}
 	r.updateReportSent = true
 	return nil
 }

@@ -71,7 +71,7 @@ func TestRunReplacementHelperSelfManagedSuccess(t *testing.T) {
 	if result.Version != target || result.State != "healthy" {
 		t.Fatalf("successful replacement result = %#v", result)
 	}
-	if result.SchemaVersion != ReplacementResultSchemaVersion || result.BinaryPath == "" || result.BackupPath == "" {
+	if result.SchemaVersion != ReplacementResultSchemaVersion || result.BinaryPath == "" || result.BackupPath == "" || result.OriginalSHA256 == "" || result.TargetSHA256 == "" {
 		t.Fatalf("replacement journal fields = %#v", result)
 	}
 	if _, err := os.Stat(pidPath); err != nil {
@@ -159,6 +159,122 @@ func TestReplacementRecoveryStatesAreJournaled(t *testing.T) {
 	for _, state := range []string{"healthy", "rolled_back", "failed", "manual_required"} {
 		if ReplacementNeedsRecovery(state) {
 			t.Fatalf("terminal journal state %q was marked recoverable", state)
+		}
+	}
+}
+
+func TestClassifyReplacementFiles(t *testing.T) {
+	root := t.TempDir()
+	binaryPath := filepath.Join(root, "binary")
+	stagedPath := filepath.Join(root, "staged")
+	backupPath := filepath.Join(root, "backup")
+	original := []byte("original executable")
+	target := []byte("target executable")
+	tampered := []byte("tampered backup")
+	if err := os.WriteFile(binaryPath, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagedPath, target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalSHA256, err := replacementFileSHA256(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSHA256, err := replacementFileSHA256(stagedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := ReplacementResult{
+		SchemaVersion:  ReplacementResultSchemaVersion,
+		BinaryPath:     binaryPath,
+		StagedPath:     stagedPath,
+		BackupPath:     backupPath,
+		OriginalSHA256: originalSHA256,
+		TargetSHA256:   targetSHA256,
+	}
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T)
+		want  ReplacementDiskState
+	}{
+		{
+			name: "target installed",
+			setup: func(t *testing.T) {
+				t.Helper()
+				removeReplacementTestFiles(t, binaryPath, stagedPath, backupPath)
+				writeReplacementTestFile(t, binaryPath, target)
+				writeReplacementTestFile(t, backupPath, original)
+			},
+			want: ReplacementDiskStateTargetInstalled,
+		},
+		{
+			name: "target installed with staged residue",
+			setup: func(t *testing.T) {
+				t.Helper()
+				removeReplacementTestFiles(t, binaryPath, stagedPath, backupPath)
+				writeReplacementTestFile(t, binaryPath, target)
+				writeReplacementTestFile(t, stagedPath, target)
+				writeReplacementTestFile(t, backupPath, original)
+			},
+			want: ReplacementDiskStateTargetInstalled,
+		},
+		{
+			name: "original intact",
+			setup: func(t *testing.T) {
+				t.Helper()
+				removeReplacementTestFiles(t, binaryPath, stagedPath, backupPath)
+				writeReplacementTestFile(t, binaryPath, original)
+				writeReplacementTestFile(t, stagedPath, target)
+			},
+			want: ReplacementDiskStateOriginalIntact,
+		},
+		{
+			name: "partial",
+			setup: func(t *testing.T) {
+				t.Helper()
+				removeReplacementTestFiles(t, binaryPath, stagedPath, backupPath)
+				writeReplacementTestFile(t, stagedPath, target)
+				writeReplacementTestFile(t, backupPath, original)
+			},
+			want: ReplacementDiskStatePartial,
+		},
+		{
+			name: "tampered backup",
+			setup: func(t *testing.T) {
+				t.Helper()
+				removeReplacementTestFiles(t, binaryPath, stagedPath, backupPath)
+				writeReplacementTestFile(t, binaryPath, target)
+				writeReplacementTestFile(t, backupPath, tampered)
+			},
+			want: ReplacementDiskStateIndeterminate,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.setup(t)
+			got, err := ClassifyReplacementFiles(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("replacement disk state = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func writeReplacementTestFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func removeReplacementTestFiles(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
 		}
 	}
 }

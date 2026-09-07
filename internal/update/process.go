@@ -16,14 +16,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"asterferry/internal/atomicfile"
 )
 
 const (
-	ReplacementResultSchemaVersion = 1
-	ReplacementStatePrepared       = "prepared"
-	ReplacementStateReplacing      = "replacing"
-	ReplacementStateWaiting        = "waiting"
-	ReplacementStateRecovering     = "recovering"
+	ReplacementResultSchemaVersion       = 2
+	replacementResultLegacySchemaVersion = 1
+	ReplacementStatePrepared             = "prepared"
+	ReplacementStateReplacing            = "replacing"
+	ReplacementStateWaiting              = "waiting"
+	ReplacementStateRecovering           = "recovering"
 )
 
 type ReplacementOptions struct {
@@ -49,15 +52,17 @@ type ReplacementOptions struct {
 }
 
 type ReplacementResult struct {
-	SchemaVersion int       `json:"schema_version,omitempty"`
-	ActionID      string    `json:"action_id,omitempty"`
-	Version       string    `json:"version"`
-	State         string    `json:"state"`
-	Error         string    `json:"error,omitempty"`
-	BinaryPath    string    `json:"binary_path,omitempty"`
-	StagedPath    string    `json:"staged_path,omitempty"`
-	BackupPath    string    `json:"backup_path,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	SchemaVersion  int       `json:"schema_version,omitempty"`
+	ActionID       string    `json:"action_id,omitempty"`
+	Version        string    `json:"version"`
+	State          string    `json:"state"`
+	Error          string    `json:"error,omitempty"`
+	BinaryPath     string    `json:"binary_path,omitempty"`
+	StagedPath     string    `json:"staged_path,omitempty"`
+	BackupPath     string    `json:"backup_path,omitempty"`
+	OriginalSHA256 string    `json:"original_sha256,omitempty"`
+	TargetSHA256   string    `json:"target_sha256,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // RunReplacementHelper waits for the daemon that launched it, replaces its
@@ -77,18 +82,27 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 	if options.TargetState == "" {
 		options.TargetState = "healthy"
 	}
-	writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStatePrepared, nil))
-	if err := WaitForProcessExit(ctx, options.ParentPID, time.Minute); err != nil {
-		writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err))
+	digests, err := replacementDigestsFor(options.BinaryPath, options.StagedPath)
+	if err != nil {
+		_ = writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err, replacementDigests{}))
 		return err
 	}
-	writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStateReplacing, nil))
+	if err := writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStatePrepared, nil, digests)); err != nil {
+		return fmt.Errorf("write prepared replacement journal: %w", err)
+	}
+	if err := WaitForProcessExit(ctx, options.ParentPID, time.Minute); err != nil {
+		_ = writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err, digests))
+		return err
+	}
+	if err := writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStateReplacing, nil, digests)); err != nil {
+		return fmt.Errorf("write replacing replacement journal: %w", err)
+	}
 	if err := replaceExecutable(options.BinaryPath, options.StagedPath, options.BackupPath); err != nil {
-		writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err))
+		_ = writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err, digests))
 		if selfManagedMode(options.Mode) {
 			if _, startErr := startReplacement(options.BinaryPath, options.RestartArgs); startErr != nil {
 				err = errors.Join(err, fmt.Errorf("restart previous executable: %w", startErr))
-				writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err))
+				_ = writeReplacementResult(options.StatusPath, replacementResult(options, "failed", err, digests))
 			}
 		}
 		return err
@@ -96,19 +110,21 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 	if options.AfterReplace != nil {
 		options.AfterReplace()
 	}
-	writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStateWaiting, nil))
+	// The executable is already replaced. If this post-rename journal update
+	// loses a race with a crash, startup reconciles the hashes and file layout.
+	_ = writeReplacementResult(options.StatusPath, replacementResult(options, ReplacementStateWaiting, nil, digests))
 	if selfManagedMode(options.Mode) {
 		pid, err := startReplacement(options.BinaryPath, options.RestartArgs)
 		if err != nil {
 			if restoreErr := restoreExecutable(options.BinaryPath, options.BackupPath); restoreErr != nil {
 				err = errors.Join(err, fmt.Errorf("restore previous executable: %w", restoreErr))
 			}
-			writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", err))
+			_ = writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", err, digests))
 			if oldPID, startErr := startReplacement(options.BinaryPath, options.RestartArgs); startErr == nil {
 				writePIDFile(options.PIDFile, oldPID)
 			} else {
 				err = errors.Join(err, fmt.Errorf("restart previous executable: %w", startErr))
-				writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", err))
+				_ = writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", err, digests))
 			}
 			return err
 		}
@@ -125,7 +141,7 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 		if restoreErr := restoreExecutable(options.BinaryPath, options.BackupPath); restoreErr != nil {
 			healthErr = errors.Join(healthErr, fmt.Errorf("restore previous executable: %w", restoreErr))
 		}
-		writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", healthErr))
+		_ = writeReplacementResult(options.StatusPath, replacementResult(options, "rolled_back", healthErr, digests))
 		if selfManagedMode(options.Mode) {
 			if pid, startErr := startReplacement(options.BinaryPath, options.RestartArgs); startErr == nil {
 				writePIDFile(options.PIDFile, pid)
@@ -133,21 +149,30 @@ func RunReplacementHelper(ctx context.Context, options ReplacementOptions) error
 		}
 		return healthErr
 	}
-	result := replacementResult(options, options.TargetState, nil)
-	writeReplacementResult(options.StatusPath, result)
+	result := replacementResult(options, options.TargetState, nil, digests)
+	if err := writeReplacementResult(options.StatusPath, result); err != nil {
+		return fmt.Errorf("write terminal replacement journal: %w", err)
+	}
 	CleanupReplacementArtifacts(result)
 	return nil
 }
 
-func replacementResult(options ReplacementOptions, state string, err error) ReplacementResult {
+type replacementDigests struct {
+	originalSHA256 string
+	targetSHA256   string
+}
+
+func replacementResult(options ReplacementOptions, state string, err error, digests replacementDigests) ReplacementResult {
 	result := ReplacementResult{
-		SchemaVersion: ReplacementResultSchemaVersion,
-		ActionID:      options.ActionID,
-		Version:       options.Target,
-		State:         state,
-		BinaryPath:    options.BinaryPath,
-		StagedPath:    options.StagedPath,
-		BackupPath:    options.BackupPath,
+		SchemaVersion:  ReplacementResultSchemaVersion,
+		ActionID:       options.ActionID,
+		Version:        options.Target,
+		State:          state,
+		BinaryPath:     options.BinaryPath,
+		StagedPath:     options.StagedPath,
+		BackupPath:     options.BackupPath,
+		OriginalSHA256: digests.originalSHA256,
+		TargetSHA256:   digests.targetSHA256,
 	}
 	if err != nil {
 		result.Error = err.Error()
@@ -351,9 +376,9 @@ func WaitForReadyState(ctx context.Context, path, version, expectedState string)
 	}
 }
 
-func writeReplacementResult(path string, result ReplacementResult) {
+func writeReplacementResult(path string, result ReplacementResult) error {
 	if strings.TrimSpace(path) == "" {
-		return
+		return nil
 	}
 	result.UpdatedAt = time.Now().UTC()
 	if result.SchemaVersion == 0 {
@@ -361,30 +386,13 @@ func writeReplacementResult(path string, result ReplacementResult) {
 	}
 	data, err := json.Marshal(result)
 	if err != nil {
-		return
+		return err
 	}
-	if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
-		return
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".asterferry-update-*")
-	if err != nil {
-		return
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return
-	}
-	if temporary.Close() != nil {
-		return
-	}
-	_ = os.Chmod(temporaryPath, 0o600)
-	_ = os.Rename(temporaryPath, path)
+	return atomicfile.AtomicWrite(path, data, 0o600)
 }
 
-func WriteReplacementResult(path string, result ReplacementResult) {
-	writeReplacementResult(path, result)
+func WriteReplacementResult(path string, result ReplacementResult) error {
+	return writeReplacementResult(path, result)
 }
 
 func ReadReplacementResult(path string) (ReplacementResult, error) {
@@ -397,9 +405,9 @@ func ReadReplacementResult(path string) (ReplacementResult, error) {
 		return ReplacementResult{}, err
 	}
 	if result.SchemaVersion == 0 {
-		result.SchemaVersion = ReplacementResultSchemaVersion
+		result.SchemaVersion = replacementResultLegacySchemaVersion
 	}
-	if result.SchemaVersion != ReplacementResultSchemaVersion {
+	if result.SchemaVersion != replacementResultLegacySchemaVersion && result.SchemaVersion != ReplacementResultSchemaVersion {
 		return ReplacementResult{}, fmt.Errorf("replacement result schema version %d is unsupported", result.SchemaVersion)
 	}
 	return result, nil

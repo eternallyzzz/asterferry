@@ -3,6 +3,8 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -208,6 +210,135 @@ func TestControllerReplacementMismatchBecomesManualRequired(t *testing.T) {
 	if _, err := os.Stat(backupPath); err != nil {
 		t.Fatalf("manual recovery removed the previous binary: %v", err)
 	}
+}
+
+func TestPreparedControllerReplacementReconcilesDiskState(t *testing.T) {
+	useBootstrapTestBuildVersion(t, "1.1.0")
+	ready := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/readyz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ready.Close()
+
+	for _, test := range []struct {
+		name           string
+		wantState      string
+		wantBackup     bool
+		wantStaged     bool
+		setup          func(t *testing.T, binaryPath, stagedPath, backupPath string)
+		omitIdentities bool
+	}{
+		{
+			name:      "target installed while journal is prepared",
+			wantState: UpdateStateUpToDate,
+			setup: func(t *testing.T, binaryPath, stagedPath, backupPath string) {
+				t.Helper()
+				writeControllerRecoveryFile(t, binaryPath, []byte("target"))
+				writeControllerRecoveryFile(t, stagedPath, []byte("target"))
+				writeControllerRecoveryFile(t, backupPath, []byte("original"))
+			},
+		},
+		{
+			name:      "original remains while journal is prepared",
+			wantState: UpdateStateFailed,
+			setup: func(t *testing.T, binaryPath, stagedPath, _ string) {
+				t.Helper()
+				writeControllerRecoveryFile(t, binaryPath, []byte("original"))
+				writeControllerRecoveryFile(t, stagedPath, []byte("target"))
+			},
+		},
+		{
+			name:       "partial replacement",
+			wantState:  UpdateStateManualRequired,
+			wantBackup: true,
+			wantStaged: true,
+			setup: func(t *testing.T, _, stagedPath, backupPath string) {
+				t.Helper()
+				writeControllerRecoveryFile(t, stagedPath, []byte("target"))
+				writeControllerRecoveryFile(t, backupPath, []byte("original"))
+			},
+		},
+		{
+			name:           "legacy journal does not bypass reconciliation",
+			wantState:      UpdateStateManualRequired,
+			wantBackup:     true,
+			wantStaged:     true,
+			omitIdentities: true,
+			setup: func(t *testing.T, binaryPath, stagedPath, backupPath string) {
+				t.Helper()
+				writeControllerRecoveryFile(t, binaryPath, []byte("target"))
+				writeControllerRecoveryFile(t, stagedPath, []byte("target"))
+				writeControllerRecoveryFile(t, backupPath, []byte("original"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			config := DefaultConfig(root)
+			config.HTTPListen = ready.Listener.Addr().String()
+			config.UpdateCheckEnabled = false
+			repositories, err := openTestRepositories(filepath.Join(root, "controller.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer repositories.Close()
+			manager := NewUpdateManager(config, repositories.Resources)
+			binaryPath := filepath.Join(root, "asterferry")
+			stagedPath := filepath.Join(root, "updates", "staged")
+			backupPath := filepath.Join(root, "updates", "previous")
+			if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			test.setup(t, binaryPath, stagedPath, backupPath)
+			result := update.ReplacementResult{
+				Version:        "1.1.0",
+				State:          update.ReplacementStatePrepared,
+				BinaryPath:     binaryPath,
+				StagedPath:     stagedPath,
+				BackupPath:     backupPath,
+				OriginalSHA256: controllerRecoverySHA256([]byte("original")),
+				TargetSHA256:   controllerRecoverySHA256([]byte("target")),
+			}
+			if test.omitIdentities {
+				result.SchemaVersion = 1
+				result.OriginalSHA256 = ""
+				result.TargetSHA256 = ""
+			}
+			if err := update.WriteReplacementResult(manager.controllerUpdateStatusPath(), result); err != nil {
+				t.Fatal(err)
+			}
+
+			manager.recoverPendingReplacement(context.Background())
+			recovered, err := update.ReadReplacementResult(manager.controllerUpdateStatusPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovered.State != test.wantState {
+				t.Fatalf("recovered replacement result = %#v, want state %q", recovered, test.wantState)
+			}
+			if _, err := os.Stat(backupPath); (err == nil) != test.wantBackup {
+				t.Fatalf("backup presence = %v, want %v (err=%v)", err == nil, test.wantBackup, err)
+			}
+			if _, err := os.Stat(stagedPath); (err == nil) != test.wantStaged {
+				t.Fatalf("staged presence = %v, want %v (err=%v)", err == nil, test.wantStaged, err)
+			}
+		})
+	}
+}
+
+func writeControllerRecoveryFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func controllerRecoverySHA256(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 func TestControllerStatusReportsPendingReplacementStates(t *testing.T) {

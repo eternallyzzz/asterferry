@@ -35,12 +35,21 @@ A key rotation is a release-integrity change: publish the new binary
 generation only after updating the embedded key, protected fingerprint and
 documenting the transition. Manual installer downloads are outside this
 runtime signature-verification scope and remain a separate installer contract.
+The cross-platform gate is implemented by
+`scripts/check-release-public-key.py`; the Bash and PowerShell entry points
+share that implementation and do not require OpenSSL. Local release preflight
+requires the same `ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256` environment value as
+the protected CI gate.
 
-The replacement helper writes a local journal before waiting for the parent,
-before the executable rename, and after the rename. A process that starts with
-`prepared`, `replacing`, `waiting`, or `recovering` state attempts readiness
-recovery; if it cannot prove readiness it reports `manual_required` and retains
-the previous binary path for operator review.
+The replacement helper writes a schema-versioned local journal before waiting
+for the parent, before the executable rename, and after the rename. It records
+the SHA-256 identities of the original and staged executables. A process that
+starts with `prepared`, `replacing`, `waiting`, or `recovering` state first
+reconciles those identities with the live, staged and backup files. Only a
+verified target layout followed by readiness can become successful; a verified
+old layout becomes `failed`, while partial or ambiguous layouts report
+`manual_required` and retain the replacement files for operator review. Pending
+journals without identity metadata are never auto-promoted.
 
 The updater's `InsecureSkipVerify` is limited to the local HTTPS readiness
 probe. The endpoint must be HTTPS on a loopback IP (or `localhost`), cannot

@@ -21,6 +21,7 @@ function Assert-Contains([string]$Path, [string]$Needle) {
 
 Require-Command "pwsh"
 Require-Command "git"
+Require-Command "python"
 $gitBash = Join-Path (Split-Path (Get-Command "git").Source) "..\bin\bash.exe"
 if (-not (Test-Path -LiteralPath $gitBash -PathType Leaf)) {
     throw "Git Bash was not found beside the Git installation: $gitBash"
@@ -44,6 +45,30 @@ foreach ($script in @("scripts/install-controller.ps1", "scripts/install-node.ps
     if ($parseErrors.Count -gt 0) {
         throw "PowerShell installer syntax check failed: $path`n$($parseErrors -join "`n")"
     }
+}
+
+$oldFingerprint = $env:ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256
+try {
+    $env:ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256 = "d45bc1981a2225280679a45f7266d60c074c113db69c0545b1f8554c25e67fc3"
+    $gateOutput = (& pwsh -NoLogo -NoProfile -File (Join-Path $root "scripts/check-release-public-key.ps1") 2>&1 | Out-String)
+    $gateExitCode = $LASTEXITCODE
+    if ($gateExitCode -eq 0) {
+        throw "The development release verification key was accepted"
+    }
+    if ($gateOutput -notmatch "development placeholder") {
+        throw "The Windows release-key gate did not execute its key validation: $gateOutput"
+    }
+} finally {
+    if ($null -eq $oldFingerprint) {
+        Remove-Item Env:ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256 -ErrorAction SilentlyContinue
+    } else {
+        $env:ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256 = $oldFingerprint
+    }
+}
+
+& python (Join-Path $root "scripts/test-release-public-key.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "Release public-key checker tests failed with exit code $LASTEXITCODE"
 }
 
 $controllerInstaller = Join-Path $root "scripts/install-controller.ps1"
@@ -75,6 +100,7 @@ foreach ($script in $shellInstallers) {
 }
 Assert-Contains (Join-Path $root "scripts/install-node.sh") "--service-mode"
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "node-release.json"
+Assert-Contains (Join-Path $root "scripts/install-controller.ps1") '"--force"'
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "takeownArguments"
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") '"/R", "/D", "Y"'
 Assert-Contains (Join-Path $root "scripts/install-controller.ps1") "Assert-HostPort"

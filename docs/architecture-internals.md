@@ -31,12 +31,14 @@ single trust decision across the Controller-to-Node handoff.
 
 Replacement progress is a local journal rather than database business state:
 `prepared`, `replacing`, `waiting`, `recovering`, and a terminal state record
-the action, target version, live binary, staged binary, and previous binary
-paths. Controller readiness recovery and Node startup reporting consume the
-journal. Terminal success removes staged/previous artifacts only after the
-terminal record is written; an interrupted middle state is recovered on
-startup when the running version and local readiness agree, otherwise it is
-left as `manual_required` with the previous binary path intact.
+the action, target version, live binary, staged binary, previous binary paths,
+and the original/target SHA-256 identities. Controller readiness recovery and
+Node startup reporting first reconcile the journal with those files. Terminal
+success removes staged/previous artifacts only after the terminal record is
+written; an interrupted middle state is recovered on startup only when the
+target layout and running version are verified and local readiness agrees. A
+verified old layout becomes failed; any partial, tampered or legacy layout is
+left as `manual_required` with the replacement files intact.
 
 Update coordination state is stored in the v14 relational tables
 `controller_update_state` and `node_update_states`. The latter has an index on

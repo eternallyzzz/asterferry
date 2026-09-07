@@ -203,21 +203,31 @@ func TestPendingControllerReplacementRecoversAfterHelperInterruption(t *testing.
 	statusPath := manager.controllerUpdateStatusPath()
 	stagedPath := filepath.Join(root, "updates", "staged")
 	backupPath := filepath.Join(root, "updates", "previous")
+	binaryPath := filepath.Join(root, "asterferry")
+	original := []byte("previous")
+	target := []byte("staged")
 	if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(stagedPath, []byte("staged"), 0o600); err != nil {
+	if err := os.WriteFile(binaryPath, target, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(backupPath, []byte("previous"), 0o600); err != nil {
+	if err := os.WriteFile(stagedPath, target, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(backupPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalSHA256 := sha256.Sum256(original)
+	targetSHA256 := sha256.Sum256(target)
 	update.WriteReplacementResult(statusPath, update.ReplacementResult{
-		Version:    "1.1.0",
-		State:      update.ReplacementStateWaiting,
-		BinaryPath: filepath.Join(root, "asterferry"),
-		StagedPath: stagedPath,
-		BackupPath: backupPath,
+		Version:        "1.1.0",
+		State:          update.ReplacementStateWaiting,
+		BinaryPath:     binaryPath,
+		StagedPath:     stagedPath,
+		BackupPath:     backupPath,
+		OriginalSHA256: hex.EncodeToString(originalSHA256[:]),
+		TargetSHA256:   hex.EncodeToString(targetSHA256[:]),
 	})
 	manager.recoverPendingReplacement(context.Background())
 	result, err := update.ReadReplacementResult(statusPath)

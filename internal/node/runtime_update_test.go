@@ -166,8 +166,31 @@ func TestSendPendingNodeUpdateReportsHealthyOnce(t *testing.T) {
 		nodeUpdateStateRecovering,
 	} {
 		t.Run(initialState, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "node-update.json")
-			update.WriteReplacementResult(path, update.ReplacementResult{ActionID: "pending-action", Version: "1.2.3", State: initialState})
+			root := t.TempDir()
+			path := filepath.Join(root, "node-update.json")
+			binaryPath := filepath.Join(root, "node")
+			stagedPath := filepath.Join(root, "updates", "staged")
+			backupPath := filepath.Join(root, "updates", "previous")
+			if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte("original node")
+			target := []byte("target node")
+			for file, data := range map[string][]byte{binaryPath: target, stagedPath: target, backupPath: original} {
+				if err := os.WriteFile(file, data, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			update.WriteReplacementResult(path, update.ReplacementResult{
+				ActionID:       "pending-action",
+				Version:        "1.2.3",
+				State:          initialState,
+				BinaryPath:     binaryPath,
+				StagedPath:     stagedPath,
+				BackupPath:     backupPath,
+				OriginalSHA256: nodeTestSHA256(original),
+				TargetSHA256:   nodeTestSHA256(target),
+			})
 			runtime := &Runtime{runtimeOpts: RuntimeOptions{UpdateStatusPath: path, ServiceMode: "wsl"}}
 			capture, send := captureNodeUpdateMessage()
 			if err := runtime.sendPendingNodeUpdate(send); err != nil {
@@ -189,6 +212,91 @@ func TestSendPendingNodeUpdateReportsHealthyOnce(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSendPendingNodeUpdateReportsUncertainReplacementStates(t *testing.T) {
+	oldVersion := buildinfo.Version
+	buildinfo.Version = "1.2.3"
+	t.Cleanup(func() { buildinfo.Version = oldVersion })
+	for _, test := range []struct {
+		name       string
+		wantState  string
+		wantBackup bool
+		wantStaged bool
+		setup      func(t *testing.T, binaryPath, stagedPath, backupPath string)
+	}{
+		{
+			name:      "original intact",
+			wantState: nodeUpdateStateFailed,
+			setup: func(t *testing.T, binaryPath, stagedPath, _ string) {
+				t.Helper()
+				writeNodeReplacementFile(t, binaryPath, []byte("original node"))
+				writeNodeReplacementFile(t, stagedPath, []byte("target node"))
+			},
+		},
+		{
+			name:       "partial replacement",
+			wantState:  nodeUpdateStateManualRequired,
+			wantBackup: true,
+			wantStaged: true,
+			setup: func(t *testing.T, _, stagedPath, backupPath string) {
+				t.Helper()
+				writeNodeReplacementFile(t, stagedPath, []byte("target node"))
+				writeNodeReplacementFile(t, backupPath, []byte("original node"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "node-update.json")
+			binaryPath := filepath.Join(root, "node")
+			stagedPath := filepath.Join(root, "updates", "staged")
+			backupPath := filepath.Join(root, "updates", "previous")
+			if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			test.setup(t, binaryPath, stagedPath, backupPath)
+			if err := update.WriteReplacementResult(path, update.ReplacementResult{
+				ActionID:       "uncertain-action",
+				Version:        "1.2.3",
+				State:          update.ReplacementStatePrepared,
+				BinaryPath:     binaryPath,
+				StagedPath:     stagedPath,
+				BackupPath:     backupPath,
+				OriginalSHA256: nodeTestSHA256([]byte("original node")),
+				TargetSHA256:   nodeTestSHA256([]byte("target node")),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			runtime := &Runtime{runtimeOpts: RuntimeOptions{UpdateStatusPath: path, ServiceMode: "wsl"}}
+			capture, send := captureNodeUpdateMessage()
+			if err := runtime.sendPendingNodeUpdate(send); err != nil {
+				t.Fatal(err)
+			}
+			attributes := decodeNodeUpdateAttributes(t, capture.message)
+			if attributes["state"] != test.wantState {
+				t.Fatalf("uncertain update attributes = %#v, want state %q", attributes, test.wantState)
+			}
+			if _, err := os.Stat(backupPath); (err == nil) != test.wantBackup {
+				t.Fatalf("backup presence = %v, want %v (err=%v)", err == nil, test.wantBackup, err)
+			}
+			if _, err := os.Stat(stagedPath); (err == nil) != test.wantStaged {
+				t.Fatalf("staged presence = %v, want %v (err=%v)", err == nil, test.wantStaged, err)
+			}
+		})
+	}
+}
+
+func writeNodeReplacementFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func nodeTestSHA256(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 type nodeMessageCapture struct {

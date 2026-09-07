@@ -71,6 +71,7 @@ if (-not $SkipDocker) {
     Require-Command "docker"
 }
 Invoke-Checked "Release metadata check" "python" @((Join-Path $root "scripts/check-release-metadata.py"), "--version", $Version)
+Invoke-Checked "Release verification key" "python" @((Join-Path $root "scripts/check-release-public-key.py"))
 Invoke-Checked "Toolchain pin check" "python" @((Join-Path $root "scripts/check-toolchain.py"))
 $toolchain = Get-Content -Raw -LiteralPath (Join-Path $root ".toolchain.json") | ConvertFrom-Json
 $expectedNodeVersion = "v$($toolchain.release.node)"
