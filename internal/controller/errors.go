@@ -5,9 +5,8 @@ import (
 	"fmt"
 )
 
-// These errors are deliberately small and stable. Handlers use errors.Is to
-// choose a safe client-facing status while retaining the wrapped storage
-// error for logs and diagnostics.
+// These errors are small and stable. Handlers use errors.Is for client-facing
+// status while retaining the wrapped storage error for logs.
 var (
 	ErrInvalidCredentials       = errors.New("invalid credentials")
 	ErrUserDisabled             = errors.New("user is disabled")

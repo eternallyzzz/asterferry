@@ -1,6 +1,6 @@
 // Package controlwire contains the protocol glue shared by the Controller and
 // nodes. Generated protobuf types live in controlwire/v1; this package adds
-// domain conversion, strict size limits, and monotonic-generation checks.
+// domain conversion and strict size limits.
 package controlwire
 
 import (
@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	v1 "asterferry/internal/controlwire/v1"
@@ -24,14 +23,12 @@ import (
 const (
 	MaxControlMessageBytes = 16 << 20
 	MaxEventBatchBytes     = 4 << 20
-	ControlALPN            = "asterferry-control/3"
+	ControlALPN            = "asterferry-control/1"
 )
 
 var (
-	ErrStaleGeneration    = errors.New("stale generation")
-	ErrGenerationConflict = errors.New("generation conflict")
-	ErrUnknownSchema      = errors.New("unknown schema")
-	ErrChecksumMismatch   = errors.New("checksum mismatch")
+	ErrUnknownSchema    = errors.New("unknown schema")
+	ErrChecksumMismatch = errors.New("checksum mismatch")
 )
 
 func SnapshotToProto(snapshot domain.DesiredSnapshot) (*v1.DesiredSnapshot, error) {
@@ -172,45 +169,6 @@ func ObservedFromProto(value *v1.ObservedState) (domain.ObservedState, error) {
 		return domain.ObservedState{}, err
 	}
 	return state, nil
-}
-
-// GenerationGate rejects every generation that is not strictly newer than
-// the last accepted value. It is safe to share between the stream reader and
-// an apply worker.
-type GenerationGate struct {
-	mu   sync.Mutex
-	last uint64
-}
-
-func (g *GenerationGate) Last() uint64 { g.mu.Lock(); defer g.mu.Unlock(); return g.last }
-
-func (g *GenerationGate) Accept(generation uint64) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if generation == 0 {
-		return ErrGenerationConflict
-	}
-	if generation <= g.last {
-		return ErrStaleGeneration
-	}
-	g.last = generation
-	return nil
-}
-
-func (g *GenerationGate) AcceptOrSame(generation uint64) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if generation == g.last && generation != 0 {
-		return nil
-	}
-	if generation == 0 {
-		return ErrGenerationConflict
-	}
-	if generation <= g.last {
-		return ErrStaleGeneration
-	}
-	g.last = generation
-	return nil
 }
 
 // WriteMessage and ReadMessage are useful for non-gRPC control transports and

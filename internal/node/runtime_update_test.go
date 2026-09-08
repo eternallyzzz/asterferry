@@ -82,7 +82,7 @@ func TestStartNodeUpgradeDownloadsVerifiesAndStagesRelease(t *testing.T) {
 	binaryName := filepath.Base(mustExecutable(t))
 	archive, archiveName := makeNodeUpgradeArchive(t, binaryName)
 	digest := sha256.Sum256(archive)
-	manifest := fmt.Sprintf(`{"schema_version":1,"version":"1.1.0","tag":"v1.1.0","commit":"abc123","protocol":"v3","artifacts":[{"name":"%s","sha256":"%s"}]}`, archiveName, hex.EncodeToString(digest[:]))
+	manifest := fmt.Sprintf(`{"schema_version":1,"version":"1.1.0","tag":"v1.1.0","commit":"abc123","protocol":"v1","artifacts":[{"name":"%s","sha256":"%s"}]}`, archiveName, hex.EncodeToString(digest[:]))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/release":

@@ -10,8 +10,8 @@ import (
 )
 
 // NodeSpec is the small aggregate dispatcher. The concrete Gateway and Agent
-// codecs are intentionally separate because each owns a different family of
-// normalized child tables.
+// codecs are separate because each owns a different family of normalized child
+// tables.
 func loadNodeSpecNormalized(ctx context.Context, q sqlQueryer, nodeID string) (domain.NodeSpec, error) {
 	var kind string
 	var revision int64

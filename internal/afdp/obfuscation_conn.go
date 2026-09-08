@@ -30,8 +30,8 @@ const (
 )
 
 const (
-	obfuscationMaskDomain = "asterferry-data/2/mask/"
-	obfuscationTagDomain  = "asterferry-data/2/tag/"
+	obfuscationMaskDomain = "asterferry-data/1/mask/"
+	obfuscationTagDomain  = "asterferry-data/1/tag/"
 	maskInputBytes        = len(obfuscationMaskDomain) + 32 + obfuscationSaltBytes + 4
 )
 
@@ -52,8 +52,7 @@ type obfuscationKey struct {
 	key [32]byte
 }
 
-// ObfuscationMetrics is deliberately tiny so an embedding runtime can publish
-// packet-layer counters without coupling the wire package to a metrics store.
+// ObfuscationMetrics exposes packet-layer counters to the embedding runtime.
 type ObfuscationMetrics interface {
 	ObfuscationPacketAccepted(previousKey bool)
 	ObfuscationPacketRejected()
@@ -77,8 +76,7 @@ type ObfuscationOptions struct {
 	MaxFragmentBytes int
 	// MaxHandshakeFragmentWireBytes is the maximum on-wire size of one
 	// handshake camouflage fragment. Short-header data datagrams may contain
-	// coalesced QUIC packets and intentionally use the separate overall AFDP
-	// datagram limit instead.
+	// coalesced QUIC packets and use the overall AFDP datagram limit instead.
 	MaxHandshakeFragmentWireBytes int
 }
 
@@ -194,8 +192,7 @@ func (c *obfuscationPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		}
 		packet, ok := c.decode(buffer[:n], addr, p)
 		if !ok {
-			// Invalid packets are intentionally indistinguishable from an idle
-			// socket to an unauthenticated observer.
+			// Drop invalid packets without distinguishing them from idle traffic.
 			continue
 		}
 		if len(packet) > len(p) {

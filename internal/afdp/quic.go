@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -50,43 +49,15 @@ func NewQUICConfig(options QUICOptions) *quic.Config {
 	return &quic.Config{MaxIncomingStreams: options.MaxStreams, HandshakeIdleTimeout: options.HandshakeTimeout, MaxIdleTimeout: options.IdleTimeout, KeepAlivePeriod: options.KeepAlive, Allow0RTT: false, EnableDatagrams: true}
 }
 
-func ServerTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
-	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load data-plane certificate: %w", err)
-	}
-	pool, err := readCAPool(caFile)
-	if err != nil {
-		return nil, err
-	}
-	return ServerTLSConfigFromPEM(certificate, pool), nil
-}
-
-// ServerTLSConfigFromPEM builds the same strict AFDP server configuration as
-// ServerTLSConfig without forcing a node runtime to write bootstrap key
-// material to temporary files.
+// ServerTLSConfigFromPEM builds the strict AFDP server configuration from
+// already-loaded certificate material.
 func ServerTLSConfigFromPEM(certificate tls.Certificate, clientCAs *x509.CertPool) *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, ClientCAs: clientCAs, ClientAuth: tls.RequireAndVerifyClientCert, NextProtos: []string{ALPN}}
 }
 
-func ClientTLSConfig(certFile, keyFile, caFile, serverName string) (*tls.Config, error) {
-	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load data-plane certificate: %w", err)
-	}
-	pool, err := readCAPool(caFile)
-	if err != nil {
-		return nil, err
-	}
-	return ClientTLSConfigFromPEM(certificate, pool, serverName), nil
-}
-
-// ClientTLSConfigFromPEM is the in-memory counterpart to
-// ClientTLSConfig. A blank serverName intentionally verifies the certificate
-// chain without DNS-name matching; AFDP node certificates identify a peer by
-// its Controller-issued SPIFFE URI/CN rather than by the public endpoint DNS
-// name. Callers that have a separate endpoint certificate may provide a
-// normal serverName for hostname verification.
+// ClientTLSConfigFromPEM builds the strict AFDP client configuration from
+// loaded certificate material. A blank serverName verifies the chain without
+// DNS matching; node identity is checked by the AFDP handshake.
 func ClientTLSConfigFromPEM(certificate tls.Certificate, roots *x509.CertPool, serverName string) *tls.Config {
 	config := &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}, RootCAs: roots, ServerName: serverName, NextProtos: []string{ALPN}}
 	if serverName == "" {
@@ -116,28 +87,10 @@ func ClientTLSConfigFromPEM(certificate tls.Certificate, roots *x509.CertPool, s
 	return config
 }
 
-func Listen(addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.Listener, error) {
-	if tlsConfig == nil {
-		return nil, errors.New("data-plane TLS config is required")
-	}
-	// AFDP/2 has one reserved ALPN. Never let a caller accidentally expose a
-	// listener that negotiates an unrelated protocol on the data endpoint.
-	tlsConfig = tlsConfig.Clone()
-	tlsConfig.NextProtos = []string{ALPN}
-	return quic.ListenAddr(addr, tlsConfig, NewQUICConfig(options))
-}
-
-// ListenWithObfuscation binds one UDP socket and gives quic-go the AFDP
-// packet wrapper. The wrapper is deliberately constructed before the QUIC
-// listener so malformed or unauthenticated packets are discarded below the
-// session layer.
-func ListenWithObfuscation(addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Listener, error) {
-	listener, _, err := ListenWithObfuscationPacketConn(addr, tlsConfig, options, obfuscation)
-	return listener, err
-}
-
-// ListenWithObfuscationPacketConn is the ownership-explicit variant of
-// ListenWithObfuscation. quic.Listener.Close stops accepting connections but
+// ListenWithObfuscationPacketConn binds one UDP socket and gives quic-go the
+// AFDP packet wrapper. It is created before the QUIC listener so malformed or
+// unauthenticated packets are discarded below the session layer. Closing the
+// QUIC listener stops accepting connections but
 // does not close a caller-owned PacketConn; callers that rebuild a listener on
 // the same address must close both objects.
 func ListenWithObfuscationPacketConn(addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Listener, net.PacketConn, error) {
@@ -199,19 +152,8 @@ func (c *packetConnOwner) Close() error {
 	return c.closeErr
 }
 
-func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, options QUICOptions) (*quic.Conn, error) {
-	if tlsConfig == nil {
-		return nil, errors.New("data-plane TLS config is required")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	tlsConfig = tlsConfig.Clone()
-	tlsConfig.NextProtos = []string{ALPN}
-	return quic.DialAddr(ctx, addr, tlsConfig, NewQUICConfig(options))
-}
-
-// DialWithObfuscation is the client counterpart to ListenWithObfuscation. The
+// DialWithObfuscation is the client counterpart to
+// ListenWithObfuscationPacketConn. The
 // returned QUIC connection owns the packet wrapper's lifetime; callers should
 // close the connection and then the returned PacketConn when the session ends.
 func DialWithObfuscation(ctx context.Context, addr string, tlsConfig *tls.Config, options QUICOptions, obfuscation ObfuscationOptions) (*quic.Conn, net.PacketConn, error) {
@@ -242,19 +184,4 @@ func DialWithObfuscation(ctx context.Context, addr string, tlsConfig *tls.Config
 		return nil, nil, err
 	}
 	return connection, packetConn, nil
-}
-
-func readCAPool(path string) (*x509.CertPool, error) {
-	if path == "" {
-		return nil, errors.New("data-plane CA path is required")
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(b) {
-		return nil, errors.New("data-plane CA has no PEM certificates")
-	}
-	return pool, nil
 }

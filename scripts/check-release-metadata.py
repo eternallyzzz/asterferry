@@ -14,26 +14,39 @@ STABLE_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 RELEASE_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-rc\.\d+)?$")
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+(?:-rc\.\d+)?)$")
 
-# These files describe the current release policy. They intentionally do not
-# contain a literal product version; the changelog and generated metadata are
-# checked separately below.
-POLICY_DOCUMENTS = (
+# These are the two human-facing documents kept in the repository. They do
+# not contain a literal product release version.
+README_DOCUMENTS = (
     "README.md",
-    "SECURITY.md",
-    ".github/CODEOWNERS",
-    "docs/architecture.md",
-    "docs/architecture-internals.md",
-    "docs/compatibility.md",
-    "docs/geoip.md",
-    "docs/operations.en.md",
-    "docs/operations.zh-CN.md",
-    "docs/release-runbook.md",
-    "docs/support-matrix.md",
+    "docs/README.zh-CN.md",
 )
 
 
 def read_text(root: Path, relative: str) -> str:
     return (root / relative).read_text(encoding="utf-8")
+
+
+def repository_markdown_files(root: Path) -> set[str]:
+    ignored_parts = {".codebuddy", ".git", "dist", "node_modules", "tmp"}
+    return {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*.md")
+        if not ignored_parts.intersection(path.parts)
+    }
+
+
+def validate_document_set(root: Path) -> None:
+    expected = set(README_DOCUMENTS)
+    actual = repository_markdown_files(root)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing={', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected={', '.join(unexpected)}")
+        fail("repository Markdown set is not consolidated: " + "; ".join(details))
 
 
 def stable_part(version: str) -> str:
@@ -74,6 +87,8 @@ def main() -> int:
         if stable_part(tag_match.group(1)) != canonical:
             fail(f"release tag {args.tag} does not use canonical VERSION {canonical}")
 
+    validate_document_set(root)
+
     sources: dict[str, str] = {}
     for relative in ("api/openapi.yaml", "internal/controller/openapi.yaml"):
         match = re.search(r"(?m)^  version:\s*(\S+)\s*$", read_text(root, relative))
@@ -97,13 +112,6 @@ def main() -> int:
         sources[f"{chart}/Chart.yaml version"] = chart_match.group(1)
         sources[f"{chart}/Chart.yaml appVersion"] = app_match.group(1)
 
-    changelog = read_text(root, "CHANGELOG.md")
-    if not re.search(
-        rf"(?m)^## \[{re.escape(canonical)}\] - (?:Unreleased|\d{{4}}-\d{{2}}-\d{{2}})\s*$",
-        changelog,
-    ):
-        fail(f"CHANGELOG.md has no current entry for {canonical}")
-
     mismatches = {path: value for path, value in sources.items() if value != canonical}
     if mismatches:
         details = ", ".join(f"{path}={value!r}" for path, value in mismatches.items())
@@ -112,14 +120,10 @@ def main() -> int:
     product_version_pattern = re.compile(
         r"(?<![A-Za-z0-9.])v?\d+\.\d+\.\d+(?:-rc\.\d+)?(?![A-Za-z0-9.])"
     )
-    for relative in POLICY_DOCUMENTS:
+    for relative in README_DOCUMENTS:
         text = read_text(root, relative)
         if product_version_pattern.search(text):
             fail(f"{relative} contains a hard-coded product release version")
-
-    compatibility = read_text(root, "docs/compatibility.md")
-    if "current release line" not in compatibility:
-        fail("docs/compatibility.md does not refer to the current release line")
 
     schema_source = read_text(root, "internal/controller/schema_contract.go")
     schema_match = re.search(
@@ -128,17 +132,23 @@ def main() -> int:
     if not schema_match:
         fail("CurrentDatabaseSchemaVersion is not declared in the expected form")
     schema_version = schema_match.group(1)
-    schema_expectations = {
-        "CHANGELOG.md": rf"database schema v{schema_version}\b",
-        "docs/architecture.md": rf"database schema v{schema_version}\b",
-        "docs/architecture-internals.md": rf"\bv{schema_version} relational tables\b",
-        "docs/compatibility.md": rf"Database schema v{schema_version}\b",
-        "docs/operations.en.md": rf"\bpre-v{schema_version} databases\b",
-        "docs/operations.zh-CN.md": rf"v{schema_version} 之前的数据库",
+    document_expectations = {
+        "README.md": {
+            "AFDP/1": r"\bAFDP/1\b",
+            "control/1": r"\bcontrol/1\b",
+            "database schema": rf"\bdatabase\s+schema(?:\s+is)?\s+v{schema_version}\b",
+        },
+        "docs/README.zh-CN.md": {
+            "AFDP/1": r"\bAFDP/1\b",
+            "control/1": r"\bcontrol/1\b",
+            "数据库 schema": rf"数据库\s+schema\s+v{schema_version}\b",
+        },
     }
-    for relative, pattern in schema_expectations.items():
-        if not re.search(pattern, read_text(root, relative), re.IGNORECASE):
-            fail(f"{relative} does not describe the current database schema v{schema_version}")
+    for relative, expectations in document_expectations.items():
+        document = read_text(root, relative)
+        for description, pattern in expectations.items():
+            if not re.search(pattern, document, re.IGNORECASE):
+                fail(f"{relative} is missing required release marker: {description}")
 
     print(f"Release metadata check passed ({canonical}, database schema v{schema_version}).")
     return 0

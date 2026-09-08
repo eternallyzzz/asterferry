@@ -8,7 +8,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,8 +51,6 @@ func NewSnapshotCache(path string, key []byte) (*SnapshotCache, error) {
 	}
 	return &SnapshotCache{path: filepath.Clean(path), key: append([]byte(nil), key...)}, nil
 }
-
-func (c *SnapshotCache) Path() string { return c.path }
 
 func (c *SnapshotCache) Write(snapshot domain.DesiredSnapshot) error {
 	if err := snapshot.Validate(); err != nil {
@@ -107,8 +104,8 @@ func (c *SnapshotCache) Read() (domain.DesiredSnapshot, error) {
 	if err := snapshot.Validate(); err != nil {
 		return domain.DesiredSnapshot{}, err
 	}
-	// A cache is a last-known-good control artifact, not an optional JSON
-	// convenience. Requiring the authenticated checksum here prevents a
+	// A cache is a last-known-good control artifact. Requiring the authenticated
+	// checksum here prevents a
 	// hand-edited (or truncated) document with a valid structural shape from
 	// becoming the node's durable generation after a restart.
 	if strings.TrimSpace(snapshot.Checksum) == "" {
@@ -273,7 +270,7 @@ func (r *Reconciler) Apply(ctx context.Context, snapshot domain.DesiredSnapshot)
 		// Component callbacks may already have classified a failure (for
 		// example an invalid listener bind with a field path or a non-retryable
 		// authorization error). Preserve that stable error envelope across the
-		// reconciler boundary instead of flattening every failure to
+		// reconciler boundary rather than flattening every failure to
 		// apply_failed. Unknown callback errors remain retryable because the
 		// Controller can safely resend the immutable snapshot.
 		applyErr := toApplyFailure(err)
@@ -443,5 +440,3 @@ func decrypt(key, ciphertext []byte) ([]byte, error) {
 	}
 	return gcm.Open(nil, ciphertext[:gcm.NonceSize()], ciphertext[gcm.NonceSize():], nil)
 }
-
-func CacheKeyString(key []byte) string { return base64.RawURLEncoding.EncodeToString(key) }

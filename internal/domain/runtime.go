@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// Runtime connection types are intentionally transport-oriented.  A session
-// is the authenticated node-to-node channel; TCP connections and UDP flows
-// are the operator-visible children that carry user traffic.
+// Runtime connection types describe the authenticated session and its TCP,
+// UDP and egress children.
 const (
 	RuntimeConnectionSession = "session"
 	RuntimeConnectionTCP     = "tcp"
@@ -39,10 +38,8 @@ const (
 	RuntimeEventRateLimited = "rate_limited"
 )
 
-// RuntimeRateLimit describes an ephemeral operator policy.  Limits are kept
-// in the node process and are deliberately not part of desired snapshots:
-// they are an operational control, not configuration that should survive a
-// node replacement or be replayed accidentally after a restart.
+// RuntimeRateLimit describes a process-local operator policy. It is not part
+// of desired snapshots.
 type RuntimeRateLimit struct {
 	Direction      string    `json:"direction"`
 	BytesPerSecond uint64    `json:"bytes_per_second"`
@@ -73,8 +70,7 @@ type RuntimeConnection struct {
 	CloseReason     string     `json:"close_reason,omitempty"`
 	BytesIn         uint64     `json:"bytes_in"`
 	BytesOut        uint64     `json:"bytes_out"`
-	// RateIn and RateOut are cumulative average byte rates since StartedAt,
-	// rather than instantaneous or rolling-window rates.
+	// RateIn and RateOut are cumulative average byte rates since StartedAt.
 	RateIn  float64           `json:"rate_in_bps"`
 	RateOut float64           `json:"rate_out_bps"`
 	Limit   *RuntimeRateLimit `json:"limit,omitempty"`

@@ -44,7 +44,7 @@ describe("ObservedView", () => {
   it("surfaces whether the latest apply error is retryable", async () => {
     vi.stubGlobal("EventSource", EventSourceStub);
     apiMocks.getObserved.mockResolvedValue({
-      schema_version: 10,
+      schema_version: 1,
       node_id: "node-1",
       applied_generation: 2,
       healthy: false,

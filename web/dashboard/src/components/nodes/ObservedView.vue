@@ -65,7 +65,7 @@ async function refreshRuntime() {
   }
 }
 
-const { refresh } = usePolling(load, 10_000);
+usePolling(load, 10_000);
 let runtimeEventSource: EventSource | undefined;
 onMounted(() => {
   runtimeEventSource = new EventSource(runtimeStreamURL(props.nodeId));

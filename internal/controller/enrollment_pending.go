@@ -81,8 +81,8 @@ func (s *ResourceRepository) issuePendingNodeCertificate(ctx context.Context, co
 	if err := insertNodeLabelsTx(ctx, tx, nodeID, current.Labels); err != nil {
 		return Certificate{}, storageFailure("create enrolled node labels", err)
 	}
-	// Enrollment creates only the Node identity. Role and business behavior
-	// are deliberately configured later through the node spec API.
+	// Enrollment creates only the Node identity. The node spec API configures
+	// role and business behavior later.
 	if err := insertAudit(ctx, tx, "system", "enroll", "node", nodeID, 1, map[string]string{"serial": certificate.Serial}); err != nil {
 		return Certificate{}, storageFailure("record pending node enrollment", err)
 	}

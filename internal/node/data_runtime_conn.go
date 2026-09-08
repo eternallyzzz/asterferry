@@ -104,8 +104,8 @@ type afdpStreamConn struct {
 
 // egressConn couples a successfully policy-approved direct socket to the
 // admission reservation held by the Engine. Releasing on Close makes the
-// limit cover the full lifetime of a proxy connection rather than only the
-// dial syscall; sync.Once keeps cleanup safe when both copy directions close
+// limit cover the full lifetime of a proxy connection, not only the dial
+// syscall; sync.Once makes cleanup safe when both copy directions close
 // the socket concurrently.
 type egressConn struct {
 	net.Conn
@@ -247,7 +247,7 @@ func (g *dataGeneration) closeRuntimeConnections(reason string) {
 	g.telemetry.closeOwner(g, reason)
 }
 
-// closeSessions is deliberately independent from close: an explicit
+// closeSessions is separate from close: an explicit
 // reconnect must invalidate peer sessions while retaining reverse/proxy
 // listeners, whereas a generation swap also closes every listener.
 func (g *dataGeneration) closeSessions() {

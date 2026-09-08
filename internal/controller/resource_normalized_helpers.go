@@ -1,7 +1,7 @@
 package controller
 
-// Shared SQL and scalar helpers for the normalized resource codecs. Each
-// aggregate codec lives in its own file; this file contains only mechanics
+// Shared SQL and scalar helpers for normalized resource codecs. Aggregate
+// codecs live in separate files; these helpers contain only mechanics
 // that are independent of Gateway, Agent, Service, Assignment, or Observed
 // state.
 
@@ -42,8 +42,7 @@ func storedPort(value int64, field string) (uint16, error) {
 
 // requireStoredPosition turns the position columns used by ordered child
 // tables into an integrity check. The writers always emit dense zero-based
-// positions, so a gap or negative value is corruption rather than a harmless
-// ordering detail.
+// positions, so a gap or negative value is corruption.
 func requireStoredPosition(got int64, expected int, field string) error {
 	if got < 0 || got != int64(expected) {
 		return fmt.Errorf("stored %s position %d, want %d", field, got, expected)

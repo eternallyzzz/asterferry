@@ -16,7 +16,7 @@ import (
 const releaseManifestSchemaVersion = 1
 
 // ReleaseArtifact is the signed digest entry for one release asset. The
-// manifest deliberately contains names and digests, not URLs: release URLs
+// manifest contains names and digests, not URLs: release URLs
 // come from the API response, while the signature authenticates the bytes
 // that may be downloaded from those URLs.
 type ReleaseArtifact struct {
@@ -26,7 +26,7 @@ type ReleaseArtifact struct {
 
 // ReleaseManifest is the release metadata signed by the release key. The
 // optional resources field is retained as raw JSON because it is descriptive
-// release metadata rather than part of the updater trust decision.
+// release metadata, not part of the updater trust decision.
 type ReleaseManifest struct {
 	SchemaVersion     int               `json:"schema_version"`
 	Version           string            `json:"version"`

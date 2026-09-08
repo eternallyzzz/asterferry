@@ -9,7 +9,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="fail instead of updating the generated copy")
+    parser.add_argument("--check", action="store_true", help="check the generated copy without updating it")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]

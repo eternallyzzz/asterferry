@@ -36,7 +36,7 @@ import { useNotify } from "../composables/useNotify";
 import { useSession } from "../session";
 import { certificateTone, describeError, formatTime, newIdempotencyKey, parseObject, prettyJson } from "../utils/format";
 
-// The editor intentionally keeps the decoded JSON document intact. The type
+// The editor keeps the decoded JSON document intact. The type
 // assertion at save time is the boundary where arbitrary editor JSON enters
 // the strongly typed API model, so protected obfuscation fields survive a
 // read/edit/write round trip without being copied into operational summaries.
@@ -129,7 +129,7 @@ function defaultSpec(node: ControllerNode, kind: NodeSpecKind): SpecDocument {
       labels: {},
       capacity: { max_agents: 128, max_connections: 4096, max_services: 4096 },
       port_pool: { tcp: [{ min: 20000, max: 20100 }], udp: [{ min: 21000, max: 21100 }] },
-      transport: { alpn: "asterferry-data/2", max_streams: 1024, max_frame_bytes: 65536, max_datagram_bytes: 65536, handshake_timeout_seconds: 10, idle_timeout_seconds: 300 },
+      transport: { alpn: "asterferry-data/1", max_streams: 1024, max_frame_bytes: 65536, max_datagram_bytes: 65536, handshake_timeout_seconds: 10, idle_timeout_seconds: 300 },
       obfuscation: { mode: "standard", max_padding_bytes: 0, handshake_shaping: false },
       egress: { enabled: false, max_connections: 0 },
     };

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reject CJK characters in canonical source comments.
 
-User-visible Dashboard strings and the localized operations documents are not
-comments, so they are intentionally outside this check.
+The check covers source comments. It excludes user-visible Dashboard strings
+and localized user documentation.
 """
 
 from __future__ import annotations

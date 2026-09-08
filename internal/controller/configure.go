@@ -16,8 +16,8 @@ import (
 )
 
 // ConfigureOptions describes an in-place Controller configuration update.
-// The update intentionally keeps the existing CA, database and master key;
-// only the advertised address and the Controller server certificate change.
+// The update keeps the existing CA, database and master key. Only the
+// advertised address and Controller server certificate change.
 type ConfigureOptions struct {
 	ConfigPath    string
 	GRPCAdvertise string

@@ -11,9 +11,8 @@ import (
 
 const maxNodeInstallerAssetSize = 1 << 20
 
-// nodeInstaller serves the small bootstrap assets installed by
-// install-controller.sh. It deliberately does not expose the Controller data
-// directory as a general file server.
+// nodeInstaller serves the bootstrap assets used by install-controller.sh. It
+// does not expose the Controller data directory as a general file server.
 func (s *Server) nodeInstaller(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		methodNotAllowed(w, http.MethodGet, http.MethodHead)

@@ -207,9 +207,8 @@ func (s *ResourceRepository) RequestNodeActionWithID(ctx context.Context, nodeID
 	}
 	// Delivery is best effort and happens after commit. Persist a delivery
 	// hint so an idempotent retry returns the same accepted/queued result
-	// without re-publishing the action. The hint is intentionally conservative:
-	// an available subscriber is expected to receive the message, while a full
-	// broker is reported as queued for an explicit retry.
+	// without re-publishing the action. An available subscriber is expected to
+	// receive the message; a full broker is reported as queued for retry.
 	deliveryHint := s.ChangeBus().actionCanDeliver(nodeID)
 	if err := recordIdempotency(ctx, tx, options.IdempotencyKey, request, map[string]any{"action_id": actionID, "delivered": deliveryHint}); err != nil {
 		return "", false, err

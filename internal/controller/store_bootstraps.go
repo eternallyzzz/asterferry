@@ -13,7 +13,7 @@ import (
 )
 
 // PendingNodeBootstrap is the non-secret metadata for an installation command
-// that has been issued but has not enrolled yet. It is deliberately separate
+// that has been issued but has not enrolled yet. It is separate
 // from domain.Node: an installation that has never reached the Controller is
 // not an enrolled identity and must not be schedulable.
 type PendingNodeBootstrap struct {
@@ -36,14 +36,14 @@ type pendingNodeBootstrap struct {
 // CreatePendingNodeBootstrap stores only the installation intent and a hash
 // of the one-time enrollment token. The node identity is created later by
 // IssueNodeCertificate, after the installer reaches the Controller with the
-// token; the behavior spec is intentionally configured as a separate action.
+// token; the behavior spec is configured as a separate action.
 func (s *ResourceRepository) CreatePendingNodeBootstrap(ctx context.Context, node domain.Node, platform, arch string, options WriteOptions) (string, PendingNodeBootstrap, error) {
 	return s.createPendingNodeBootstrap(ctx, node, platform, arch, NodeInstallScriptSourceController, options)
 }
 
 // CreatePendingNodeBootstrapWithSource is the Dashboard-facing variant that
-// records where the installer script is downloaded from. The historical
-// method above keeps the Controller source as its default for internal and
+// records where the installer script is downloaded from. The method above
+// keeps the Controller source as its default for internal and
 // external callers that do not need to choose a source.
 func (s *ResourceRepository) CreatePendingNodeBootstrapWithSource(ctx context.Context, node domain.Node, platform, arch, scriptSource string, options WriteOptions) (string, PendingNodeBootstrap, error) {
 	return s.createPendingNodeBootstrap(ctx, node, platform, arch, scriptSource, options)
@@ -99,7 +99,7 @@ func (s *ResourceRepository) createPendingNodeBootstrap(ctx context.Context, nod
 	}
 	if pending.NodeID == "" {
 		// Allocate only after the idempotency lookup. Replaying the same key
-		// therefore returns the original generated ID instead of creating a
+		// therefore returns the original generated ID rather than creating a
 		// different pending identity.
 		const maxAllocationAttempts = 8
 		allocated := false
@@ -332,7 +332,7 @@ func (s *ResourceRepository) pendingBootstrapForToken(ctx context.Context, token
 
 // validateNodeBootstrapToken accepts both token records created for a
 // pre-created Node and tokens held by an install-first pending bootstrap. Asset
-// downloads are intentionally read-only: the enrollment transaction consumes
+// downloads are read-only: the enrollment transaction consumes
 // the credential later, after the Node has successfully completed enrollment.
 func (s *ResourceRepository) validateNodeBootstrapToken(ctx context.Context, plain string) error {
 	if strings.TrimSpace(plain) == "" {

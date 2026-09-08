@@ -17,7 +17,7 @@ const (
 	defaultRuntimeLimitTTL  = time.Hour
 )
 
-// runtimeTelemetry is deliberately local to one node process.  It is a
+// runtimeTelemetry is local to one node process. It is a
 // bounded, payload-free registry; the Controller owns durable history and
 // queries.  Keeping the active registry here makes disconnect/limit commands
 // precise even while a snapshot is being rebuilt.
@@ -62,7 +62,7 @@ func newRuntimeTelemetry() *runtimeTelemetry {
 func runtimeConnectionID() string {
 	var raw [12]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		// crypto/rand failures are exceptionally unusual.  The timestamp keeps
+		// crypto/rand failures are unusual. The timestamp keeps
 		// the fallback unique enough for the in-process registry while retaining
 		// the normal ID character set.
 		return "rt-" + hex.EncodeToString([]byte(time.Now().UTC().Format("20060102150405.000000000")))

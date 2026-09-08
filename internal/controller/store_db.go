@@ -15,7 +15,7 @@ const (
 )
 
 // ErrIncompatibleDatabase is returned for databases that do not contain the
-// current schema. Development releases intentionally have no in-place schema
+// current schema. Development releases have no in-place schema
 // migration path: initialize a new database and restore only from a backup
 // produced by the same database generation.
 var ErrIncompatibleDatabase = errors.New("controller database belongs to an incompatible generation")
@@ -63,7 +63,7 @@ func OpenControllerRepositoriesWithConfig(config Config, masterKey []byte) (*Con
 	// In HA mode a standby must not mutate shared runtime state before it owns
 	// the lease. The active leader performs the same fail-safe reset when it
 	// starts its leader-only loops; SQLite has no standby and keeps the
-	// historical open-time reset.
+	// the existing open-time reset.
 	if !config.HighAvailability {
 		if err := runtime.markRuntimeConnectionsUnknownOnStartup(context.Background()); err != nil {
 			_ = db.Close()
@@ -84,7 +84,7 @@ func (s *databaseHandle) Path() string {
 }
 
 // DatabaseDriver returns the configured backend name for metrics and
-// diagnostics. It intentionally does not expose a raw *sql.DB handle.
+// diagnostics. It does not expose a raw *sql.DB handle.
 func (s *databaseHandle) DatabaseDriver() string {
 	if s == nil || s.dialect == nil {
 		return DatabaseDriverSQLite
@@ -342,7 +342,7 @@ func controllerSchemaStatements(types schemaTypes) []string {
 
 // inspectDatabase distinguishes a genuinely new database from an existing
 // database. PostgreSQL may contain unrelated tables in the selected schema;
-// those are intentionally treated as non-empty and incompatible. A marker
+// those are treated as non-empty and incompatible. A marker
 // from any older generation is therefore a non-empty incompatible database,
 // never a migration candidate.
 func inspectDatabase(ctx context.Context, db *sql.DB, dialect databaseDialect) (compatible, empty bool, err error) {

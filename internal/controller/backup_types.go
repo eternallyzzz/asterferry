@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-const backupManifestVersion = 3
+const backupManifestVersion = 1
 
 type backupManifest struct {
 	Version          int                  `json:"version"`

@@ -1,7 +1,5 @@
-// Command asterferry-bench contains small, dependency-free helpers used by
-// the cross-platform performance scripts. It is deliberately separate from
-// the production binary: the helper never handles credentials or implements a
-// second AsterFerry protocol.
+// Command asterferry-bench is a dependency-free benchmark helper. It does not
+// handle credentials or implement an AsterFerry protocol.
 package main
 
 import (

@@ -24,3 +24,18 @@ node_modules/
 .vscode/
 /controller/
 .codebuddy/
+
+# Local test/benchmark orchestration. Keep these files available in an existing
+# checkout, but do not make them part of the repository contract.
+/scripts/test-all.ps1
+/scripts/test-wsl.sh
+/scripts/test-installers.ps1
+/scripts/test-installers.sh
+/scripts/test-docker.sh
+/scripts/bench-cross-platform.ps1
+/scripts/bench-windows.ps1
+/scripts/bench-wsl.ps1
+/scripts/bench-wsl.sh
+/scripts/coverage.ps1
+/scripts/coverage-wsl.sh
+/scripts/bench-regression.sh

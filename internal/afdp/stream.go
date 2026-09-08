@@ -2,8 +2,6 @@ package afdp
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"io"
 
 	"asterferry/internal/wireio"
@@ -40,8 +38,7 @@ func ReadOpen(r io.Reader, max int) (OpenMetadata, error) {
 	length := binary.BigEndian.Uint32(size[:])
 	// The AFDP encoder's limit applies to the protobuf payload. The wire
 	// frame adds a six-byte version/kind/length prefix, so accept exactly the
-	// same boundary here instead of rejecting a payload at the configured
-	// maximum after it was successfully written.
+	// same protobuf payload boundary after decoding.
 	if length == 0 || uint64(length) > uint64(max)+6 {
 		return OpenMetadata{}, ErrFrameTooLarge
 	}
@@ -50,29 +47,4 @@ func ReadOpen(r io.Reader, max int) (OpenMetadata, error) {
 		return OpenMetadata{}, err
 	}
 	return DecodeOpen(frame, max)
-}
-
-// CopyRaw copies a data stream while enforcing a per-stream upper bound. A
-// negative limit means unlimited only when the caller explicitly opts in;
-// normal data-plane code should always pass a negotiated positive limit.
-func CopyRaw(dst io.Writer, src io.Reader, limit int64) (int64, error) {
-	if limit == 0 {
-		return 0, errors.New("raw stream limit must be non-zero")
-	}
-	reader := src
-	if limit > 0 {
-		// The extra byte lets us distinguish an exact-limit stream from one
-		// that continues. Avoid overflowing int64 at the (theoretical) maximum
-		// limit; io.Copy cannot report more than MaxInt64 bytes anyway.
-		probe := limit
-		if limit < int64(^uint64(0)>>1) {
-			probe++
-		}
-		reader = io.LimitReader(src, probe)
-	}
-	n, err := io.Copy(dst, reader)
-	if limit > 0 && n > limit {
-		return limit, fmt.Errorf("raw stream exceeds %d bytes", limit)
-	}
-	return n, err
 }

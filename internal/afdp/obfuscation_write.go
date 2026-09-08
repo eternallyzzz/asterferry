@@ -44,7 +44,7 @@ func (c *obfuscationPacketConn) writeFragments(packet []byte, addr net.Addr) err
 	if total < 2 {
 		// The fragment wire format requires at least two fragments. A packet
 		// that fits in one fragment therefore stays a normal authenticated data
-		// datagram instead of advertising a second fragment that is never sent.
+		// datagram; do not advertise a second fragment.
 		return c.writeData(packet, addr)
 	}
 	if total > maxFragmentCount {

@@ -92,7 +92,7 @@ func loadControlTLS(config Config) (*tls.Config, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("controller CA certificate is invalid")
 	}
-	// Enrollment is intentionally token + CSR authenticated and therefore has
+	// Enrollment uses token + CSR authentication and therefore has
 	// no client certificate yet. The Connect RPC performs an explicit mTLS
 	// identity check after enrollment; VerifyClientCertIfGiven keeps both RPCs
 	// on one endpoint without weakening the node stream.

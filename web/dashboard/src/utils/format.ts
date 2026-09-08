@@ -46,7 +46,7 @@ export function prettyJson(value: unknown): string {
 const sensitiveJsonKeys = new Set(["key", "previous_key", "key_ciphertext", "previous_key_ciphertext"]);
 
 // Keep secret material out of operational JSON viewers without changing the
-// object used for API writes. This is deliberately recursive because a
+// object used for API writes. This is recursive because a
 // snapshot can contain obfuscation policies in both node and assignment
 // branches.
 export function redactSensitiveJson(value: unknown): unknown {

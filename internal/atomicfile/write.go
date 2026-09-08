@@ -55,9 +55,8 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 			restoreErr := os.Rename(backupPath, path)
 			return errors.Join(firstErr, publishErr, restoreErr)
 		}
-		// Publishing succeeded. A failure to remove the backup is harmless to
-		// the new target and is intentionally left for an operator/cleanup job;
-		// returning it would make callers retry an already-published write.
+		// Publishing succeeded. A leftover backup can be removed by cleanup;
+		// returning this error would make callers retry a completed write.
 		_ = os.Remove(backupPath)
 		return nil
 	}

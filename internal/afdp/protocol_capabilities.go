@@ -10,10 +10,8 @@ func CanonicalCapabilities(values []string) []string {
 	return result
 }
 
-func DefaultCapabilities() []string { return append([]string(nil), defaultCapabilities...) }
-
 // NegotiateCapabilities returns the sorted intersection of the capabilities
-// offered by both peers. An AFDP/2 peer must never claim a feature merely
+// offered by both peers. An AFDP/1 peer must never claim a feature merely
 // because the other side echoed it; only the intersection is actionable.
 func NegotiateCapabilities(local, peer []string) []string {
 	if len(local) == 0 {

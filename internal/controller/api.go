@@ -39,10 +39,8 @@ func NewServer(config Config, repositories *ControllerRepositories, metrics ...*
 	return newServer(config, repositories, nil, metrics...)
 }
 
-// newServer composes the HTTP surface with the application scheduler. The
-// public constructor keeps its historical convenience behavior for embedders,
-// while Controller.New injects the single scheduler owned by the composition
-// root so reconciliation and API actions share one decision component.
+// newServer composes the HTTP surface with the application scheduler.
+// Controller.New supplies the scheduler shared by reconciliation and API actions.
 func newServer(config Config, repositories *ControllerRepositories, scheduler *Scheduler, metrics ...*ControllerMetrics) (*Server, error) {
 	if repositories == nil || repositories.Resources == nil || repositories.Runtime == nil || repositories.Changes == nil {
 		return nil, errors.New("controller repositories are required")
@@ -67,9 +65,8 @@ func newServer(config Config, repositories *ControllerRepositories, scheduler *S
 	}
 	server := &Server{resources: resources, runtime: runtime, changes: changes, config: config, loginLimiter: newLoginLimiter(), metrics: controllerMetrics, scheduler: scheduler, leadership: resources.leadership}
 	server.update = NewUpdateManager(config, resources)
-	// Runtime SSE is intentionally long-lived.  Per-request handlers retain
-	// their own bounded read/decode limits; the write deadline must not cut off
-	// a healthy event stream after an absolute 30-second wall clock interval.
+	// Runtime SSE has no write deadline. Ordinary responses keep their bounded
+	// request deadline.
 	server.http = &http.Server{Addr: config.HTTPListen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 90 * time.Second}
 	if strings.TrimSpace(config.MetricsListen) != "" {
 		server.metricsHTTP = &http.Server{Addr: config.MetricsListen, Handler: server.metricsOnlyHandler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second}
@@ -77,9 +74,8 @@ func newServer(config Config, repositories *ControllerRepositories, scheduler *S
 	return server, nil
 }
 
-// metricsOnlyHandler is deliberately a separate surface from the management
-// HTTPS handler. It exposes only Prometheus metrics and relies on the bind
-// address plus deployment network policy for access control.
+// metricsOnlyHandler exposes Prometheus metrics on the separate metrics
+// surface. Its bind address and deployment network policy provide access control.
 func (s *Server) metricsOnlyHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", s.internalMetricsHandler)
@@ -164,15 +160,9 @@ func httpWriteDeadlineMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) ListenAndServe() error { return s.http.ListenAndServe() }
-func (s *Server) ListenAndServeTLS() error {
-	return s.http.ListenAndServeTLS(s.config.TLSCertPath, s.config.TLSKeyPath)
-}
-
 // TLSListener binds and configures the Controller HTTPS endpoint without
-// starting a serving goroutine. Controller.Start uses this two-phase form so
-// a bind or certificate error is returned to the caller instead of being lost
-// in a background ListenAndServeTLS goroutine.
+// starting a serving goroutine. Controller.Start returns bind and certificate
+// errors to the caller.
 func (s *Server) TLSListener() (net.Listener, error) {
 	if s == nil || s.http == nil {
 		return nil, errors.New("controller HTTP server is not initialized")
@@ -193,9 +183,8 @@ func (s *Server) TLSListener() (net.Listener, error) {
 	return tls.NewListener(listener, tlsConfig), nil
 }
 
-// Serve runs the already-bound HTTPS listener. It is separate from
-// ListenAndServeTLS so startup can fail atomically when either Controller
-// endpoint cannot be bound.
+// Serve runs the already-bound HTTPS listener so startup can fail atomically
+// when either Controller endpoint cannot be bound.
 func (s *Server) Serve(listener net.Listener) error {
 	if s == nil || s.http == nil {
 		return errors.New("controller HTTP server is not initialized")

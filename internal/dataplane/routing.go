@@ -17,17 +17,12 @@ import (
 
 const defaultGeoIPMaxAge = 180 * 24 * time.Hour
 
-// ErrGeoIPStale indicates that the configured GeoIP database is older than
-// the freshness policy.  A stale database is deliberately treated as
-// unavailable so a release cannot silently make routing decisions from data
-// that is no longer covered by its documented update policy.
+// ErrGeoIPStale indicates that the configured GeoIP database exceeds the
+// freshness policy. A stale database is unavailable for routing.
 var ErrGeoIPStale = errors.New("geoip database is stale")
 
-// GeoIPResolver lazily loads one externally managed MaxMind-compatible
-// database.  GeoIP is optional: an empty path disables it and explicit
-// destination, CIDR, domain, and private-address rules remain available.
-// The database is read into memory once, so route evaluation does not perform
-// filesystem I/O or acquire a lock on the hot path.
+// GeoIPResolver lazily loads one external MaxMind-compatible database. An
+// empty path disables GeoIP. The database is loaded once.
 type GeoIPResolver struct {
 	path   string
 	maxAge time.Duration
@@ -108,20 +103,12 @@ func (r *GeoIPResolver) Error() error {
 	return err
 }
 
-// GeoIPAvailable keeps the small package-level health helper for callers that
-// do not own a resolver.  Without an explicitly configured path there is no
-// database to report as available.
+// GeoIPAvailable reports whether the first configured resolver is available.
 func GeoIPAvailable(resolvers ...*GeoIPResolver) bool {
 	if len(resolvers) == 0 {
 		return false
 	}
 	return resolvers[0].Available()
-}
-
-// SelectRoute evaluates the ordered Agent route rules without GeoIP data.
-// It is retained for callers that only need the deterministic fallback rules.
-func SelectRoute(spec domain.AgentSpec, target string) string {
-	return SelectRouteWithResolver(spec, target, nil)
 }
 
 // SelectRouteWithResolver evaluates the ordered Agent route rules using the

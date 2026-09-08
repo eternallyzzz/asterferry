@@ -16,8 +16,8 @@ const (
 	// Keep the AFDP wire identity local to the data-plane package. This avoids
 	// importing the retired relay codec's protocol package into the new data
 	// path and makes the version boundary explicit at the transport edge.
-	Version byte = 2
-	ALPN         = "asterferry-data/2"
+	Version byte = 1
+	ALPN         = "asterferry-data/1"
 
 	SessionHelloKind  byte = 1
 	SessionAcceptKind byte = 2
@@ -88,12 +88,11 @@ func AuthorizeSession(hello SessionHello, assignment AssignmentView) error {
 		return ErrUnauthorizedAgent
 	}
 	// Only an assignment that the Controller has observed as applied is a
-	// valid placement. Pending assignments are deliberately kept out of the
-	// data path until both participating nodes acknowledge the generation;
-	// degraded and draining placements fail closed while they are being
-	// replaced. A zero state is retained for in-memory protocol fixtures that
-	// predate the lifecycle field; persisted/API assignments normalize to
-	// pending before they reach a node.
+	// valid placement. Pending assignments stay out of the data path until both
+	// nodes acknowledge the generation; degraded and draining placements fail
+	// closed while being replaced. A zero state is retained for protocol
+	// fixtures predating the lifecycle field; persisted/API assignments
+	// normalize to pending before reaching a node.
 	if assignment.State == domain.AssignmentPending || assignment.State == domain.AssignmentDraining || assignment.State == domain.AssignmentDegraded {
 		return ErrUnauthorizedAgent
 	}
@@ -109,8 +108,8 @@ func AuthorizeOpen(open OpenMetadata, assignment AssignmentView) error {
 	}
 	if open.Egress {
 		// An egress open is authorized by the authenticated assignment itself.
-		// It deliberately carries no ServiceID: accepting one here would let a
-		// peer make a gateway egress request look like a reverse service stream.
+		// It carries no ServiceID. A ServiceID here would make a gateway egress
+		// request look like a reverse service stream.
 		return nil
 	}
 	if _, ok := assignment.ServiceIDs[open.ServiceID]; !ok {
@@ -288,8 +287,8 @@ func decodeControl(data []byte, kind byte, out any, max int) error {
 	// Unknown fields are retained by the protobuf runtime when
 	// DiscardUnknown is false. Retention alone would let a newer peer add a
 	// field while an older peer silently accepts it and re-emits the bytes.
-	// AFDP control frames are intentionally fail-closed: a field added to the
-	// wire contract must first be negotiated/versioned rather than ignored.
+	// Unknown AFDP control fields fail closed; new fields require negotiation or
+	// a protocol version.
 	if len(message.ProtoReflect().GetUnknown()) != 0 {
 		return ErrMalformedFrame
 	}

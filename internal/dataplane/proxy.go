@@ -1,9 +1,7 @@
 package dataplane
 
-// This file contains the local HTTP and SOCKS5 proxy boundaries for an Agent
-// node. They deliberately accept a dial callback rather than reaching into
-// the Controller or a configuration package: direct egress, AFDP streams and
-// policy/routing implementations can all be supplied by the node runtime.
+// Local HTTP and SOCKS5 proxy boundaries for an Agent node. Dialing is
+// supplied by the node runtime through a callback.
 
 import (
 	"bufio"
@@ -255,9 +253,9 @@ func writeHTTPProxyError(conn net.Conn, code int) {
 	_, _ = fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", code, message)
 }
 
-// ServeSOCKS5 implements the no-auth SOCKS5 CONNECT path. Username/password
-// authentication belongs at the local listener boundary and is intentionally
-// absent from the node snapshot model; unsupported methods fail closed.
+// ServeSOCKS5 implements no-auth SOCKS5 CONNECT. Username/password
+// authentication is not part of the node snapshot model; unsupported methods
+// fail closed.
 func ServeSOCKS5(ctx context.Context, engine *Engine, listener net.Listener, proxy domain.ProxySpec, dial ProxyDialFunc) error {
 	if ctx == nil {
 		ctx = context.Background()

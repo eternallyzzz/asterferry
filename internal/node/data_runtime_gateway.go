@@ -85,7 +85,7 @@ func (d *DataPlaneRuntime) buildGateway(state *dataGeneration, spec domain.Gatew
 
 // listenAFDPWithRetry covers the short handoff window between a QUIC
 // generation's listener close and the operating system releasing its UDP
-// address. The retry is deliberately bounded and only applies to an address
+// address. The retry is bounded and only applies to an address
 // collision; malformed TLS or protocol configuration still fails immediately.
 func listenAFDPWithRetry(ctx context.Context, address string, tlsConfig *tls.Config, options afdp.QUICOptions, obfuscation afdp.ObfuscationOptions) (*quic.Listener, net.PacketConn, error) {
 	listener, packetConn, err := afdp.ListenWithObfuscationPacketConn(address, tlsConfig, options, obfuscation)
@@ -378,7 +378,7 @@ func (d *DataPlaneRuntime) receiveGatewayDatagrams(state *dataGeneration, sessio
 	}
 }
 
-// serveGatewayEgress terminates proxy routes that an Agent deliberately sends
+// serveGatewayEgress terminates proxy routes that an Agent sends
 // through this Gateway.  These streams are assignment-authorized but are not
 // associated with a reverse Service; the Gateway's locally applied egress
 // policy is therefore evaluated before the outbound dial.

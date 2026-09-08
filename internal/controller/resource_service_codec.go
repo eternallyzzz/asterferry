@@ -8,7 +8,7 @@ import (
 	"asterferry/internal/domain"
 )
 
-// Service persistence is deliberately kept separate from the node aggregate
+// Service persistence is kept separate from the node aggregate
 // codecs. Its only child table is the selector map, so its consistency rules
 // remain easy to audit.
 func loadServiceNormalized(ctx context.Context, q sqlQueryer, id string) (domain.Service, error) {

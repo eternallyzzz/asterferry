@@ -23,7 +23,7 @@ type databaseHandle struct {
 
 // ResourceRepository owns low-frequency control-plane state: users,
 // enrollment, normalized resources, snapshots, observed state, and audit
-// records. Runtime telemetry deliberately lives in RuntimeRepository.
+// records. Runtime telemetry lives in RuntimeRepository.
 type ResourceRepository struct {
 	*databaseHandle
 	masterKey  [masterKeyBytes]byte
@@ -46,7 +46,7 @@ type RuntimeRepository struct {
 
 // ControllerRepositories is the composition root for the two repositories
 // and their process-local change bus. It contains lifecycle wiring only; it
-// intentionally does not proxy repository operations.
+// does not proxy repository operations.
 type ControllerRepositories struct {
 	Resources *ResourceRepository
 	Runtime   *RuntimeRepository
@@ -153,5 +153,5 @@ type ObservedRecord struct {
 
 // ErrSecretAlreadyCreated means an idempotent retry found a one-time secret
 // that was already persisted. The metadata can be replayed safely, but the
-// plaintext was deliberately never stored and cannot be recovered.
+// plaintext was never stored and cannot be recovered.
 var ErrSecretAlreadyCreated = errors.New("one-time token was already created and its plaintext cannot be recovered")

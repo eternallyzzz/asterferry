@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 )
 
-// DatagramHeader is the fixed AFDP/2 header carried in a QUIC DATAGRAM. The
+// DatagramHeader is the fixed AFDP/1 header carried in a QUIC DATAGRAM. The
 // payload itself is not wrapped in a per-record envelope.
 type DatagramHeader struct {
 	Flags         byte

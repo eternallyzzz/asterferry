@@ -14,8 +14,8 @@ import (
 )
 
 // ErrNodeDecommissioned tells the outer runtime loop that the Controller has
-// issued a permanent lifecycle transition. It is deliberately different from
-// a transport outage: a decommissioned identity must not retry forever.
+// issued a permanent lifecycle transition. It is different from a transport
+// outage: a decommissioned identity must not retry forever.
 var ErrNodeDecommissioned = errors.New("node has been decommissioned")
 
 func isControllerIdentityRejection(err error) bool {

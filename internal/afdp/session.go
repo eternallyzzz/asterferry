@@ -1,8 +1,7 @@
 package afdp
 
-// This file contains the transport adapter for AFDP/2. It deliberately deals
-// only in a small QUIC connection interface and AssignmentView; the
-// Controller, SQLite and node bootstrap packages are not visible here.
+// AFDP/1 session transport. The package depends on Conn and AssignmentView;
+// Controller and storage packages are not part of this layer.
 
 import (
 	"context"
@@ -81,7 +80,7 @@ func (o SessionOptions) limits() (int, int, int, int, int, time.Duration) {
 	return maxFrame, maxDatagram, maxStreams, flows, bytes, timeout
 }
 
-// Session is an authenticated AFDP/2 QUIC session. The first bidirectional
+// Session is an authenticated AFDP/1 QUIC session. The first bidirectional
 // stream is retained as the reliable handshake/control stream; all subsequent
 // streams carry one bounded OpenMetadata message followed by raw bytes.
 type Session struct {
@@ -152,15 +151,6 @@ func ClientSession(ctx context.Context, conn Conn, hello SessionHello, options S
 		services[serviceID] = struct{}{}
 	}
 	return &Session{conn: conn, assignment: AssignmentView{ID: accept.AssignmentID, AgentID: hello.AgentID, Generation: accept.Generation, ServiceIDs: services, MaxStreams: maxStreams}, maxFrame: maxFrame, maxDatagram: maxDatagram, maxStreams: maxStreams, control: control, capabilities: negotiated}, nil
-}
-
-func ServerSession(ctx context.Context, conn Conn, assignment AssignmentView, options SessionOptions) (*Session, error) {
-	return serverSession(ctx, conn, func(hello SessionHello) (AssignmentView, error) {
-		if err := AuthorizeSession(hello, assignment); err != nil {
-			return AssignmentView{}, err
-		}
-		return assignment, nil
-	}, options)
 }
 
 // ServerSessionWithLookup accepts the first SessionHello and resolves its
@@ -469,7 +459,7 @@ func (s *Session) Close() error {
 	}
 	// Closing a session invalidates all outstanding stream reservations. Any
 	// later defer from a forwarding goroutine can still call ReleaseStream;
-	// that method is deliberately saturating at zero.
+	// that method clamps the count at zero.
 	s.opened.Store(0)
 	if s.conn != nil {
 		return s.conn.CloseWithError(quic.ApplicationErrorCode(0xAF00), "AFDP session closed")

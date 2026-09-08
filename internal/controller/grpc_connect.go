@@ -129,8 +129,8 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	// of waiting for a periodic poll.
 	snapshotChanges, unsubscribeSnapshots := s.changes.SubscribeSnapshotChanges(hello.GetNodeId())
 	defer unsubscribeSnapshots()
-	// Resource writes are intentionally independent from the long-lived node
-	// stream. Materialize the latest node-scoped document just before sending
+	// Resource writes are independent from the long-lived node stream. Materialize
+	// the latest node-scoped document just before sending
 	// it so a reconnect always observes API changes, even if the writer was
 	// offline when the resource was edited.
 	if _, snapshotErr := s.resources.EnsureDesiredSnapshot(stream.Context(), hello.GetNodeId()); snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
@@ -207,8 +207,8 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 	if err := send(&v1.ControllerMessage{Body: &v1.ControllerMessage_Action{Action: &v1.Action{Name: "session_ready", PayloadJson: readyPayload}}}); err != nil {
 		return err
 	}
-	// Runtime controls are intentionally process-local and are never replayed
-	// from desired state. If an Admin disabled the feature while this Node was
+	// Runtime controls are process-local and are never replayed from desired
+	// state. If an Admin disabled the feature while this Node was
 	// offline, clear any limit that survived in the Node process before it can
 	// serve a newly authenticated control session.
 	if hasCapability(hello.GetCapabilities(), "runtime-control-v1") {
@@ -446,8 +446,7 @@ func (s *ControlServer) Connect(stream v1.Control_ConnectServer) (returnErr erro
 				// Assignment state is part of the desired document. Refresh both
 				// ends only after the state transaction commits, so a node that
 				// successfully applied a pending assignment receives a stable
-				// follow-up generation with state=applied rather than a partially
-				// updated peer view.
+				// follow-up generation with state=applied and a complete peer view.
 				for _, assignment := range changed {
 					for _, participant := range []string{assignment.GatewayID, assignment.AgentID} {
 						if _, snapshotErr := s.resources.EnsureDesiredSnapshot(stream.Context(), participant); snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {

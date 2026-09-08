@@ -108,7 +108,7 @@ func (s *ResourceRepository) SaveSnapshot(ctx context.Context, record SnapshotRe
 		// Another Controller process may have won the conditional upsert after
 		// this transaction's preflight SELECT. Re-read the committed row so a
 		// true same-content retry remains idempotent while a stale/different
-		// write is reported instead of being acknowledged as persisted.
+		// write is reported as a conflict.
 		var persistedGeneration uint64
 		var persistedChecksum string
 		if err := tx.QueryRowContext(ctx, `SELECT generation,checksum FROM desired_snapshots WHERE node_id=?`, record.NodeID).Scan(&persistedGeneration, &persistedChecksum); err != nil {

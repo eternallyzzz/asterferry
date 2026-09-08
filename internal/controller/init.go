@@ -113,8 +113,8 @@ func Init(ctx context.Context, options InitOptions) (InitResult, error) {
 	}
 	if normalizeDatabaseDriver(config.DatabaseDriver) == DatabaseDriverPostgres {
 		// SQLite initialization always creates a fresh staged database. Apply
-		// the same safety rule to an external PostgreSQL target instead of
-		// silently adding a second Admin to an existing Controller database.
+		// the same safety rule to an external PostgreSQL target; do not add a
+		// second Admin to an existing Controller database.
 		database, backend, err := openConfiguredDatabase(ctx, config)
 		if err != nil {
 			return InitResult{}, fmt.Errorf("open PostgreSQL initialization target: %w", err)

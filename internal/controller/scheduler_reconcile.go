@@ -37,8 +37,8 @@ type scheduleTarget struct {
 
 // ScheduleAgent selects a Gateway from the current Controller state and commits
 // the resulting assignment with the repository's transactional port checks.
-// It is intentionally a convenience around Schedule; callers that already
-// have a consistent candidate view can use the pure function directly.
+// It wraps Schedule; callers that already have a consistent candidate view can
+// use the pure function directly.
 func (s *Scheduler) ScheduleAgent(ctx context.Context, agentID string, options WriteOptions) (assignments []domain.Assignment, returnErr error) {
 	finishMetrics := s.startMetrics()
 	defer func() { finishMetrics(returnErr) }()
@@ -149,7 +149,7 @@ func (s *Scheduler) ReconcileAssignmentsForAgents(ctx context.Context, agentIDs 
 		}
 		// This is an internal repair pass, not an API retry boundary. A stable
 		// idempotency key would make a later service change collide with the
-		// old reconciliation request hash, so deliberately leave it empty.
+		// old reconciliation request hash, so leave it empty.
 		assignments, err := s.ScheduleAgent(ctx, agentID, WriteOptions{Actor: "system"})
 		if errors.Is(err, ErrNoHealthyGateway) {
 			// Pending services will be retried when a Gateway resource changes
@@ -274,7 +274,7 @@ func (s *Scheduler) scheduleAgentAssignmentAttempt(ctx context.Context, agent do
 	if existing != nil {
 		// Keep the assignment identity stable across a Gateway failover. The
 		// repository can then update the old row and release its bindings in one
-		// transaction instead of deleting the old placement first.
+		// transaction without deleting the old placement first.
 		assignment.ID = existing.ID
 		writeOptions.IfMatch = existing.Revision
 	} else {
@@ -335,7 +335,7 @@ func (s *Scheduler) scheduleExistingAssignment(ctx context.Context, existing dom
 
 // ReconcileAssignments marks assignments whose Gateway has stopped reporting
 // health and attempts a stable-identity failover for their Agents. It is
-// deliberately conservative when no observed state exists: a freshly
+// conservative when no observed state exists: a freshly
 // enrolled Gateway has not yet proven liveness, but treating that absence as
 // failure would cause needless placement churn. A caller may run this method
 // periodically; each successful failover updates both node snapshots.
@@ -401,7 +401,7 @@ func (s *Scheduler) reconcileAssignmentSet(ctx context.Context, assignments []do
 			// A disabled or revoked Gateway is unavailable even when its last
 			// heartbeat still looks healthy. The node transaction has already
 			// quarantined its assignment; let this pass select a replacement
-			// immediately instead of waiting for the old heartbeat to expire.
+			// immediately; it need not wait for the old heartbeat to expire.
 			if gateway.Enabled && gateway.CertificateState != domain.CertificateRevoked && gateway.CertificateState != domain.CertificateExpired && gateway.CertificateState != domain.CertificateDecommissioned {
 				continue
 			}

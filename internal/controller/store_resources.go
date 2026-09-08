@@ -347,7 +347,7 @@ func (s *ResourceRepository) UpdateNode(ctx context.Context, node domain.Node, o
 
 // DecommissionNode permanently removes a Node from scheduling and control
 // plane admission while retaining its identity row as a tombstone. Keeping
-// the row is important when Services or Assignments still reference it: the
+// the row matters when Services or Assignments still reference it: the
 // business resources remain intact and can be rebound after a replacement
 // enrollment, while the old certificate can never authenticate again.
 func (s *ResourceRepository) DecommissionNode(ctx context.Context, nodeID string, options WriteOptions) (domain.Node, error) {
@@ -424,8 +424,8 @@ func (s *ResourceRepository) DecommissionNode(ctx context.Context, nodeID string
 }
 
 // quarantineAssignmentsForNodeTx moves every placement that references an
-// unavailable identity to the fail-closed degraded state. It intentionally
-// preserves the assignment identity and shared generation: a later scheduler
+// unavailable identity to the fail-closed degraded state. It preserves the
+// assignment identity and shared generation: a later scheduler
 // pass can replace the Gateway while both peers still have to acknowledge the
 // new placement before it becomes applied again.
 func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID string) error {
@@ -508,7 +508,7 @@ func quarantineAssignmentsForNodeTx(ctx context.Context, tx *sql.Tx, nodeID stri
 }
 
 // PurgeNode permanently removes a decommissioned Node identity and its
-// node-owned state. Decommissioning is deliberately a separate operation:
+// node-owned state. Decommissioning is a separate operation:
 // it revokes admission and retains the tombstone so a replacement can reuse
 // the identity. Purging is irreversible, so it is allowed only after that
 // explicit lifecycle transition and only when no business resource still
@@ -557,7 +557,7 @@ func (s *ResourceRepository) PurgeNode(ctx context.Context, id string, options W
 	if dependents > 0 {
 		return &domain.ApplyError{Code: "resource_conflict", Path: "node", Message: "node has dependent services, assignments or Agent bindings"}
 	}
-	// node_bootstraps intentionally has no foreign key: it can represent an
+	// node_bootstraps has no foreign key: it can represent an
 	// install intent before the Node identity exists. Clean up a stale intent
 	// explicitly so a purged ID cannot retain an old one-time enrollment token.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM node_bootstraps WHERE node_id=?`, id); err != nil {

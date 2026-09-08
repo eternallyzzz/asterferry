@@ -102,9 +102,8 @@ func (s *ControlServer) Health(context.Context, *emptypb.Empty) (response *v1.He
 	return &v1.Heartbeat{SentAt: timestamppb.New(time.Now().UTC()), Healthy: true}, nil
 }
 
-// Drain terminates all long-lived Node control streams. A transport close is
-// intentionally used for leadership loss so Nodes treat takeover as a
-// retryable outage rather than as a certificate revocation.
+// Drain terminates all long-lived Node control streams. Leadership loss uses a
+// transport close so Nodes treat takeover as a retryable outage.
 func (s *ControlServer) Drain() {
 	if s == nil {
 		return
@@ -176,7 +175,7 @@ func StartGRPCWithErrors(ctx context.Context, config Config, repositories *Contr
 	serveErr := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		// Connect is intentionally long-lived. A graceful gRPC stop waits for
+		// Connect is long-lived. A graceful gRPC stop waits for
 		// every bidirectional stream to finish, but a node may keep retrying
 		// reads until it observes the transport close. Force-stop first so
 		// cancellation is deterministic; Controller.Close uses the same path.

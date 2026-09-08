@@ -54,11 +54,8 @@ func (e *Engine) AcquireEgress(ctx context.Context, network, target string) (str
 	}
 	if !policy.Enabled {
 		// Even an unrestricted policy must receive a syntactically valid target.
-		// This keeps malformed metadata out of the socket layer and makes the
-		// disabled-policy path obey the same fail-closed boundary as a filtered
-		// policy, while retaining hostnames for normal direct DNS dialing.  A
-		// standalone MaxConnections value still applies: disabling address
-		// filtering must not silently remove an operator's resource limit.
+		// Validate the target before dialing. The connection limit still applies
+		// when address filtering is disabled.
 		release, reserveErr := reserve()
 		if reserveErr != nil {
 			return "", func() {}, reserveErr
@@ -126,11 +123,8 @@ func resolveAllowedEgress(ctx context.Context, policy domain.EgressPolicy, netwo
 	return "", errors.New("egress destination is denied by policy")
 }
 
-// normalizeEgressTarget validates the network and host:port form before any
-// policy shortcut is taken. It returns a canonical target plus the individual
-// host/port components used by policy resolution. Hostnames are intentionally
-// not resolved here when policy is disabled; direct egress may continue to
-// follow the platform resolver at dial time.
+// normalizeEgressTarget validates the network and host:port form and returns
+// the canonical target plus its host and port. Hostnames are resolved later.
 func normalizeEgressTarget(network, target string) (normalized, host string, port int, err error) {
 	if network != domain.ProtocolTCP && network != domain.ProtocolUDP {
 		return "", "", 0, fmt.Errorf("unsupported egress network %q", network)

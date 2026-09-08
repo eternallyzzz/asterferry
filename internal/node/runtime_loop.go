@@ -66,9 +66,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 			return err
 		}
 		if err != nil {
-			// A normal transport outage deliberately leaves the last data
+			// A normal transport outage leaves the last data
 			// generation serving traffic. An identity rejection is authoritative:
-			// invalidate sessions and stop the process instead of retrying an old
+			// invalidate sessions and stop the process rather than retrying an old
 			// certificate forever. A decommissioned/not-enrolled rejection also
 			// leaves a local marker so a service restart cannot resurrect it.
 			if isControllerIdentityRejection(err) || errors.Is(err, ErrNodeDecommissioned) {
@@ -137,7 +137,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 }
 
 // jitteredControllerReconnectDelay keeps a fleet of Nodes from reconnecting
-// in one burst when the active Controller changes. The jitter is deliberately
+// in one burst when the active Controller changes. The jitter is
 // bounded to +/-20% and is applied only to the control-plane retry loop.
 func jitteredControllerReconnectDelay(base time.Duration) time.Duration {
 	if base <= 0 {
@@ -316,7 +316,7 @@ func (r *Runtime) runConnection(ctx context.Context) error {
 				}
 			case "reconnect":
 				// Keep the engine drained until a new authenticated Controller
-				// stream is established. This is important for certificate
+				// stream is established. This protects certificate
 				// revocation: a node must not reconnect to a peer using its old
 				// still-CA-valid certificate while it is offline from the
 				// authority that revoked it.

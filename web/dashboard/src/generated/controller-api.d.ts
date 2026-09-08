@@ -29,7 +29,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Query published GitHub stable releases. The check is read-only with respect to the running binary; applying an available release always requires a separate Admin request. */
+        /** @description Return the latest stable Controller release. This operation does not change the running binary. */
         post: operations["checkControllerUpdate"];
         delete?: never;
         options?: never;
@@ -46,7 +46,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Download and verify the latest stable Controller archive over HTTPS using the Cosign-signed release-manifest.json bound to SHA256SUMS, restart the native service and recover or roll back if /readyz does not recover. */
+        /** @description Download and verify a stable Controller archive with the signed release manifest, restart the native service, and recover or roll back if /readyz does not recover. */
         post: operations["applyControllerUpdate"];
         delete?: never;
         options?: never;
@@ -93,7 +93,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description The management HTTPS endpoint requires Viewer authentication. Native deployments may expose the same path on a separate plain-HTTP loopback or restricted scrape listener; that listener is outside this API server's authentication surface. */
+        /** @description The management HTTPS endpoint requires Viewer authentication. Native deployments can expose a separate loopback or restricted scrape listener. */
         get: operations["metrics"];
         put?: never;
         post?: never;
@@ -213,7 +213,7 @@ export interface paths {
         get: operations["getNode"];
         put?: never;
         post?: never;
-        /** @description Decommission the Node identity instead of deleting its row. The Controller revokes admission, quarantines dependent Assignments, preserves Services and behavior specifications, and allows a later one-time replacement enrollment to reuse the same Node ID. */
+        /** @description Revoke a Node identity without deleting its row. Dependent Assignments are quarantined; Services and behavior specifications remain. A replacement enrollment can reuse the Node ID. */
         delete: operations["decommissionNode"];
         options?: never;
         head?: never;
@@ -229,7 +229,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Create a node-bound enrollment token and return a platform-specific one-line installer command. The command registers a generic Node; it does not configure behavior, and existing node specs are not replaced. */
+        /** @description Create a Node-bound enrollment token and return a platform installer command. The command registers the Node but does not configure behavior or replace existing specs. */
         post: operations["bootstrapNode"];
         delete?: never;
         options?: never;
@@ -244,10 +244,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description List installation intents that have not enrolled yet. The response never contains the one-time token. */
+        /** @description List installation intents that have not enrolled. The response does not contain the token. */
         get: operations["listNodeInstallations"];
         put?: never;
-        /** @description Create a generic Node installation intent and return a one-time platform installer command. The enrolled identity is created when the installer completes Enroll; Gateway or Agent behavior is configured later through the node spec endpoint. */
+        /** @description Create a pending installation intent and return a one-time installer command. The Node identity is created when Enroll completes. Configure Gateway or Agent behavior through the node spec endpoint. */
         post: operations["createNodeInstallation"];
         delete?: never;
         options?: never;
@@ -284,7 +284,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Replace the one-time token and return a fresh installer command for an existing pending installation. */
+        /** @description Replace the token for a pending installation and return a new installer command. */
         post: operations["reissueNodeInstallation"];
         delete?: never;
         options?: never;
@@ -299,7 +299,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Download a Controller-provided Node installer or release descriptor using the one-time enrollment token. The asset endpoint is intentionally limited to the three generated bootstrap assets. */
+        /** @description Download a Node installer or release descriptor with a one-time enrollment token. Only the generated bootstrap assets are available. */
         get: operations["downloadNodeBootstrapAsset"];
         put?: never;
         post?: never;
@@ -382,7 +382,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Runtime actions return 202. The admin-only purge action permanently deletes a decommissioned node identity and returns 204; it never cascades Services or Assignments. */
+        /** @description Runtime actions return 202. Purge returns 204 and only deletes a decommissioned Node identity. Services and Assignments are not cascaded. */
         post: operations["nodeAction"];
         delete?: never;
         options?: never;
@@ -1006,7 +1006,7 @@ export interface components {
             expires_at: string;
             command: string;
         };
-        /** @description Creates a pending installation intent. The Controller generates node_id when it is omitted. It does not create an enrolled node until the installer completes Enroll. */
+        /** @description Create a pending installation intent. The Controller generates node_id when omitted. Enrollment creates the Node. */
         NodeInstallationRequest: {
             /** @description Optional immutable identity override; omit this field to let the Controller generate a unique ID. */
             node_id?: string;
@@ -1174,7 +1174,7 @@ export interface components {
             /** Format: int64 */
             readonly revision?: number;
         };
-        /** @description New Agent writes must include gateway_id; gateway_selector-only documents are retained for legacy compatibility. */
+        /** @description Agent writes require gateway_id. gateway_selector-only documents are accepted for legacy compatibility. */
         AgentSpec: {
             node_id: string;
             /** @description Exact enrolled Gateway node selected for this Agent */
@@ -1213,7 +1213,7 @@ export interface components {
             action: "schedule";
             assignments: components["schemas"]["Assignment"][];
         };
-        /** @description Explicit controller-visible runtime metrics. New fields are protocol/API contract changes. */
+        /** @description Controller-visible runtime metrics. Adding a field changes the protocol/API contract. */
         RuntimeMetrics: {
             /** Format: int64 */
             active_streams?: number;
@@ -1257,7 +1257,7 @@ export interface components {
             port: number;
             ready: boolean;
         };
-        /** @description Latest bounded host and resource information reported by a Node. */
+        /** @description Latest bounded host and resource data reported by a Node. */
         SystemInfo: {
             hostname?: string;
             os?: string;
@@ -1293,7 +1293,7 @@ export interface components {
              * Format: int32
              * @enum {integer}
              */
-            schema_version: 3;
+            schema_version: 1;
             node_id: string;
             /** Format: int64 */
             applied_generation: number;
@@ -1537,7 +1537,7 @@ export interface components {
         RuntimeEventList: {
             items: components["schemas"]["RuntimeEventRecord"][];
         };
-        /** @description A selector is required for a node-level action. The connection action path supplies connection_id from the URL. */
+        /** @description A selector is required for a node-level action. Connection actions take connection_id from the URL. */
         RuntimeAction: {
             /** @enum {string} */
             action: "disconnect" | "rate_limit" | "clear_limit";
@@ -2899,7 +2899,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Assignments scheduled for the Node's enabled services; existing disjoint assignments are preserved. */
+            /** @description Assignments for the Node's enabled services. Existing disjoint assignments remain. */
             202: {
                 headers: {
                     [name: string]: unknown;

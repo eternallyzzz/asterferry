@@ -2,8 +2,8 @@
 openapi: 3.0.3
 info:
   title: AsterFerry Controller API
-  version: 1.0.0
-  description: Authoritative control-plane API for the AsterFerry normalized architecture. Gateway and Agent business traffic never traverses this API.
+  version: 0.1.0
+  description: Control-plane API for AsterFerry. Gateway and Agent traffic uses the data plane.
 servers:
   - url: /api/v1
 tags:
@@ -24,7 +24,7 @@ paths:
     post:
       tags: [operations]
       operationId: checkControllerUpdate
-      description: Query published GitHub stable releases. The check is read-only with respect to the running binary; applying an available release always requires a separate Admin request.
+      description: Return the latest stable Controller release. This operation does not change the running binary.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '200': { description: Stable Controller release status, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } }, '503': { description: Release metadata unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateResponse' } } } } }
@@ -32,7 +32,7 @@ paths:
     post:
       tags: [operations]
       operationId: applyControllerUpdate
-      description: Download and verify the latest stable Controller archive over HTTPS using the Cosign-signed release-manifest.json bound to SHA256SUMS, restart the native service and recover or roll back if /readyz does not recover.
+      description: Download and verify a stable Controller archive with the signed release manifest, restart the native service, and recover or roll back if /readyz does not recover.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody: { required: false, content: { application/json: { schema: { $ref: '#/components/schemas/ControllerUpdateRequest' } } } }
@@ -51,7 +51,7 @@ paths:
     get:
       operationId: metrics
       servers: [{ url: / }]
-      description: The management HTTPS endpoint requires Viewer authentication. Native deployments may expose the same path on a separate plain-HTTP loopback or restricted scrape listener; that listener is outside this API server's authentication surface.
+      description: The management HTTPS endpoint requires Viewer authentication. Native deployments can expose a separate loopback or restricted scrape listener.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses: { '200': { description: Prometheus metrics } }
   /openapi.yaml:
@@ -147,7 +147,7 @@ paths:
     delete:
       tags: [nodes]
       operationId: decommissionNode
-      description: Decommission the Node identity instead of deleting its row. The Controller revokes admission, quarantines dependent Assignments, preserves Services and behavior specifications, and allows a later one-time replacement enrollment to reuse the same Node ID.
+      description: Revoke a Node identity without deleting its row. Dependent Assignments are quarantined; Services and behavior specifications remain. A replacement enrollment can reuse the Node ID.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses: { '204': { description: Node decommissioned; the identity tombstone and dependent business resources are retained. }, '409': { $ref: '#/components/responses/Conflict' } }
@@ -155,7 +155,7 @@ paths:
     post:
       tags: [operations]
       operationId: bootstrapNode
-      description: Create a node-bound enrollment token and return a platform-specific one-line installer command. The command registers a generic Node; it does not configure behavior, and existing node specs are not replaced.
+      description: Create a Node-bound enrollment token and return a platform installer command. The command registers the Node but does not configure behavior or replace existing specs.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
@@ -171,7 +171,7 @@ paths:
     get:
       tags: [operations]
       operationId: listNodeInstallations
-      description: List installation intents that have not enrolled yet. The response never contains the one-time token.
+      description: List installation intents that have not enrolled. The response does not contain the token.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       responses:
         '200':
@@ -180,7 +180,7 @@ paths:
     post:
       tags: [operations]
       operationId: createNodeInstallation
-      description: Create a generic Node installation intent and return a one-time platform installer command. The enrolled identity is created when the installer completes Enroll; Gateway or Agent behavior is configured later through the node spec endpoint.
+      description: Create a pending installation intent and return a one-time installer command. The Node identity is created when Enroll completes. Configure Gateway or Agent behavior through the node spec endpoint.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       requestBody:
@@ -207,7 +207,7 @@ paths:
     post:
       tags: [operations]
       operationId: reissueNodeInstallation
-      description: Replace the one-time token and return a fresh installer command for an existing pending installation.
+      description: Replace the token for a pending installation and return a new installer command.
       security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses:
@@ -220,7 +220,7 @@ paths:
     get:
       tags: [operations]
       operationId: downloadNodeBootstrapAsset
-      description: Download a Controller-provided Node installer or release descriptor using the one-time enrollment token. The asset endpoint is intentionally limited to the three generated bootstrap assets.
+      description: Download a Node installer or release descriptor with a one-time enrollment token. Only the generated bootstrap assets are available.
       security: [{ nodeEnrollmentAuth: [] }]
       parameters:
         - name: asset
@@ -271,7 +271,7 @@ paths:
         - { $ref: '#/components/parameters/IfMatch', description: Required when action is purge; the node must already be decommissioned. }
         - { $ref: '#/components/parameters/IdempotencyKey' }
         - { $ref: '#/components/parameters/CSRF' }
-      description: Runtime actions return 202. The admin-only purge action permanently deletes a decommissioned node identity and returns 204; it never cascades Services or Assignments.
+      description: Runtime actions return 202. Purge returns 204 and only deletes a decommissioned Node identity. Services and Assignments are not cascaded.
       responses: { '202': { description: Action accepted, content: { application/json: { schema: { $ref: '#/components/schemas/NodeActionResponse' } } } }, '204': { description: Node permanently deleted }, '409': { $ref: '#/components/responses/Conflict' } }
   /nodes/{nodeId}/spec/egress:
     parameters: [{ $ref: '#/components/parameters/NodeId' }]
@@ -368,7 +368,7 @@ paths:
       parameters: [{ $ref: '#/components/parameters/NodeId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { $ref: '#/components/parameters/CSRF' }]
       responses:
         '202':
-          description: Assignments scheduled for the Node's enabled services; existing disjoint assignments are preserved.
+          description: Assignments for the Node's enabled services. Existing disjoint assignments remain.
           content:
             application/json:
               schema:
@@ -737,7 +737,7 @@ components:
     NodeInstallationRequest:
       type: object
       required: [name, platform, arch, script_source]
-      description: Creates a pending installation intent. The Controller generates node_id when it is omitted. It does not create an enrolled node until the installer completes Enroll.
+      description: Create a pending installation intent. The Controller generates node_id when omitted. Enrollment creates the Node.
       properties:
         node_id: { type: string, minLength: 1, maxLength: 128, description: Optional immutable identity override; omit this field to let the Controller generate a unique ID. }
         name: { type: string, minLength: 1, maxLength: 256 }
@@ -889,7 +889,7 @@ components:
     AgentSpec:
       type: object
       required: [node_id, gateway_selector, proxies, routes, limits, egress, logging]
-      description: New Agent writes must include gateway_id; gateway_selector-only documents are retained for legacy compatibility.
+      description: Agent writes require gateway_id. gateway_selector-only documents are accepted for legacy compatibility.
       properties:
         node_id: { type: string }
         gateway_id: { type: string, description: Exact enrolled Gateway node selected for this Agent }
@@ -931,7 +931,7 @@ components:
         assignments: { type: array, items: { $ref: '#/components/schemas/Assignment' } }
     RuntimeMetrics:
       type: object
-      description: Explicit controller-visible runtime metrics. New fields are protocol/API contract changes.
+      description: Controller-visible runtime metrics. Adding a field changes the protocol/API contract.
       properties:
         active_streams: { type: integer, format: int64, minimum: 0 }
         active_sessions: { type: integer, format: int64, minimum: 0 }
@@ -951,7 +951,7 @@ components:
     ListenerState: { type: object, required: [protocol, bind, port, ready], properties: { protocol: { type: string, enum: [tcp, udp] }, bind: { type: string }, port: { type: integer, minimum: 1, maximum: 65535 }, ready: { type: boolean } } }
     SystemInfo:
       type: object
-      description: Latest bounded host and resource information reported by a Node.
+      description: Latest bounded host and resource data reported by a Node.
       required: [collected_at]
       properties:
         hostname: { type: string }
@@ -978,7 +978,7 @@ components:
       type: object
       required: [schema_version, node_id, applied_generation, healthy, degraded, metrics, observed_at]
       properties:
-        schema_version: { type: integer, format: int32, enum: [3] }
+        schema_version: { type: integer, format: int32, enum: [1] }
         node_id: { type: string }
         applied_generation: { type: integer, format: int64, minimum: 0 }
         healthy: { type: boolean }
@@ -1205,7 +1205,7 @@ components:
     RuntimeAction:
       type: object
       required: [action]
-      description: A selector is required for a node-level action. The connection action path supplies connection_id from the URL.
+      description: A selector is required for a node-level action. Connection actions take connection_id from the URL.
       properties:
         action: { type: string, enum: [disconnect, rate_limit, clear_limit] }
         selector: { type: object, properties: { connection_id: { type: string }, source_ip: { type: string }, peer_node_id: { type: string }, assignment_id: { type: string }, service_id: { type: string }, protocol: { type: string } } }

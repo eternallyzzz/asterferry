@@ -38,7 +38,7 @@ func TestControllerUpdateCheckAndNodeUpgradeAPIFlow(t *testing.T) {
 	version := "1.1.0"
 	assetName := update.ArchiveName(version, "linux", "amd64")
 	checksum := hex.EncodeToString(make([]byte, sha256.Size))
-	manifest := fmt.Sprintf(`{"schema_version":1,"version":"%s","tag":"v%s","commit":"abc123","protocol":"v3","artifacts":[{"name":"%s","sha256":"%s"}]}`, version, version, assetName, checksum)
+	manifest := fmt.Sprintf(`{"schema_version":1,"version":"%s","tag":"v%s","commit":"abc123","protocol":"v1","artifacts":[{"name":"%s","sha256":"%s"}]}`, version, version, assetName, checksum)
 	var releaseServer *httptest.Server
 	releaseServer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

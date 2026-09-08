@@ -176,8 +176,8 @@ func obfuscationRequestPolicy(policy domain.ObfuscationPolicy) domain.Obfuscatio
 }
 
 // sameObfuscationPolicy compares the non-secret policy identity used by both
-// the Gateway listener and the Agent dialer. Ciphertexts are intentionally
-// excluded: re-encrypting the same key does not change data-plane behavior,
+// the Gateway listener and the Agent dialer. Ciphertexts are excluded because
+// re-encrypting the same key does not change data-plane behavior,
 // while a key/policy identity change must produce a new assignment generation.
 func sameObfuscationPolicy(left, right domain.ObfuscationPolicy) bool {
 	leftMode := left.Mode

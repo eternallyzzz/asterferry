@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// runtimeLimiter is a small token bucket.  It intentionally uses bytes, not
+// runtimeLimiter is a small token bucket. It uses bytes, not
 // packets, and wakes on the owning connection context so an operator
 // disconnect cannot leave a writer asleep until its next refill.
 type runtimeLimiter struct {

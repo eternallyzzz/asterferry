@@ -28,7 +28,7 @@ func (s *ResourceRepository) LoadGatewayCandidates(ctx context.Context) ([]Gatew
 		return nil, nil
 	}
 
-	// Candidate loading is deliberately set based. The number of reads is
+	// Candidate loading is set based. The number of reads is
 	// bounded by the backend parameter limit, not by the number of Gateways.
 	specs, err := s.loadGatewaySpecsBatch(ctx, eligible)
 	if err != nil {
@@ -203,8 +203,8 @@ func Schedule(request ScheduleRequest, candidates []GatewayCandidate) (domain.As
 		if !candidate.Node.Enabled || candidate.Node.CertificateState == domain.CertificateRevoked || candidate.Node.CertificateState == domain.CertificateExpired || candidate.Node.CertificateState == domain.CertificateDecommissioned || candidate.Node.SpecKind != domain.NodeSpecGateway || !candidate.Healthy {
 			continue
 		}
-		// A fixed Agent binding is authoritative. It deliberately disables
-		// selector-based placement and automatic Gateway failover.
+		// A fixed Agent binding is authoritative. It disables selector-based
+		// placement and automatic Gateway failover.
 		if request.AgentSpec.GatewayID != "" && candidate.Node.ID != request.AgentSpec.GatewayID {
 			continue
 		}

@@ -10,9 +10,8 @@ import (
 // next reconciliation pass.
 type ResourceChange struct {
 	NodeIDs []string
-	// PendingServices asks the reconciliation loop to retry services that do
-	// not currently have an assignment. It is intentionally separate from
-	// NodeIDs because that pass scans every Agent.
+	// PendingServices asks the reconciliation loop to retry services without an
+	// assignment. It is separate from NodeIDs because that pass scans every Agent.
 	PendingServices bool
 }
 

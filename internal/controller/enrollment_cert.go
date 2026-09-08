@@ -256,32 +256,3 @@ func signNodeCertificateWithCA(caCert *x509.Certificate, caKey crypto.Signer, ca
 	serialText := serial.Text(16)
 	return Certificate{CertificatePEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), CAPEM: caPEM, Serial: serialText, NotBefore: template.NotBefore, NotAfter: template.NotAfter}, nil
 }
-
-func CertificateNeedsRotation(notAfter, now time.Time) bool {
-	if notAfter.IsZero() {
-		return true
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	return !notAfter.After(now.Add(CertificateRotateBefore))
-}
-
-func GenerateNodeCSR(nodeID string) (csrDER, keyPEM []byte, err error) {
-	if err := domain.ValidateID(nodeID, "node_id"); err != nil {
-		return nil, nil, err
-	}
-	_, private, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: nodeID, Organization: []string{"AsterFerry"}}}, private)
-	if err != nil {
-		return nil, nil, err
-	}
-	key, err := x509.MarshalPKCS8PrivateKey(private)
-	if err != nil {
-		return nil, nil, err
-	}
-	return request, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), nil
-}

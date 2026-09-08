@@ -1,8 +1,8 @@
 // Package duplex contains the bounded bidirectional copy primitive used by
 // the data-plane forwarding paths.  A normal EOF closes only the destination
 // write half, allowing the opposite direction to continue until it also
-// finishes.  This is important for TCP and QUIC protocols that use half-close
-// to delimit requests while still returning a response.
+// finishes. TCP and QUIC use half-close to delimit requests while returning
+// a response.
 package duplex
 
 import (

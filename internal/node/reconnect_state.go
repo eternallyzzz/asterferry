@@ -144,7 +144,7 @@ func (s *agentReconnectState) invalid(event agentReconnectEvent) error {
 }
 
 // nextWait returns the current delay and advances the exponential backoff for
-// the next attempt. It is intentionally deterministic so the reconnect policy
+// the next attempt. It is deterministic so the reconnect policy
 // can be tested without sleeping or using wall-clock time.
 func (s *agentReconnectState) nextWait() time.Duration {
 	if s == nil || s.backoff <= 0 {

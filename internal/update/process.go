@@ -21,12 +21,11 @@ import (
 )
 
 const (
-	ReplacementResultSchemaVersion       = 2
-	replacementResultLegacySchemaVersion = 1
-	ReplacementStatePrepared             = "prepared"
-	ReplacementStateReplacing            = "replacing"
-	ReplacementStateWaiting              = "waiting"
-	ReplacementStateRecovering           = "recovering"
+	ReplacementResultSchemaVersion = 1
+	ReplacementStatePrepared       = "prepared"
+	ReplacementStateReplacing      = "replacing"
+	ReplacementStateWaiting        = "waiting"
+	ReplacementStateRecovering     = "recovering"
 )
 
 type ReplacementOptions struct {
@@ -328,7 +327,7 @@ func WaitForHTTPSHealth(ctx context.Context, endpoint string) error {
 			return errors.New("health endpoint must resolve to a loopback address")
 		}
 	}
-	// This probe is intentionally limited to the local Controller/Node
+	// This probe is limited to the local Controller/Node
 	// listener. It does not validate a remote certificate, and it never follows
 	// a redirect to turn the exception into a remote request.
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}, Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }} // #nosec G402 -- loopback-only readiness probe; release bytes are independently signature and SHA256 verified.
@@ -405,9 +404,9 @@ func ReadReplacementResult(path string) (ReplacementResult, error) {
 		return ReplacementResult{}, err
 	}
 	if result.SchemaVersion == 0 {
-		result.SchemaVersion = replacementResultLegacySchemaVersion
+		return ReplacementResult{}, errors.New("replacement result is missing schema version")
 	}
-	if result.SchemaVersion != replacementResultLegacySchemaVersion && result.SchemaVersion != ReplacementResultSchemaVersion {
+	if result.SchemaVersion != ReplacementResultSchemaVersion {
 		return ReplacementResult{}, fmt.Errorf("replacement result schema version %d is unsupported", result.SchemaVersion)
 	}
 	return result, nil
@@ -426,7 +425,7 @@ func ReplacementNeedsRecovery(state string) bool {
 }
 
 // CleanupReplacementArtifacts removes only the staged and previous files
-// recorded by the local replacement journal. It deliberately never removes
+// recorded by the local replacement journal. It never removes
 // BinaryPath, which may now be the live executable.
 func CleanupReplacementArtifacts(result ReplacementResult) {
 	for _, path := range []string{result.StagedPath, result.BackupPath} {

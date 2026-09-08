@@ -8,9 +8,8 @@ import (
 	"fmt"
 )
 
-// ErrMissingObfuscationKeyID means a snapshot reached checksum construction
-// before the Controller converted its storage representation into a canonical
-// identity.  A ciphertext is deliberately never a checksum identity.
+// ErrMissingObfuscationKeyID means checksum construction received storage
+// data without a canonical key identity. A ciphertext is not a checksum identity.
 var ErrMissingObfuscationKeyID = errors.New("checksum requires a canonical obfuscation key id")
 
 // ObfuscationKeyID is the stable, non-secret identity of a data-plane key.
@@ -24,10 +23,8 @@ func ObfuscationKeyID(key []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// ChecksumDocument is the only document serialized by ComputeChecksum.  It is
-// intentionally separate from DesiredSnapshot so repository metadata and the
-// two storage/wire forms of obfuscation keys cannot accidentally enter the
-// checksum contract.
+// ChecksumDocument is the only document serialized by ComputeChecksum. It
+// excludes repository metadata and obfuscation key material.
 type ChecksumDocument struct {
 	SchemaVersion uint32               `json:"schema_version"`
 	NodeID        string               `json:"node_id"`
@@ -84,9 +81,7 @@ type ChecksumAssignment struct {
 	Obfuscation    ChecksumObfuscation `json:"obfuscation,omitempty"`
 }
 
-// ChecksumObfuscation contains only stable key identities and policy.  The
-// plaintext wire key and Controller-at-rest ciphertext are intentionally not
-// representable here.
+// ChecksumObfuscation contains key identities and policy, not key material.
 type ChecksumObfuscation struct {
 	Mode             string `json:"mode"`
 	KeyID            string `json:"key_id,omitempty"`
@@ -198,9 +193,7 @@ func checksumObfuscation(value ObfuscationPolicy) (ChecksumObfuscation, error) {
 	}
 }
 
-// ComputeChecksum hashes only ChecksumDocument. Keeping the hash operation
-// next to its input builder makes it impossible for callers to accidentally
-// hash a repository document or a wire document directly.
+// ComputeChecksum hashes only ChecksumDocument.
 func (s DesiredSnapshot) ComputeChecksum() (string, error) {
 	document, err := s.ChecksumDocument()
 	if err != nil {

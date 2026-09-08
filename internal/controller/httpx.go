@@ -89,8 +89,8 @@ func parseIfMatch(value string) (int64, error) {
 
 func writeStoreError(w http.ResponseWriter, err error) {
 	// modernc.org/sqlite exposes extended result codes through Code(). Classify
-	// duplicate resources from the code rather than matching driver prose, which
-	// may contain SQL fragments, paths, or change between driver versions.
+	// duplicate resources from the code. Driver error text may contain SQL
+	// fragments, paths, or change between versions.
 	if isUniqueConstraint(err) {
 		writeError(w, http.StatusConflict, "already_exists", "resource already exists")
 		return
@@ -108,8 +108,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	var applyErr *domain.ApplyError
 	if errors.As(err, &applyErr) {
 		// Domain conflicts are safe to retry only after the caller resolves the
-		// conflicting resource; expose them as HTTP 409 instead of collapsing
-		// them into a generic malformed-request response.
+		// conflicting resource; expose them as HTTP 409 rather than a generic
+		// malformed-request response.
 		if applyErr.Code == "resource_conflict" || applyErr.Code == "port_conflict" || applyErr.Code == "bind_mismatch" || applyErr.Code == "port_mismatch" || applyErr.Code == "already_exists" || applyErr.Code == "bootstrap_pending" {
 			writeApplyError(w, http.StatusConflict, applyErr)
 			return

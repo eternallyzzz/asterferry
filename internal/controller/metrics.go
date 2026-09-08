@@ -17,7 +17,7 @@ import (
 )
 
 // ControllerMetrics contains only bounded-label metrics. Resource IDs and
-// arbitrary observed map keys are intentionally never used as labels.
+// arbitrary observed map keys are not used as labels.
 type ControllerMetrics struct {
 	registry          *prometheus.Registry
 	up                prometheus.Gauge

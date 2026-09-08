@@ -44,9 +44,9 @@ func Restore(config Config, source, destination string) error {
 	if err := copyFile(dbPath, filepath.Join(destination, filepath.Base(config.DatabasePath)), 0o600); err != nil {
 		return err
 	}
-	// Restore is deliberately self-contained: a destination directory is a
-	// complete Controller installation.  Do not write key material back to the
-	// paths from the source config (which may point at the old host), otherwise
+	// Restore writes a complete Controller installation to the destination. Do
+	// not write key material to paths from the source config (which may point at
+	// the old host), otherwise
 	// an apparently successful restore could leave the new database without the
 	// identity that issued its node certificates.
 	material := map[string]string{

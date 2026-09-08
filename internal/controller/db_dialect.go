@@ -50,7 +50,6 @@ type schemaTypes struct {
 // binds them at the driver boundary.
 type databaseDialect interface {
 	backend() databaseBackend
-	bind(query string) string
 	forUpdateSuffix() string
 	schemaTypes() schemaTypes
 	relationCountQuery() string
@@ -62,7 +61,6 @@ type databaseDialect interface {
 type sqliteDialect struct{}
 
 func (sqliteDialect) backend() databaseBackend { return databaseBackendSQLite }
-func (sqliteDialect) bind(query string) string { return query }
 func (sqliteDialect) forUpdateSuffix() string  { return "" }
 func (sqliteDialect) schemaTypes() schemaTypes {
 	return schemaTypes{integer: "INTEGER", bigInteger: "INTEGER", blob: "BLOB", real: "REAL", autoID: "INTEGER PRIMARY KEY AUTOINCREMENT"}
@@ -108,10 +106,8 @@ func newDatabaseDialect(backend databaseBackend) databaseDialect {
 	return sqliteDialect{}
 }
 
-// selectForUpdateClause is deliberately backend-specific. SQLite uses the
-// Controller's single-writer connection and does not support PostgreSQL's row
-// lock syntax; PostgreSQL needs it for read/modify/write barriers such as the
-// two-sided assignment acknowledgement.
+// selectForUpdateClause is backend-specific. SQLite uses the Controller's
+// single-writer connection and does not support PostgreSQL row locks.
 func (s *databaseHandle) selectForUpdateClause() string {
 	if s == nil || s.dialect == nil {
 		return ""

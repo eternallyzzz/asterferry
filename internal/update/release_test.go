@@ -62,7 +62,7 @@ func TestStableVersionAndArchiveName(t *testing.T) {
 func TestLatestStableIgnoresPreReleases(t *testing.T) {
 	archiveName := ArchiveName("1.2.0", "linux", "amd64")
 	checksum := strings.Repeat("a", sha256.Size*2)
-	manifest := fmt.Sprintf(`{"schema_version":1,"version":"1.2.0","tag":"v1.2.0","commit":"abc123","protocol":"v3","artifacts":[{"name":"%s","sha256":"%s"}]}`, archiveName, checksum)
+	manifest := fmt.Sprintf(`{"schema_version":1,"version":"1.2.0","tag":"v1.2.0","commit":"abc123","protocol":"v1","artifacts":[{"name":"%s","sha256":"%s"}]}`, archiveName, checksum)
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {

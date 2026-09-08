@@ -163,6 +163,16 @@ func TestReplacementRecoveryStatesAreJournaled(t *testing.T) {
 	}
 }
 
+func TestReadReplacementResultRejectsUnsupportedSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replacement.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":2,"state":"waiting"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadReplacementResult(path); err == nil {
+		t.Fatal("replacement journal schema 2 was accepted")
+	}
+}
+
 func TestClassifyReplacementFiles(t *testing.T) {
 	root := t.TempDir()
 	binaryPath := filepath.Join(root, "binary")

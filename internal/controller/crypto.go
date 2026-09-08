@@ -107,26 +107,6 @@ func DecryptSecret(key, ciphertext []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func EncryptSecretString(key []byte, plaintext string) (string, error) {
-	b, err := EncryptSecret(key, []byte(plaintext))
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-func DecryptSecretString(key []byte, value string) (string, error) {
-	b, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return "", errors.New("secret is not valid base64")
-	}
-	plaintext, err := DecryptSecret(key, b)
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
-}
-
 func HashPassword(password string) (string, error) {
 	if len(password) < 12 {
 		return "", errors.New("password must contain at least 12 characters")
@@ -202,13 +182,4 @@ func NewAPIToken() (plain, digest string, err error) {
 func HashToken(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(digest[:])
-}
-
-func TokenEqual(digest, token string) bool {
-	left, err := hex.DecodeString(strings.TrimSpace(digest))
-	if err != nil || len(left) != sha256.Size {
-		return false
-	}
-	right := sha256.Sum256([]byte(token))
-	return subtle.ConstantTimeCompare(left, right[:]) == 1
 }

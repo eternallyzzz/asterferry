@@ -134,8 +134,6 @@ func (r *Runtime) DataPlane() *DataPlaneRuntime {
 	return r.dataPlane
 }
 
-func (r *Runtime) Reconciler() *Reconciler { return r.reconciler }
-
 func snapshotRuntimeKind(snapshot domain.DesiredSnapshot) (domain.NodeSpecKind, error) {
 	if snapshot.Gateway != nil && snapshot.Agent == nil {
 		return domain.NodeSpecGateway, nil
@@ -171,7 +169,7 @@ func (r *Runtime) ensureRuntimeKind(kind domain.NodeSpecKind) (*dataplane.Engine
 	}
 	// Do not leave closed components installed while constructing the
 	// replacement. A transient constructor or Start failure must be safe to
-	// retry instead of reusing a data plane that has already been closed.
+	// retry rather than reusing a data plane that has already been closed.
 	r.engine, r.dataPlane, r.runtimeKind = nil, nil, ""
 	engine, err := dataplane.New(dataplane.Options{Kind: kind, NodeID: r.bootstrap.NodeID, MaxStreams: r.runtimeOpts.MaxStreams, MaxSessions: r.runtimeOpts.MaxSessions})
 	if err != nil {

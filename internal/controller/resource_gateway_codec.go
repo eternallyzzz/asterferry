@@ -10,7 +10,7 @@ import (
 
 // GatewaySpec is a normalized aggregate: the scalar row is accompanied by
 // ordered endpoint/listener/range/value tables. Loading and replacing the
-// complete aggregate stays in this file so its table-count and ordering
+// complete aggregate stays in one codec so its table-count and ordering
 // invariants are reviewed together.
 func loadGatewaySpecNormalized(ctx context.Context, q sqlQueryer, nodeID string, revision int64) (domain.GatewaySpec, error) {
 	var spec domain.GatewaySpec

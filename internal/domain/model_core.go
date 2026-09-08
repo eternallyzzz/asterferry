@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	DataALPN = "asterferry-data/2"
+	DataALPN = "asterferry-data/1"
 
 	CertificateActive  = "active"
 	CertificateRevoked = "revoked"
@@ -34,9 +34,8 @@ const (
 // ID is immutable once a node has enrolled.
 type Node struct {
 	ID string `json:"id"`
-	// SpecKind is a read-only projection used by list/detail clients. It is
-	// derived from node_specs and is intentionally not accepted as Node
-	// identity input.
+	// SpecKind is a read-only projection from node_specs. It is not accepted as
+	// Node identity input.
 	SpecKind          NodeSpecKind      `json:"spec_kind,omitempty"`
 	Name              string            `json:"name"`
 	Labels            map[string]string `json:"labels,omitempty"`
@@ -97,9 +96,8 @@ const (
 	NodeSpecAgent   NodeSpecKind = "agent"
 )
 
-// NodeSpec is the single persisted configuration envelope for a node. The
-// typed GatewaySpec and AgentSpec documents remain deliberately explicit so
-// their validation and snapshot shapes do not become a weak map[string]any.
+// NodeSpec is the persisted configuration envelope for a Node. GatewaySpec
+// and AgentSpec remain separate typed documents.
 type NodeSpec struct {
 	NodeID    string       `json:"node_id"`
 	Kind      NodeSpecKind `json:"kind"`
@@ -308,12 +306,9 @@ type AgentLimits struct {
 	MaxBufferBytes int `json:"max_buffer_bytes"`
 }
 
-// EgressPolicy is the typed, node-scoped outbound policy used by Agent data
-// paths. Port ranges intentionally stay textual (for example "443" or
-// "8000-8080") at the API boundary so the Controller can preserve the
-// operator's declarative document; validation compiles their syntax before a
-// snapshot is accepted. When Enabled is false, outbound dialing is direct and
-// unrestricted by this policy.
+// EgressPolicy is the node-scoped outbound policy used by Agent data paths.
+// Port ranges remain strings at the API boundary and are compiled during
+// validation. Disabled policies allow direct outbound dialing.
 type EgressPolicy struct {
 	Enabled           bool     `json:"enabled"`
 	TCPPorts          []string `json:"tcp_ports,omitempty"`
@@ -499,10 +494,8 @@ type ListenerState struct {
 	Ready    bool   `json:"ready"`
 }
 
-// SystemInfo is the latest host snapshot reported by a Node. Static identity
-// fields and dynamic resource fields intentionally live together because the
-// Controller only needs the latest point-in-time view; historical samples
-// belong in an external metrics system rather than the resource database.
+// SystemInfo is the latest host snapshot reported by a Node. Historical
+// samples belong in an external metrics system.
 type SystemInfo struct {
 	Hostname             string    `json:"hostname,omitempty"`
 	OS                   string    `json:"os,omitempty"`

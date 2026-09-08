@@ -47,7 +47,7 @@ func TestVersionUsesWireGenerationString(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "AFDP/2") || strings.Contains(out.String(), "protocol: v6") {
+	if !strings.Contains(out.String(), "AFDP/1") || strings.Contains(out.String(), "protocol: v6") {
 		t.Fatalf("unexpected version output: %s", out.String())
 	}
 }

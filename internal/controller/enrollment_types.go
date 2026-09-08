@@ -5,9 +5,8 @@ import (
 )
 
 const (
-	EnrollmentTTL           = 15 * time.Minute
-	NodeCertificateTTL      = 30 * 24 * time.Hour
-	CertificateRotateBefore = 7 * 24 * time.Hour
+	EnrollmentTTL      = 15 * time.Minute
+	NodeCertificateTTL = 30 * 24 * time.Hour
 )
 
 type EnrollmentToken struct {

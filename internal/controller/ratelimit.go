@@ -109,7 +109,7 @@ func (l *loginLimiter) clock() time.Time {
 	return l.now().UTC()
 }
 
-// purgeSomeLocked deliberately bounds work performed while holding the
+// purgeSomeLocked bounds work performed while holding the
 // limiter mutex. Both the IP and username dimensions are request-derived, so
 // an attacker can otherwise force every login attempt to scan all 10,000
 // buckets before the actual rate-limit decision.

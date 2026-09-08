@@ -232,7 +232,7 @@ func TestPreparedControllerReplacementReconcilesDiskState(t *testing.T) {
 		omitIdentities bool
 	}{
 		{
-			name:      "target installed while journal is prepared",
+			name:      "rename completed before journal transition",
 			wantState: UpdateStateUpToDate,
 			setup: func(t *testing.T, binaryPath, stagedPath, backupPath string) {
 				t.Helper()
@@ -262,7 +262,7 @@ func TestPreparedControllerReplacementReconcilesDiskState(t *testing.T) {
 			},
 		},
 		{
-			name:           "legacy journal does not bypass reconciliation",
+			name:           "journal without file identities does not bypass reconciliation",
 			wantState:      UpdateStateManualRequired,
 			wantBackup:     true,
 			wantStaged:     true,
@@ -303,7 +303,6 @@ func TestPreparedControllerReplacementReconcilesDiskState(t *testing.T) {
 				TargetSHA256:   controllerRecoverySHA256([]byte("target")),
 			}
 			if test.omitIdentities {
-				result.SchemaVersion = 1
 				result.OriginalSHA256 = ""
 				result.TargetSHA256 = ""
 			}

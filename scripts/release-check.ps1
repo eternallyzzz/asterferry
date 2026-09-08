@@ -136,8 +136,8 @@ $ldflags = "-s -w -X asterferry/internal/buildinfo.Version=$Version -X asterferr
 $binaryPath = Join-Path $output "asterferry.exe"
 Invoke-Checked "Windows amd64 binary" "go" @("build", "-tags=dashboard_assets", "-trimpath", "-ldflags=$ldflags", "-o", $binaryPath, "./cmd/asterferry")
 $versionOutput = (& $binaryPath version | Out-String)
-if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: AFDP/2 \+ control/3") {
-	throw "Release binary did not report version $Version and AFDP/2: $versionOutput"
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "asterferry $Version" -or $versionOutput -notmatch "protocol: AFDP/1 \+ control/1") {
+	throw "Release binary did not report version $Version and AFDP/1: $versionOutput"
 }
 
 $helmImageArgs = @("--set", "image.repository=asterferry", "--set", "image.tag=$Version")
@@ -200,11 +200,11 @@ if (-not $SkipDocker) {
 
 $report = [ordered]@{
     version = $Version
-    protocol = "AFDP/2 + control/3"
+    protocol = "AFDP/1 + control/1"
     windows_binary = $binaryPath
     native_only = $true
     helm_validated = $true
     docker_checked = (-not $SkipDocker)
 }
 $report | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $output "report.json")
-Write-Host "Release preflight passed for $Version (AFDP/2 + control/3)"
+Write-Host "Release preflight passed for $Version (AFDP/1 + control/1)"

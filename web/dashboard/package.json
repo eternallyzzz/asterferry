@@ -1,7 +1,7 @@
 {
   "name": "asterferry-dashboard",
   "private": true,
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
   "engines": {
     "node": ">=22 <25",

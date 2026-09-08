@@ -23,9 +23,8 @@ const (
 	maxDatabasePoolSize     = 256
 )
 
-// Config is intentionally small: business state belongs in the configured
-// Controller database and is never read from a node YAML file. SQLite remains
-// the zero-dependency default; PostgreSQL is the production-scale backend.
+// Config contains process and database settings. Business state belongs in the
+// Controller database, not in a node YAML file.
 type Config struct {
 	HTTPListen           string `json:"http_listen"`
 	MetricsListen        string `json:"metrics_listen"`
@@ -37,7 +36,7 @@ type Config struct {
 	DatabaseURL          string `json:"database_url,omitempty"`
 	DatabaseMaxOpenConns int    `json:"database_max_open_conns,omitempty"`
 	// HighAvailability enables PostgreSQL-backed active/standby leadership.
-	// SQLite remains intentionally limited to one Controller process.
+	// SQLite supports one Controller process.
 	HighAvailability bool   `json:"high_availability,omitempty"`
 	CAKeyPath        string `json:"ca_key_path"`
 	CACertPath       string `json:"ca_cert_path"`
@@ -56,7 +55,7 @@ type Config struct {
 	UpdateCheckEnabled         bool  `json:"update_check_enabled"`
 	UpdateCheckIntervalSeconds int64 `json:"update_check_interval_seconds"`
 	// ServiceMode is process-local deployment provenance supplied by the run
-	// command. It is intentionally not persisted in controller.json.
+	// command. It is not persisted in controller.json.
 	ServiceMode string `json:"-"`
 	// ServiceName and ProcessArgs are process-local restart metadata used by
 	// the self-updater. They are populated by the CLI and never persisted.

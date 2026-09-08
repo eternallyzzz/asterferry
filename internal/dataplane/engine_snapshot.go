@@ -41,9 +41,8 @@ func (e *Engine) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnaps
 	rollback := previous != nil && snapshot.Generation < previous.Generation && currentGeneration == previous.Generation
 	// A same-generation snapshot is normally an exact replay, but the
 	// Controller also uses it to repair a node whose cache has diverged.  The
-	// caller must provide the previous snapshot so a random direct call cannot
-	// bypass the monotonic-generation gate; checksum equality is deliberately
-	// not required here because the new snapshot is authoritative.
+	// caller must provide the previous snapshot to pass the monotonic-generation
+	// gate. Checksum equality is not required for an authoritative repair.
 	sameGeneration := previous != nil && snapshot.Generation == currentGeneration && previous.Generation == snapshot.Generation
 	if !rollback && !sameGeneration && snapshot.Generation <= currentGeneration {
 		return errors.New("snapshot generation is stale")
@@ -127,9 +126,8 @@ func (e *Engine) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnaps
 	e.assignments, e.services, e.generation = assignments, services, snapshot.Generation
 	e.epoch++
 	// Active counts are generation-scoped. Existing streams retain the
-	// aggregate reservation until their lease closes, but a replacement
-	// assignment must not inherit the old generation's per-assignment count;
-	// stale leases are intentionally prevented from decrementing this map.
+	// Aggregate reservations survive until their leases close. Stale leases
+	// cannot decrement the new generation's per-assignment map.
 	e.active = make(map[string]int, len(assignments))
 	e.gatewaySpec, e.agentSpec = gatewaySpec, agentSpec
 	e.maxStreams = e.baseMaxStreams
@@ -156,19 +154,8 @@ func (e *Engine) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnaps
 	return nil
 }
 
-// ResetSnapshot removes a generation that was installed speculatively but
-// could not be activated by a sibling data-plane component.  The node
-// reconciler uses this only when applying the very first snapshot: there is
-// no previous desired document to pass through ApplySnapshot's normal
-// rollback path, so leaving the engine index installed would allow a failed
-// listener build to admit streams for a generation that is not actually
-// serving traffic.
-//
-// expectedGeneration makes the operation compare-and-swap-like.  A caller
-// racing a later successful apply cannot accidentally clear that newer
-// generation.  Existing counters are intentionally retained; any in-flight
-// reservation belongs to the failed generation and will release through its
-// normal close path, while the empty index rejects new admissions.
+// ResetSnapshot removes a speculatively installed generation that failed to
+// activate. expectedGeneration prevents clearing a newer generation.
 func (e *Engine) ResetSnapshot(expectedGeneration uint64) error {
 	if e == nil {
 		return errors.New("data-plane engine is nil")

@@ -1,8 +1,8 @@
 package node
 
-// This file is the process-level bridge between an applied node snapshot and
-// the Controller-independent AFDP/2 data-plane adapters.  It intentionally
-// contains no REST, SQLite, YAML or Controller imports: the only inputs are a
+// DataPlaneRuntime bridges an applied node snapshot and the
+// Controller-independent AFDP/1 data-plane adapters. It contains no REST,
+// SQLite, YAML or Controller imports: the only inputs are a
 // bootstrap identity, an Engine and a typed DesiredSnapshot.
 
 import (
@@ -106,8 +106,6 @@ func NewDataPlaneRuntime(options DataPlaneOptions) (*DataPlaneRuntime, error) {
 		clientTLS:     afdp.ClientTLSConfigFromPEM(certificate, pool, ""),
 	}, nil
 }
-
-func (d *DataPlaneRuntime) Engine() *dataplane.Engine { return d.engine }
 
 // ObservedState returns a point-in-time summary of listeners, sessions and
 // counters owned by the active generation. The boolean is false until a
@@ -295,8 +293,8 @@ func (d *DataPlaneRuntime) Start(ctx context.Context) error {
 }
 
 // ApplySnapshot installs listeners/sessions for an already validated engine
-// generation. Before Start it merely records the cached snapshot; this keeps
-// NewRuntime safe to construct without opening sockets during initialization.
+// generation. Before Start it records the cached snapshot without opening
+// sockets during initialization.
 func (d *DataPlaneRuntime) ApplySnapshot(ctx context.Context, snapshot domain.DesiredSnapshot, previous *domain.DesiredSnapshot) error {
 	if d == nil || d.engine == nil {
 		return errors.New("data-plane runtime is not initialized")
@@ -331,9 +329,8 @@ func (d *DataPlaneRuntime) applyStarted(operationCtx context.Context, snapshot d
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 	// Keep admission closed while listener ownership and the authenticated
-	// session index move together. Preserve an existing security drain (for
-	// example, certificate revocation) instead of reopening it merely because
-	// a certificate or listener rebuild happened to succeed.
+	// session index move together. Preserve an existing security drain, such as
+	// certificate revocation, after a successful certificate or listener rebuild.
 	wasDraining := d.engine.IsDraining()
 	d.engine.BeginDrain()
 	admissionRestored := false
@@ -415,7 +412,7 @@ func (d *DataPlaneRuntime) Close() error {
 // CloseSessions tears down only the authenticated AFDP sessions and their
 // flow state, leaving locally bound listeners in place.  It is used for an
 // explicit Controller reconnect/revocation action: ordinary Controller
-// outages deliberately do not call this method, so the last applied data
+// outages do not call this method, so the last applied data
 // plane keeps carrying existing traffic while the control stream retries.
 func (d *DataPlaneRuntime) CloseSessions() {
 	if d == nil {
@@ -431,7 +428,7 @@ func (d *DataPlaneRuntime) CloseSessions() {
 }
 
 // ResetSnapshot removes a generation that was activated before its durable
-// cache publication failed. It intentionally keeps the runtime started (and
+// cache publication failed. It keeps the runtime started (and
 // its parent context alive) so the next control snapshot can be retried; only
 // the generation-owned listeners, sessions and flows are torn down.
 func (d *DataPlaneRuntime) ResetSnapshot(expectedGeneration uint64) error {
@@ -509,7 +506,7 @@ func (d *DataPlaneRuntime) buildGeneration(parent context.Context, snapshot doma
 }
 
 // RuntimeSnapshot is the read-only metadata snapshot sent over the optional
-// runtime-telemetry capability.  It intentionally does not expose payloads or
+// runtime-telemetry capability. It does not expose payloads or
 // packet contents.
 func (d *DataPlaneRuntime) RuntimeSnapshot() (domain.RuntimeSnapshot, bool) {
 	if d == nil || d.engine == nil || d.telemetry == nil {
@@ -522,13 +519,6 @@ func (d *DataPlaneRuntime) RuntimeSnapshot() (domain.RuntimeSnapshot, bool) {
 		return domain.RuntimeSnapshot{}, false
 	}
 	return d.telemetry.snapshot(d.engine.NodeID()), true
-}
-
-func (d *DataPlaneRuntime) DrainRuntimeEvents(max int) []domain.RuntimeEvent {
-	if d == nil || d.telemetry == nil {
-		return nil
-	}
-	return d.telemetry.drainEvents(max)
 }
 
 func (d *DataPlaneRuntime) PeekRuntimeEvents(max int) []domain.RuntimeEvent {

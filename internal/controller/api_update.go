@@ -233,8 +233,8 @@ func (s *Server) requestNodeUpgrade(w http.ResponseWriter, r *http.Request, node
 		return
 	} else {
 		// The Node may have downloaded, restarted and reported its terminal
-		// state before the HTTP request got here. Preserve that result in the
-		// response instead of reporting a stale applying state.
+		// state before the HTTP request got here. Preserve that result rather
+		// than reporting a stale applying state.
 		if isTerminalNodeUpdateState(saved.State) && saved.ActionID == actionID {
 			status = NodeUpdateStatus{SchemaVersion: saved.SchemaVersion, NodeID: nodeID, ActionID: saved.ActionID, CurrentVersion: saved.CurrentVersion, TargetVersion: saved.TargetVersion, State: saved.State, Supported: saved.Supported, Deployment: saved.Deployment, Reason: saved.Reason, LastError: saved.LastError, UpdatedAt: saved.UpdatedAt, LatestVersion: release.Version}
 			writeJSON(w, http.StatusAccepted, map[string]any{"node_id": nodeID, "action": "upgrade", "requested_by": user.Username, "state": "delivered", "status": status})

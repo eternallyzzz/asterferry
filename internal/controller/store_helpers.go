@@ -36,8 +36,8 @@ func requireRevisionWrite(ctx context.Context, tx *sql.Tx, result sql.Result, re
 }
 
 // RecordEvent persists a node-originated event in the same audit stream used
-// by API writes. Event payloads are intentionally bounded and stored as
-// attributes rather than allowing arbitrary SQL-visible columns.
+// by API writes. Event payloads are bounded and stored as attributes, not as
+// arbitrary SQL-visible columns.
 func (s *ResourceRepository) RecordEvent(ctx context.Context, actor, eventID, eventType, message, resourceID string, attributes map[string]string) error {
 	eventID = strings.TrimSpace(eventID)
 	eventType = strings.TrimSpace(eventType)
@@ -110,7 +110,7 @@ func getUserTx(ctx context.Context, tx *sql.Tx, field, value string) (User, erro
 }
 
 /*
-The public User model deliberately does not expose PasswordChangedAt. Password
+The public User model does not expose PasswordChangedAt. Password
 changes revoke the durable web_sessions and API-token rows in the same
 transaction, while the controller keeps the timestamp on authenticated copies
 for audit and authorization semantics.
