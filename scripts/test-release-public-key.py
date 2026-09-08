@@ -15,9 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts/check-release-public-key.py"
 FINGERPRINT_ENV = "ASTERFERRY_RELEASE_PUBLIC_KEY_SHA256"
 PLACEHOLDER_FINGERPRINT = "d45bc1981a2225280679a45f7266d60c074c113db69c0545b1f8554c25e67fc3"
-VALID_FINGERPRINT = "9872445b8c94d7db3d43614b3f9276d5119c94b1d1813ffc8fe6e73f43f210fd"
+VALID_FINGERPRINT = "82800937da1fe34993a6039d887e62db68bf0b79a7ee4be99bb3fdfd278df9f1"
 VALID_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAED7dMsC2ApU9RGZbPJnVf9iMXCYMkkCHTVGE+V9tQfzJwJsHYoeL+RggeMA0l5KCQClm4Dzu3pW6pm6r1y/iViQ==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFaPyP3FE3dts3cxteSmYDX84NumK
+fyaVClviqMpdtUdnE9m29MHErT4V1Evbt24sUQMjKrQ4v8gZW8Q0QwX53A==
+-----END PUBLIC KEY-----
+"""
+PLACEHOLDER_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvJi2aRzFPiRWjFA8E3RCELGYthKw
+DZKtlXDNrJkVClCUDkG8m+oN/4qj/qfRmjoCmfDf3XLj02He6sBpQac4Nw==
 -----END PUBLIC KEY-----
 """
 
@@ -44,6 +50,10 @@ def main() -> int:
         if accepted.returncode != 0:
             raise SystemExit(f"valid P-256 key was rejected: {accepted.stderr.strip()}")
 
+        embedded = run_checker(ROOT / "internal/update/release-public-key.pem", VALID_FINGERPRINT)
+        if embedded.returncode != 0:
+            raise SystemExit(f"embedded production key was rejected: {embedded.stderr.strip()}")
+
         mismatch = run_checker(valid, "0" * 64)
         if mismatch.returncode == 0 or "does not match" not in mismatch.stderr:
             raise SystemExit("fingerprint mismatch was not rejected")
@@ -54,7 +64,8 @@ def main() -> int:
         if invalid.returncode == 0:
             raise SystemExit("malformed public key was accepted")
 
-        non_p256_der = base64.b64decode(VALID_PUBLIC_KEY.splitlines()[1])
+        valid_der_text = "".join(VALID_PUBLIC_KEY.splitlines()[1:-1])
+        non_p256_der = base64.b64decode(valid_der_text)
         non_p256_der = non_p256_der.replace(bytes.fromhex("2a8648ce3d030107"), bytes.fromhex("2a8648ce3d030108"), 1)
         non_p256 = root / "non-p256.pem"
         non_p256.write_text(
@@ -67,7 +78,9 @@ def main() -> int:
         if unsupported.returncode == 0 or "ECDSA P-256" not in unsupported.stderr:
             raise SystemExit("non-P-256 public key was accepted")
 
-        placeholder = run_checker(ROOT / "internal/update/release-public-key.pem", PLACEHOLDER_FINGERPRINT)
+        placeholder_key = root / "placeholder.pem"
+        placeholder_key.write_text(PLACEHOLDER_PUBLIC_KEY, encoding="ascii")
+        placeholder = run_checker(placeholder_key, PLACEHOLDER_FINGERPRINT)
         if placeholder.returncode == 0 or "development placeholder" not in placeholder.stderr:
             raise SystemExit("development placeholder key was accepted")
 
